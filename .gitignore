@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Generated local artifacts
+data/
+downloads/
+outputs/
+
+# OS/editor noise
+.DS_Store
+*.swp
