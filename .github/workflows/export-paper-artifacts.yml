@@ -1,0 +1,76 @@
+name: Export paper artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_mevdt:
+        description: "Run MEVDT stages on the self-hosted runner"
+        required: true
+        default: false
+        type: boolean
+      dataset_root:
+        description: "Absolute path to the MEVDT extraction root on the runner"
+        required: false
+        default: ""
+        type: string
+      max_windows:
+        description: "Maximum MEVDT label windows to evaluate"
+        required: true
+        default: "500"
+        type: string
+      output_artifact_name:
+        description: "GitHub Actions artifact name"
+        required: true
+        default: "dvs-enact-paper-artifacts"
+        type: string
+
+jobs:
+  export:
+    name: Export canonical paper artifacts
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 240
+
+    steps:
+      - name: Check out DVS-ENACT
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run artifact export
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          args=(
+            --output-root "${GITHUB_WORKSPACE}/paper-output"
+            --max-windows "${{ inputs.max_windows }}"
+          )
+
+          if [[ "${{ inputs.include_mevdt }}" == "true" ]]; then
+            if [[ -z "${{ inputs.dataset_root }}" ]]; then
+              echo "::error::dataset_root must be set when include_mevdt is true"
+              exit 1
+            fi
+            args+=(--dataset-root "${{ inputs.dataset_root }}")
+          fi
+
+          python scripts/export_paper_artifacts.py "${args[@]}"
+
+      - name: Upload paper artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.output_artifact_name }}
+          path: |
+            paper-output/data/paper_evidence
+            paper-output/figures
+          if-no-files-found: error
+          retention-days: 30
