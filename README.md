@@ -38,18 +38,32 @@ Dataset page: <https://deepblue.lib.umich.edu/data/concern/data_sets/bc386k045>
 DOI: <https://doi.org/10.7302/d5k3-9150>
 
 Download and extract `MEVDT.zip` outside git, for example into
-`data/raw/MEVDT`. The repository ignores `data/` and `downloads/`.
+`D:\Uni-Data\MEVDT-one-sequence` for a single-sequence probe or a full
+`D:\Uni-Data\MEVDT` extraction. The repository ignores `data/`, `downloads/`,
+and `outputs/`.
+
+For a compact first probe from the archive:
+
+```powershell
+New-Item -ItemType Directory -Force -Path D:\Uni-Data\MEVDT-one-sequence
+tar -xf D:\Uni-Data\MEVDT.zip -C D:\Uni-Data\MEVDT-one-sequence `
+  sequences/test/Scene_A/1581956422501835936/1581956422501835936_events.csv `
+  labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-coco.json `
+  labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-custom24.txt `
+  labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-mot24.txt
+```
 
 ```powershell
 $env:PYTHONPATH = "src;../PyRecEst/src"
-python scripts/run_mevdt_support_diagnostics.py --dataset-root data/raw/MEVDT
+python scripts/run_mevdt_support_diagnostics.py --dataset-root D:\Uni-Data\MEVDT-one-sequence
 ```
 
 The diagnostic uses labels/tracks for object association and rough bounding-box
 extent. It measures whether events inside each track box concentrate on motion-
 active side bands and whether the event cloud collapses relative to the labeled
-box. MEVDT boxes are treated as rough validation signals, not precise contour
-ground truth.
+box. It currently uses sequence-long `*_events.csv` files rather than the
+pre-windowed `.aedat` samples. MEVDT boxes are treated as rough validation
+signals, not precise contour ground truth.
 
 ## Development
 

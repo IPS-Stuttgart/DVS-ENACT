@@ -26,6 +26,7 @@ from .mevdt import (
     read_event_csv,
     read_tracking_labels,
     summarize_diagnostics,
+    summarize_loaded_sequence,
 )
 from .trackers import DVSFullSCGPTracker, DVSSCGPTracker
 
@@ -50,6 +51,7 @@ __all__ = [
     "rectangle_contour_samples",
     "simulate_rectangle_event_counts",
     "summarize_diagnostics",
+    "summarize_loaded_sequence",
     "summarize_edge_counts",
     "uniform_edge_probabilities",
     "unit_vector_from_angle",

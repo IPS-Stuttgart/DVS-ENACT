@@ -15,6 +15,7 @@ from dvs_enact import (
     read_event_csv,
     read_tracking_labels,
     summarize_diagnostics,
+    summarize_loaded_sequence,
 )
 
 
@@ -27,6 +28,13 @@ def _resolve_path(files: list[Path], requested: str | None, kind: str) -> Path:
     if not files:
         raise FileNotFoundError(f"No {kind} files found")
     return files[0]
+
+
+def _path_for_payload(path: Path, dataset_root: Path) -> str:
+    try:
+        return str(path.relative_to(dataset_root))
+    except ValueError:
+        return str(path)
 
 
 def run(
@@ -47,6 +55,7 @@ def run(
     if not labels:
         raise ValueError(f"No tracking labels parsed from {selected_label_file}")
     events = read_event_csv(selected_event_file, max_events=max_events)
+    parsed_sequence = summarize_loaded_sequence(labels, events)
     diagnostics = compute_bbox_event_diagnostics(
         labels,
         events,
@@ -61,14 +70,15 @@ def run(
             "url": MEVDT_DATASET_URL,
             "doi": MEVDT_DOI,
             "dataset_root": str(dataset_root),
-            "event_csv": str(selected_event_file),
-            "label_file": str(selected_label_file),
+            "event_csv": _path_for_payload(selected_event_file, dataset_root),
+            "label_file": _path_for_payload(selected_label_file, dataset_root),
         },
         "parameters": {
             "max_events": max_events,
             "band_fraction": band_fraction,
             "max_windows": max_windows,
         },
+        "parsed_sequence": parsed_sequence,
         "summary": summary,
         "diagnostics": [item.to_dict() for item in diagnostics],
     }

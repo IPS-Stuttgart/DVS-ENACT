@@ -10,6 +10,7 @@ from dvs_enact import (
     read_event_csv,
     read_tracking_labels,
     summarize_diagnostics,
+    summarize_loaded_sequence,
 )
 
 
@@ -73,6 +74,9 @@ def test_read_tracking_labels_supports_coco_json():
         "labels.json",
         json.dumps(
             {
+                "images": [
+                    {"id": 4, "file_name": "1581956422587969936.png"},
+                ],
                 "annotations": [
                     {
                         "image_id": 4,
@@ -91,6 +95,37 @@ def test_read_tracking_labels_supports_coco_json():
     assert labels[0].track_id == 9
     assert labels[0].x_max == 4.0
     assert labels[0].y_max == 6.0
+    assert labels[0].timestamp_ns == 1581956422587969936
+
+
+def test_read_tracking_labels_supports_mevdt_custom_rows():
+    label_file = _fixture_file(
+        "custom24.txt",
+        "1, 1581956422501835936\n"
+        "7, 1581956422760238936, 0, 236.5, 77.2, 3.4, 13.2\n",
+    )
+
+    labels = read_tracking_labels(label_file)
+
+    assert len(labels) == 1
+    assert labels[0].frame == 7
+    assert labels[0].timestamp_ns == 1581956422760238936
+    assert labels[0].track_id == 0
+    assert labels[0].x_min == 236.5
+    assert labels[0].x_max == 239.9
+
+
+def test_read_tracking_labels_supports_json_annotation_lists():
+    label_file = _fixture_file(
+        "labels_list.json",
+        json.dumps([{"image_id": 2, "track_id": 4, "bbox": [1, 2, 3, 4]}]),
+    )
+
+    labels = read_tracking_labels(label_file)
+
+    assert len(labels) == 1
+    assert labels[0].frame == 2
+    assert labels[0].track_id == 4
 
 
 def test_compute_bbox_event_diagnostics_reports_side_support():
@@ -116,6 +151,22 @@ def test_compute_bbox_event_diagnostics_reports_side_support():
     assert diagnostics[0].active_side_fraction > diagnostics[0].inactive_side_fraction
     assert summary["windows"] == 1
     assert summary["nonempty_windows"] == 1
+
+
+def test_summarize_loaded_sequence_reports_parse_counts():
+    labels = [
+        BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, 100),
+        BoundingBox(1, 1, 1.0, 0.0, 11.0, 10.0, 200),
+    ]
+    events = read_event_csv_from_text("100,1,1,1\n200,2,2,0\n")
+
+    summary = summarize_loaded_sequence(labels, events)
+
+    assert summary["event_count"] == 2
+    assert summary["event_time_span_ns"] == [100, 200]
+    assert summary["label_count"] == 2
+    assert summary["track_count"] == 1
+    assert summary["labels_with_timestamps"] == 2
 
 
 def read_event_csv_from_text(text):

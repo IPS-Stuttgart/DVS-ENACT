@@ -29,6 +29,12 @@ class EventBatch:
     def count(self) -> int:
         return int(self.ts.shape[0])
 
+    @property
+    def time_span_ns(self) -> tuple[int, int] | None:
+        if self.count == 0:
+            return None
+        return int(np.min(self.ts)), int(np.max(self.ts))
+
 
 @dataclass(frozen=True)
 class BoundingBox:
@@ -123,10 +129,20 @@ def find_tracking_label_files(dataset_root: str | Path) -> list[Path]:
 
 
 def _parse_float_token(token: str) -> float | None:
+    token = token.strip()
     try:
         return float(token)
     except ValueError:
         return None
+
+
+def _parse_int_token(token: str) -> int | None:
+    token = token.strip()
+    try:
+        return int(token)
+    except ValueError:
+        parsed = _parse_float_token(token)
+        return int(parsed) if parsed is not None else None
 
 
 def _split_row(line: str) -> list[str]:
@@ -150,11 +166,12 @@ def read_event_csv(
         for row in reader:
             if not row or len(row) < 4:
                 continue
-            parsed = [_parse_float_token(token.strip()) for token in row[:4]]
-            if any(value is None for value in parsed):
+            ts_int = _parse_int_token(row[0].strip())
+            x_value = _parse_float_token(row[1].strip())
+            y_value = _parse_float_token(row[2].strip())
+            polarity = _parse_float_token(row[3].strip())
+            if ts_int is None or x_value is None or y_value is None or polarity is None:
                 continue
-            ts, x_value, y_value, polarity = parsed
-            ts_int = int(ts)
             x_int = int(x_value)
             y_int = int(y_value)
             if start_ns is not None and ts_int < start_ns:
@@ -207,9 +224,9 @@ def _bbox_from_header_row(header: list[str], row: list[str], row_index: int) -> 
     timestamp_ns = None
     for name in ["timestamp_ns", "ts", "timestamp", "time"]:
         if name in values:
-            parsed = _parse_float_token(values[name])
+            parsed = _parse_int_token(values[name])
             if parsed is not None:
-                timestamp_ns = int(parsed)
+                timestamp_ns = parsed
                 break
     class_label = values.get("class") or values.get("class_label") or values.get("label")
     return BoundingBox(frame, track_id, x_min, y_min, x_max, y_max, timestamp_ns, class_label)
@@ -220,20 +237,58 @@ def _bbox_from_numeric_row(row: list[str], row_index: int) -> BoundingBox | None
     numeric = [value for value in parsed if value is not None]
     if len(numeric) < 6:
         return None
-    frame = int(numeric[0])
-    track_id = int(numeric[1])
-    x_min = float(numeric[2])
-    y_min = float(numeric[3])
-    width = float(numeric[4])
-    height = float(numeric[5])
+
+    # MEVDT custom tracking rows are
+    # frame,timestamp_ns,track_id,x_min,y_min,width,height.
+    timestamp_candidate = _parse_int_token(row[1]) if len(row) >= 2 else None
+    if len(numeric) >= 7 and timestamp_candidate is not None and timestamp_candidate > 1e12:
+        frame = int(numeric[0])
+        timestamp_ns = timestamp_candidate
+        track_id = int(numeric[2])
+        x_min = float(numeric[3])
+        y_min = float(numeric[4])
+        width = float(numeric[5])
+        height = float(numeric[6])
+    else:
+        frame = int(numeric[0])
+        timestamp_ns = None
+        track_id = int(numeric[1])
+        x_min = float(numeric[2])
+        y_min = float(numeric[3])
+        width = float(numeric[4])
+        height = float(numeric[5])
     x_max = x_min + width
     y_max = y_min + height
-    return BoundingBox(frame, track_id, x_min, y_min, x_max, y_max, None, None)
+    return BoundingBox(frame, track_id, x_min, y_min, x_max, y_max, timestamp_ns, None)
+
+
+def _timestamp_ns_from_image_record(image: dict) -> int | None:
+    for key in ("timestamp_ns", "timestamp", "ts"):
+        if key in image:
+            parsed = _parse_int_token(str(image[key]))
+            if parsed is not None:
+                return parsed
+    file_name = str(image.get("file_name", ""))
+    match = re.search(r"(\d{12,})", file_name)
+    return int(match.group(1)) if match else None
 
 
 def _read_json_tracking_labels(path: Path) -> list[BoundingBox]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    annotations = payload.get("annotations", payload if isinstance(payload, list) else [])
+    if isinstance(payload, dict):
+        image_records = payload.get("images", [])
+        annotations = payload.get("annotations", [])
+    elif isinstance(payload, list):
+        image_records = []
+        annotations = payload
+    else:
+        image_records = []
+        annotations = []
+    image_metadata = {
+        int(image["id"]): _timestamp_ns_from_image_record(image)
+        for image in image_records
+        if "id" in image
+    }
     labels = []
     for index, annotation in enumerate(annotations):
         bbox = annotation.get("bbox")
@@ -241,6 +296,9 @@ def _read_json_tracking_labels(path: Path) -> list[BoundingBox]:
             continue
         x_min, y_min, width, height = [float(value) for value in bbox[:4]]
         frame = int(annotation.get("frame_id", annotation.get("image_id", index)))
+        timestamp_ns = annotation.get("timestamp_ns")
+        if timestamp_ns is None:
+            timestamp_ns = image_metadata.get(frame)
         track_id = int(annotation.get("track_id", annotation.get("id", -1)))
         labels.append(
             BoundingBox(
@@ -250,7 +308,7 @@ def _read_json_tracking_labels(path: Path) -> list[BoundingBox]:
                 y_min=y_min,
                 x_max=x_min + width,
                 y_max=y_min + height,
-                timestamp_ns=annotation.get("timestamp_ns"),
+                timestamp_ns=int(timestamp_ns) if timestamp_ns is not None else None,
                 class_label=str(annotation.get("category_id"))
                 if "category_id" in annotation
                 else None,
@@ -436,4 +494,23 @@ def summarize_diagnostics(diagnostics: Iterable[TrackWindowDiagnostics]) -> dict
         "mean_event_bbox_area_ratio": mean_optional(
             [item.event_bbox_area_ratio for item in nonempty]
         ),
+    }
+
+
+def summarize_loaded_sequence(labels: Iterable[BoundingBox], events: EventBatch) -> dict:
+    """Summarize parsed MEVDT labels/events before computing support metrics."""
+    labels = list(labels)
+    label_timestamps = [
+        label.timestamp_ns for label in labels if label.timestamp_ns is not None
+    ]
+    event_time_span = events.time_span_ns
+    return {
+        "event_count": events.count,
+        "event_time_span_ns": list(event_time_span) if event_time_span is not None else None,
+        "label_count": len(labels),
+        "track_count": len({label.track_id for label in labels}),
+        "labels_with_timestamps": len(label_timestamps),
+        "label_time_span_ns": [min(label_timestamps), max(label_timestamps)]
+        if label_timestamps
+        else None,
     }
