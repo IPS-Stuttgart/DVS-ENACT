@@ -65,6 +65,17 @@ box. It currently uses sequence-long `*_events.csv` files rather than the
 pre-windowed `.aedat` samples. MEVDT boxes are treated as rough validation
 signals, not precise contour ground truth.
 
+The first label-assisted tracker comparison uses the same extracted sequence:
+
+```powershell
+$env:PYTHONPATH = "src;../PyRecEst/src"
+python scripts/run_mevdt_tracker_comparison.py --dataset-root D:\Uni-Data\MEVDT-one-sequence
+```
+
+This compares vanilla PyRecEst `FullSCGPTracker` with `DVSFullSCGPTracker` on
+the same label-cropped event windows. It is a stress test of extent stability,
+not an autonomous tracking benchmark.
+
 ## Development
 
 ```powershell
