@@ -27,6 +27,20 @@ keeps inactive boundaries from being interpreted as missing shape evidence.
 - `scripts`: repeatable evaluation scripts.
 - `tests`: focused unit tests for the DVS-specific modeling assumptions.
 
+## Synthetic Tracker Benchmark
+
+The controlled tracker-level benchmark generates a moving rectangle with known
+ground-truth extent and normal-flow contour events.
+
+```powershell
+$env:PYTHONPATH = "src;../PyRecEst/src"
+python scripts/run_synthetic_tracker_comparison.py
+```
+
+It compares vanilla PyRecEst `FullSCGPTracker` with `DVSFullSCGPTracker` on
+side-pair and one-sided synthetic event support before moving back to noisier
+real-data validation.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
