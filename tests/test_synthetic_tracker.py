@@ -98,7 +98,14 @@ def test_run_synthetic_tracker_benchmark_returns_window_metrics():
     assert scenario["summary"]["windows_considered"] == 2
     assert scenario["summary"]["windows_evaluated"] == 2
     assert "constant_position" in scenario["summary"]
+    assert "event_cloud_centroid" in scenario["summary"]
+    assert "event_cloud_centroid_minus_constant_position" in scenario["summary"]
     assert "dvs_enact_minus_constant_position" in scenario["summary"]
+    assert "dvs_enact_minus_event_cloud_centroid" in scenario["summary"]
     constant_metrics = scenario["windows"][0]["constant_position"]["metrics"]
     assert "inactive_axis_ratio" in constant_metrics
+    event_cloud = scenario["windows"][0]["event_cloud_centroid"]
+    assert event_cloud["metadata"]["center_source"] == "event_cloud_centroid"
+    assert event_cloud["metadata"]["fallback_reason"] is None
+    assert "inactive_axis_ratio" in event_cloud["metrics"]
     assert "inactive_axis_ratio" in scenario["windows"][0]["baseline"]["metrics"]
