@@ -32,6 +32,8 @@ class TrackerComparisonConfig:
     max_events_per_window: int = 64
     min_events_per_window: int = 3
     max_windows: int | None = 500
+    event_cloud_min_extent_fraction: float = 0.25
+    event_cloud_min_extent_px: float = 2.0
     event_activity_floor: float = 0.05
     inactive_activity_threshold: float = 0.05
     collapse_threshold: float = 0.75
@@ -144,6 +146,118 @@ def bbox_to_dict(bbox: BoundingBox) -> dict[str, float]:
     }
 
 
+def _bbox_from_center_extent(
+    center_x: float,
+    center_y: float,
+    width: float,
+    height: float,
+) -> dict[str, float]:
+    width = max(float(width), 0.0)
+    height = max(float(height), 0.0)
+    return {
+        "x_min": float(center_x - 0.5 * width),
+        "y_min": float(center_y - 0.5 * height),
+        "x_max": float(center_x + 0.5 * width),
+        "y_max": float(center_y + 0.5 * height),
+        "width": width,
+        "height": height,
+        "area": width * height,
+        "center_x": float(center_x),
+        "center_y": float(center_y),
+    }
+
+
+def event_cloud_centroid_bbox(
+    events: EventBatch,
+    reference_bbox: BoundingBox | dict[str, float],
+    *,
+    min_extent_fraction: float = 0.25,
+    min_extent_px: float = 2.0,
+    min_event_count: int = 1,
+) -> tuple[dict[str, float], dict]:
+    """Estimate a heuristic event-cloud bbox from current-window events.
+
+    The center is the event-coordinate centroid. The extent is the event-cloud
+    span with conservative lower bounds from the current label extent. This is a
+    deterministic label-window heuristic, not an autonomous learned tracker.
+    """
+    if min_extent_fraction < 0.0:
+        raise ValueError("min_extent_fraction must be non-negative")
+    if min_extent_px < 0.0:
+        raise ValueError("min_extent_px must be non-negative")
+    if min_event_count <= 0:
+        raise ValueError("min_event_count must be positive")
+
+    reference = _bbox_parts(reference_bbox)
+    xs = events.x.astype(float)
+    ys = events.y.astype(float)
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    xs = xs[finite]
+    ys = ys[finite]
+    finite_event_count = int(xs.size)
+    fallback = {
+        "center_source": "reference_bbox",
+        "extent_source": "reference_bbox",
+        "fallback_reason": "low_event_count",
+        "event_count": int(events.count),
+        "finite_event_count": finite_event_count,
+        "raw_event_width": None,
+        "raw_event_height": None,
+        "min_width": None,
+        "min_height": None,
+    }
+    if events.count < min_event_count:
+        return dict(reference), fallback
+
+    if finite_event_count < min_event_count:
+        fallback["fallback_reason"] = "low_finite_event_count"
+        return dict(reference), fallback
+
+    raw_width = float(np.max(xs) - np.min(xs))
+    raw_height = float(np.max(ys) - np.min(ys))
+    reference_width = max(float(reference["width"]), 0.0)
+    reference_height = max(float(reference["height"]), 0.0)
+    min_width = max(
+        min_extent_px,
+        min_extent_fraction * reference_width,
+    )
+    min_height = max(
+        min_extent_px,
+        min_extent_fraction * reference_height,
+    )
+    if reference_width > 0.0:
+        min_width = min(min_width, reference_width)
+    if reference_height > 0.0:
+        min_height = min(min_height, reference_height)
+
+    width = max(raw_width, min_width)
+    height = max(raw_height, min_height)
+    if reference_width > 0.0:
+        width = min(width, reference_width)
+    if reference_height > 0.0:
+        height = min(height, reference_height)
+
+    return (
+        _bbox_from_center_extent(
+            float(np.mean(xs)),
+            float(np.mean(ys)),
+            width,
+            height,
+        ),
+        {
+            "center_source": "event_cloud_centroid",
+            "extent_source": "event_cloud_span_with_reference_minimum",
+            "fallback_reason": None,
+            "event_count": int(events.count),
+            "finite_event_count": finite_event_count,
+            "raw_event_width": raw_width,
+            "raw_event_height": raw_height,
+            "min_width": float(min_width),
+            "min_height": float(min_height),
+        },
+    )
+
+
 def estimated_tracker_bbox(tracker, n: int = 128) -> dict[str, float]:
     """Return a tracker contour bounding box in the same xyxy shape as labels."""
     estimate = tracker.get_bounding_box(n=n)
@@ -151,17 +265,7 @@ def estimated_tracker_bbox(tracker, n: int = 128) -> dict[str, float]:
     dimension = np.asarray(estimate["dimension"], dtype=float)
     width = max(float(dimension[0]), 0.0)
     height = max(float(dimension[1]), 0.0)
-    return {
-        "x_min": float(center[0] - 0.5 * width),
-        "y_min": float(center[1] - 0.5 * height),
-        "x_max": float(center[0] + 0.5 * width),
-        "y_max": float(center[1] + 0.5 * height),
-        "width": width,
-        "height": height,
-        "area": width * height,
-        "center_x": float(center[0]),
-        "center_y": float(center[1]),
-    }
+    return _bbox_from_center_extent(center[0], center[1], width, height)
 
 
 def _bbox_parts(bbox: BoundingBox | dict[str, float]) -> dict[str, float]:
@@ -304,6 +408,24 @@ def _aggregate_tracker_metrics(windows: list[dict], tracker_key: str) -> dict:
     }
 
 
+def _tracker_metric_delta(value: dict, reference: dict) -> dict:
+    return {
+        "mean_bbox_iou": _optional_delta(
+            value["mean_bbox_iou"],
+            reference["mean_bbox_iou"],
+        ),
+        "mean_center_error_px": _optional_delta(
+            value["mean_center_error_px"],
+            reference["mean_center_error_px"],
+        ),
+        "mean_inactive_axis_ratio": _optional_delta(
+            value["mean_inactive_axis_ratio"],
+            reference["mean_inactive_axis_ratio"],
+        ),
+        "collapse_count": value["collapse_count"] - reference["collapse_count"],
+    }
+
+
 def _summarize_comparison(
     windows: list[dict],
     windows_considered: int,
@@ -311,6 +433,7 @@ def _summarize_comparison(
     skipped_missing_timestamp_windows: int,
 ) -> dict:
     constant_position = _aggregate_tracker_metrics(windows, "constant_position")
+    event_cloud_centroid = _aggregate_tracker_metrics(windows, "event_cloud_centroid")
     baseline = _aggregate_tracker_metrics(windows, "baseline")
     dvs_enact = _aggregate_tracker_metrics(windows, "dvs_enact")
     return {
@@ -319,53 +442,30 @@ def _summarize_comparison(
         "skipped_low_event_windows": int(skipped_low_event_windows),
         "skipped_missing_timestamp_windows": int(skipped_missing_timestamp_windows),
         "constant_position": constant_position,
+        "event_cloud_centroid": event_cloud_centroid,
         "baseline": baseline,
         "dvs_enact": dvs_enact,
-        "baseline_minus_constant_position": {
-            "mean_bbox_iou": _optional_delta(
-                baseline["mean_bbox_iou"], constant_position["mean_bbox_iou"]
-            ),
-            "mean_center_error_px": _optional_delta(
-                baseline["mean_center_error_px"],
-                constant_position["mean_center_error_px"],
-            ),
-            "mean_inactive_axis_ratio": _optional_delta(
-                baseline["mean_inactive_axis_ratio"],
-                constant_position["mean_inactive_axis_ratio"],
-            ),
-            "collapse_count": (
-                baseline["collapse_count"] - constant_position["collapse_count"]
-            ),
-        },
-        "dvs_enact_minus_constant_position": {
-            "mean_bbox_iou": _optional_delta(
-                dvs_enact["mean_bbox_iou"], constant_position["mean_bbox_iou"]
-            ),
-            "mean_center_error_px": _optional_delta(
-                dvs_enact["mean_center_error_px"],
-                constant_position["mean_center_error_px"],
-            ),
-            "mean_inactive_axis_ratio": _optional_delta(
-                dvs_enact["mean_inactive_axis_ratio"],
-                constant_position["mean_inactive_axis_ratio"],
-            ),
-            "collapse_count": (
-                dvs_enact["collapse_count"] - constant_position["collapse_count"]
-            ),
-        },
-        "dvs_enact_minus_baseline": {
-            "mean_bbox_iou": _optional_delta(
-                dvs_enact["mean_bbox_iou"], baseline["mean_bbox_iou"]
-            ),
-            "mean_center_error_px": _optional_delta(
-                dvs_enact["mean_center_error_px"], baseline["mean_center_error_px"]
-            ),
-            "mean_inactive_axis_ratio": _optional_delta(
-                dvs_enact["mean_inactive_axis_ratio"],
-                baseline["mean_inactive_axis_ratio"],
-            ),
-            "collapse_count": dvs_enact["collapse_count"] - baseline["collapse_count"],
-        },
+        "event_cloud_centroid_minus_constant_position": _tracker_metric_delta(
+            event_cloud_centroid,
+            constant_position,
+        ),
+        "baseline_minus_constant_position": _tracker_metric_delta(
+            baseline,
+            constant_position,
+        ),
+        "baseline_minus_event_cloud_centroid": _tracker_metric_delta(
+            baseline,
+            event_cloud_centroid,
+        ),
+        "dvs_enact_minus_constant_position": _tracker_metric_delta(
+            dvs_enact,
+            constant_position,
+        ),
+        "dvs_enact_minus_event_cloud_centroid": _tracker_metric_delta(
+            dvs_enact,
+            event_cloud_centroid,
+        ),
+        "dvs_enact_minus_baseline": _tracker_metric_delta(dvs_enact, baseline),
     }
 
 
@@ -424,6 +524,13 @@ def compare_trackers_on_labels(
             )
             dvs_bbox = estimated_tracker_bbox(dvs_tracker, n=config.bbox_grid_points)
             constant_position_bbox = bbox_to_dict(current)
+            event_cloud_bbox, event_cloud_metadata = event_cloud_centroid_bbox(
+                sampled_events,
+                constant_position_bbox,
+                min_extent_fraction=config.event_cloud_min_extent_fraction,
+                min_extent_px=config.event_cloud_min_extent_px,
+                min_event_count=config.min_events_per_window,
+            )
             target_bbox = bbox_to_dict(following)
             result_windows.append(
                 {
@@ -441,6 +548,16 @@ def compare_trackers_on_labels(
                         "bbox": constant_position_bbox,
                         "metrics": bbox_metrics(
                             constant_position_bbox,
+                            target_bbox,
+                            velocity,
+                            collapse_threshold=config.collapse_threshold,
+                        ),
+                    },
+                    "event_cloud_centroid": {
+                        "bbox": event_cloud_bbox,
+                        "metadata": event_cloud_metadata,
+                        "metrics": bbox_metrics(
+                            event_cloud_bbox,
                             target_bbox,
                             velocity,
                             collapse_threshold=config.collapse_threshold,
@@ -480,6 +597,25 @@ def compare_trackers_on_labels(
     return {
         "parsed_sequence": summarize_loaded_sequence(labels, events),
         "tracker_parameters": asdict(config),
+        "baseline_descriptions": {
+            "constant_position": (
+                "Predicts the next box as unchanged from the current label."
+            ),
+            "event_cloud_centroid": (
+                "Heuristic event-cloud baseline: centers the prediction on the "
+                "current-window event centroid and uses event-cloud span with "
+                "conservative current-label extent lower bounds. It is not an "
+                "autonomous learned tracker."
+            ),
+            "baseline": (
+                "Vanilla PyRecEst FullSCGPTracker updated with the "
+                "current-window events."
+            ),
+            "dvs_enact": (
+                "DVSFullSCGPTracker updated with the current-window events and "
+                "normal-flow activity support."
+            ),
+        },
         "summary": _summarize_comparison(
             result_windows,
             windows_considered,
