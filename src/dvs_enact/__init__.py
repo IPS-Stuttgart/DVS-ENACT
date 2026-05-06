@@ -38,6 +38,7 @@ from .mevdt import (
 )
 from .mevdt_comparison import (
     TrackerComparisonConfig,
+    WindowFilterConfig,
     bbox_iou,
     bbox_metrics,
     compare_mevdt_tracker_sequence,
@@ -46,6 +47,7 @@ from .mevdt_comparison import (
     rectangle_radial_shape,
     select_mevdt_event_and_label_files,
     subsample_events_chronologically,
+    window_filter_reasons,
 )
 from .trackers import DVSFullSCGPTracker, DVSSCGPTracker
 
@@ -60,6 +62,7 @@ __all__ = [
     "SyntheticRectangleSequenceConfig",
     "TrackWindowDiagnostics",
     "TrackerComparisonConfig",
+    "WindowFilterConfig",
     "activity_profile",
     "bbox_iou",
     "bbox_metrics",
@@ -89,4 +92,5 @@ __all__ = [
     "synthetic_rectangle_labels",
     "uniform_edge_probabilities",
     "unit_vector_from_angle",
+    "window_filter_reasons",
 ]

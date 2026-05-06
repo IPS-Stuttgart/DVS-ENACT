@@ -43,6 +43,21 @@ class TrackerComparisonConfig:
     bbox_grid_points: int = 128
 
 
+@dataclass(frozen=True)
+class WindowFilterConfig:
+    """Geometry filters for label-assisted MEVDT comparison windows."""
+
+    image_width: float = 240.0
+    image_height: float = 180.0
+    border_margin_px: float = 1.0
+    min_width: float = 8.0
+    min_height: float = 8.0
+    min_area: float = 100.0
+    max_width_change_fraction: float = 0.25
+    max_height_change_fraction: float = 0.25
+    trim_track_ends: int = 3
+
+
 def rectangle_radial_shape(
     width: float,
     height: float,
@@ -74,6 +89,59 @@ def rectangle_radial_shape(
         where=sin_abs > eps,
     )
     return np.minimum(x_limits, y_limits)
+
+
+def window_filter_reasons(
+    current: BoundingBox,
+    following: BoundingBox,
+    track_window_index: int,
+    track_window_count: int,
+    config: WindowFilterConfig,
+) -> list[str]:
+    """Return reasons why a label window should be excluded."""
+    if config.border_margin_px < 0.0:
+        raise ValueError("border_margin_px must be non-negative")
+    if config.trim_track_ends < 0:
+        raise ValueError("trim_track_ends must be non-negative")
+    reasons: list[str] = []
+    boxes = (current, following)
+
+    if (
+        track_window_index < config.trim_track_ends
+        or track_window_index >= track_window_count - config.trim_track_ends
+    ):
+        reasons.append("track_end_trim")
+
+    for box in boxes:
+        if (
+            box.x_min <= config.border_margin_px
+            or box.y_min <= config.border_margin_px
+            or box.x_max >= config.image_width - config.border_margin_px
+            or box.y_max >= config.image_height - config.border_margin_px
+        ):
+            reasons.append("border_touch")
+            break
+
+    if any(box.width < config.min_width or box.height < config.min_height for box in boxes):
+        reasons.append("small_box")
+    if any(box.area < config.min_area for box in boxes):
+        reasons.append("small_area")
+
+    width_change = abs(following.width - current.width) / max(
+        current.width,
+        following.width,
+        1e-12,
+    )
+    height_change = abs(following.height - current.height) / max(
+        current.height,
+        following.height,
+        1e-12,
+    )
+    if width_change > config.max_width_change_fraction:
+        reasons.append("width_change")
+    if height_change > config.max_height_change_fraction:
+        reasons.append("height_change")
+    return reasons
 
 
 def subsample_events_chronologically(
@@ -309,6 +377,8 @@ def _summarize_comparison(
     windows_considered: int,
     skipped_low_event_windows: int,
     skipped_missing_timestamp_windows: int,
+    skipped_filter_windows: int,
+    filter_skip_reasons: dict[str, int],
 ) -> dict:
     constant_position = _aggregate_tracker_metrics(windows, "constant_position")
     baseline = _aggregate_tracker_metrics(windows, "baseline")
@@ -318,6 +388,8 @@ def _summarize_comparison(
         "windows_evaluated": len(windows),
         "skipped_low_event_windows": int(skipped_low_event_windows),
         "skipped_missing_timestamp_windows": int(skipped_missing_timestamp_windows),
+        "skipped_filter_windows": int(skipped_filter_windows),
+        "filter_skip_reasons": dict(sorted(filter_skip_reasons.items())),
         "constant_position": constant_position,
         "baseline": baseline,
         "dvs_enact": dvs_enact,
@@ -379,6 +451,7 @@ def compare_trackers_on_labels(
     labels: Iterable[BoundingBox],
     events: EventBatch,
     config: TrackerComparisonConfig | None = None,
+    window_filter: WindowFilterConfig | None = None,
 ) -> dict:
     """Run the label-assisted vanilla-SCGP vs DVS-ENACT comparison."""
     config = config or TrackerComparisonConfig()
@@ -388,19 +461,43 @@ def compare_trackers_on_labels(
     windows_considered = 0
     skipped_low_event_windows = 0
     skipped_missing_timestamp_windows = 0
+    skipped_filter_windows = 0
+    filter_skip_reasons: dict[str, int] = {}
 
     for track_id in sorted(labels_by_track):
         track_labels = labels_by_track[track_id]
         if len(track_labels) < 2:
             continue
-        baseline_tracker = _make_tracker(FullSCGPTracker, track_labels[0], config)
-        dvs_tracker = _make_tracker(DVSFullSCGPTracker, track_labels[0], config)
-        for current, following in zip(track_labels[:-1], track_labels[1:], strict=False):
+        baseline_tracker = None
+        dvs_tracker = None
+        track_window_count = len(track_labels) - 1
+        for track_window_index, (current, following) in enumerate(
+            zip(track_labels[:-1], track_labels[1:], strict=False)
+        ):
             if config.max_windows is not None and windows_considered >= config.max_windows:
                 break
             windows_considered += 1
+            if window_filter is not None:
+                reasons = window_filter_reasons(
+                    current,
+                    following,
+                    track_window_index,
+                    track_window_count,
+                    window_filter,
+                )
+                if reasons:
+                    skipped_filter_windows += 1
+                    for reason in reasons:
+                        filter_skip_reasons[reason] = (
+                            filter_skip_reasons.get(reason, 0) + 1
+                        )
+                    baseline_tracker = None
+                    dvs_tracker = None
+                    continue
             if current.timestamp_ns is None or following.timestamp_ns is None:
                 skipped_missing_timestamp_windows += 1
+                baseline_tracker = None
+                dvs_tracker = None
                 continue
             window_events = events_for_label_window(events, current, following)
             sampled_events = subsample_events_chronologically(
@@ -409,8 +506,14 @@ def compare_trackers_on_labels(
             )
             if sampled_events.count < config.min_events_per_window:
                 skipped_low_event_windows += 1
+                baseline_tracker = None
+                dvs_tracker = None
                 continue
 
+            if baseline_tracker is None:
+                baseline_tracker = _make_tracker(FullSCGPTracker, current, config)
+            if dvs_tracker is None:
+                dvs_tracker = _make_tracker(DVSFullSCGPTracker, current, config)
             _recenter_tracker(baseline_tracker, current)
             _recenter_tracker(dvs_tracker, current)
             measurements = _event_measurements(sampled_events)
@@ -480,11 +583,14 @@ def compare_trackers_on_labels(
     return {
         "parsed_sequence": summarize_loaded_sequence(labels, events),
         "tracker_parameters": asdict(config),
+        "window_filter": asdict(window_filter) if window_filter is not None else None,
         "summary": _summarize_comparison(
             result_windows,
             windows_considered,
             skipped_low_event_windows,
             skipped_missing_timestamp_windows,
+            skipped_filter_windows,
+            filter_skip_reasons,
         ),
         "windows": result_windows,
     }
@@ -549,6 +655,7 @@ def compare_mevdt_tracker_sequence(
     event_csv: str | Path | None = None,
     label_file: str | Path | None = None,
     config: TrackerComparisonConfig | None = None,
+    window_filter: WindowFilterConfig | None = None,
 ) -> dict:
     """Load one MEVDT sequence and run the tracker comparison."""
     dataset_root = Path(dataset_root)
@@ -561,7 +668,12 @@ def compare_mevdt_tracker_sequence(
     if not labels:
         raise ValueError(f"No tracking labels parsed from {selected_label}")
     events = read_event_csv(selected_event)
-    comparison = compare_trackers_on_labels(labels, events, config=config)
+    comparison = compare_trackers_on_labels(
+        labels,
+        events,
+        config=config,
+        window_filter=window_filter,
+    )
     return {
         "dataset": {
             "name": "MEVDT",

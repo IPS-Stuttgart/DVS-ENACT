@@ -91,6 +91,15 @@ This compares vanilla PyRecEst `FullSCGPTracker` with `DVSFullSCGPTracker` on
 the same label-cropped event windows. It is a stress test of extent stability,
 not an autonomous tracking benchmark.
 
+The filtered MEVDT sweep removes boundary-touching, tiny, rapidly changing, and
+track-end windows before rerunning the comparison across a compact parameter
+sweep:
+
+```powershell
+$env:PYTHONPATH = "src;../PyRecEst/src"
+python scripts/run_mevdt_filtered_tracker_sweep.py --dataset-root D:\Uni-Data\MEVDT-one-sequence
+```
+
 ## Development
 
 ```powershell

@@ -7,10 +7,12 @@ from dvs_enact import (
     BoundingBox,
     EventBatch,
     TrackerComparisonConfig,
+    WindowFilterConfig,
     bbox_metrics,
     compare_trackers_on_labels,
     rectangle_radial_shape,
     subsample_events_chronologically,
+    window_filter_reasons,
 )
 
 
@@ -69,6 +71,34 @@ def test_bbox_metrics_uses_motion_inactive_axis():
     assert not vertical["collapsed"]
 
 
+def test_window_filter_reasons_report_geometry_failures():
+    current = BoundingBox(0, 1, 0.0, 10.0, 6.0, 20.0, timestamp_ns=0)
+    following = BoundingBox(1, 1, 2.0, 10.0, 20.0, 40.0, timestamp_ns=10)
+    config = WindowFilterConfig(
+        min_width=8.0,
+        min_height=8.0,
+        min_area=80.0,
+        max_width_change_fraction=0.25,
+        max_height_change_fraction=0.25,
+        trim_track_ends=1,
+    )
+
+    reasons = window_filter_reasons(
+        current,
+        following,
+        track_window_index=0,
+        track_window_count=5,
+        config=config,
+    )
+
+    assert "track_end_trim" in reasons
+    assert "border_touch" in reasons
+    assert "small_box" in reasons
+    assert "small_area" in reasons
+    assert "width_change" in reasons
+    assert "height_change" in reasons
+
+
 @pytest.mark.skipif(
     pyrecest.backend.__backend_name__ != "numpy",
     reason="MEVDT comparison fixture uses numpy tracker assertions",
@@ -108,3 +138,34 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     assert constant_metrics["inactive_axis_ratio"] == pytest.approx(1.0)
     assert "bbox_iou" in window["baseline"]["metrics"]
     assert "inactive_axis_ratio" in window["dvs_enact"]["metrics"]
+
+
+@pytest.mark.skipif(
+    pyrecest.backend.__backend_name__ != "numpy",
+    reason="MEVDT comparison fixture uses numpy tracker assertions",
+)
+def test_compare_trackers_on_labels_reports_filter_skips():
+    labels = [
+        BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0),
+        BoundingBox(1, 1, 2.0, 0.0, 12.0, 10.0, timestamp_ns=10),
+    ]
+    events = EventBatch(
+        ts=np.array([1, 2, 3, 4], dtype=np.int64),
+        x=np.array([0, 10, 0, 10], dtype=np.int32),
+        y=np.array([2, 2, 8, 8], dtype=np.int32),
+        p=np.array([1, 1, 1, 1], dtype=np.int8),
+    )
+    config = TrackerComparisonConfig(n_base_points=8, max_windows=1)
+    window_filter = WindowFilterConfig(border_margin_px=1.0, trim_track_ends=0)
+
+    payload = compare_trackers_on_labels(
+        labels,
+        events,
+        config=config,
+        window_filter=window_filter,
+    )
+
+    assert payload["summary"]["windows_considered"] == 1
+    assert payload["summary"]["windows_evaluated"] == 0
+    assert payload["summary"]["skipped_filter_windows"] == 1
+    assert payload["summary"]["filter_skip_reasons"]["border_touch"] == 1
