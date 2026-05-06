@@ -97,4 +97,8 @@ def test_run_synthetic_tracker_benchmark_returns_window_metrics():
     assert scenario["scenario"] == "tiny"
     assert scenario["summary"]["windows_considered"] == 2
     assert scenario["summary"]["windows_evaluated"] == 2
+    assert "constant_position" in scenario["summary"]
+    assert "dvs_enact_minus_constant_position" in scenario["summary"]
+    constant_metrics = scenario["windows"][0]["constant_position"]["metrics"]
+    assert "inactive_axis_ratio" in constant_metrics
     assert "inactive_axis_ratio" in scenario["windows"][0]["baseline"]["metrics"]
