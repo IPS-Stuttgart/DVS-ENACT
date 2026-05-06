@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from dvs_enact import (
     count_negative_log_likelihood,
@@ -44,4 +45,4 @@ def test_uniform_edge_probabilities_sum_to_one():
         ["left", "left", "right", "right", "top", "bottom"]
     )
 
-    assert sum(probabilities.values()) == 1.0
+    assert sum(probabilities.values()) == pytest.approx(1.0)
