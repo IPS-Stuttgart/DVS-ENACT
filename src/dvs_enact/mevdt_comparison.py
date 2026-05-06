@@ -310,6 +310,7 @@ def _summarize_comparison(
     skipped_low_event_windows: int,
     skipped_missing_timestamp_windows: int,
 ) -> dict:
+    constant_position = _aggregate_tracker_metrics(windows, "constant_position")
     baseline = _aggregate_tracker_metrics(windows, "baseline")
     dvs_enact = _aggregate_tracker_metrics(windows, "dvs_enact")
     return {
@@ -317,8 +318,41 @@ def _summarize_comparison(
         "windows_evaluated": len(windows),
         "skipped_low_event_windows": int(skipped_low_event_windows),
         "skipped_missing_timestamp_windows": int(skipped_missing_timestamp_windows),
+        "constant_position": constant_position,
         "baseline": baseline,
         "dvs_enact": dvs_enact,
+        "baseline_minus_constant_position": {
+            "mean_bbox_iou": _optional_delta(
+                baseline["mean_bbox_iou"], constant_position["mean_bbox_iou"]
+            ),
+            "mean_center_error_px": _optional_delta(
+                baseline["mean_center_error_px"],
+                constant_position["mean_center_error_px"],
+            ),
+            "mean_inactive_axis_ratio": _optional_delta(
+                baseline["mean_inactive_axis_ratio"],
+                constant_position["mean_inactive_axis_ratio"],
+            ),
+            "collapse_count": (
+                baseline["collapse_count"] - constant_position["collapse_count"]
+            ),
+        },
+        "dvs_enact_minus_constant_position": {
+            "mean_bbox_iou": _optional_delta(
+                dvs_enact["mean_bbox_iou"], constant_position["mean_bbox_iou"]
+            ),
+            "mean_center_error_px": _optional_delta(
+                dvs_enact["mean_center_error_px"],
+                constant_position["mean_center_error_px"],
+            ),
+            "mean_inactive_axis_ratio": _optional_delta(
+                dvs_enact["mean_inactive_axis_ratio"],
+                constant_position["mean_inactive_axis_ratio"],
+            ),
+            "collapse_count": (
+                dvs_enact["collapse_count"] - constant_position["collapse_count"]
+            ),
+        },
         "dvs_enact_minus_baseline": {
             "mean_bbox_iou": _optional_delta(
                 dvs_enact["mean_bbox_iou"], baseline["mean_bbox_iou"]
@@ -389,6 +423,7 @@ def compare_trackers_on_labels(
                 n=config.bbox_grid_points,
             )
             dvs_bbox = estimated_tracker_bbox(dvs_tracker, n=config.bbox_grid_points)
+            constant_position_bbox = bbox_to_dict(current)
             target_bbox = bbox_to_dict(following)
             result_windows.append(
                 {
@@ -400,8 +435,17 @@ def compare_trackers_on_labels(
                     "event_count": int(window_events.count),
                     "used_event_count": int(sampled_events.count),
                     "center_velocity_px_per_frame": velocity.astype(float).tolist(),
-                    "reference_bbox": bbox_to_dict(current),
+                    "reference_bbox": constant_position_bbox,
                     "target_bbox": target_bbox,
+                    "constant_position": {
+                        "bbox": constant_position_bbox,
+                        "metrics": bbox_metrics(
+                            constant_position_bbox,
+                            target_bbox,
+                            velocity,
+                            collapse_threshold=config.collapse_threshold,
+                        ),
+                    },
                     "baseline": {
                         "bbox": baseline_bbox,
                         "metrics": bbox_metrics(

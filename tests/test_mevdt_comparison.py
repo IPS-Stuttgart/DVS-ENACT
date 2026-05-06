@@ -96,7 +96,15 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     assert payload["parsed_sequence"]["label_count"] == 2
     assert payload["summary"]["windows_considered"] == 1
     assert payload["summary"]["windows_evaluated"] == 1
+    assert "constant_position" in payload["summary"]
+    assert "baseline_minus_constant_position" in payload["summary"]
+    assert "dvs_enact_minus_constant_position" in payload["summary"]
     window = payload["windows"][0]
     assert window["used_event_count"] == 4
+    assert window["constant_position"]["bbox"] == window["reference_bbox"]
+    constant_metrics = window["constant_position"]["metrics"]
+    assert constant_metrics["bbox_iou"] == pytest.approx(2.0 / 3.0)
+    assert constant_metrics["center_error_px"] == pytest.approx(2.0)
+    assert constant_metrics["inactive_axis_ratio"] == pytest.approx(1.0)
     assert "bbox_iou" in window["baseline"]["metrics"]
     assert "inactive_axis_ratio" in window["dvs_enact"]["metrics"]

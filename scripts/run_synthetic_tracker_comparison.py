@@ -73,8 +73,19 @@ def _write_figures(payload: dict, output_root: Path) -> dict[str, str]:
     if len(scenarios) == 1:
         axes = [axes]
     for axis, scenario in zip(axes, scenarios, strict=True):
+        constant_position = _tracker_series(
+            scenario,
+            "constant_position",
+            "inactive_axis_ratio",
+        )
         baseline = _tracker_series(scenario, "baseline", "inactive_axis_ratio")
         dvs_enact = _tracker_series(scenario, "dvs_enact", "inactive_axis_ratio")
+        axis.plot(
+            constant_position,
+            label="constant position",
+            color="#54a24b",
+            linewidth=1.8,
+        )
         axis.plot(baseline, label="vanilla SCGP", color="#4c78a8", linewidth=1.8)
         axis.plot(dvs_enact, label="DVS-ENACT", color="#f58518", linewidth=1.8)
         axis.axhline(
@@ -87,7 +98,7 @@ def _write_figures(payload: dict, output_root: Path) -> dict[str, str]:
         axis.set_ylabel("inactive-axis ratio")
         axis.grid(alpha=0.25)
     axes[-1].set_xlabel("window")
-    axes[0].legend(frameon=False, ncols=2, loc="lower left")
+    axes[0].legend(frameon=False, ncols=3, loc="lower left")
     fig.tight_layout()
     ratio_path = figure_dir / "synthetic_tracker_inactive_axis_ratio.png"
     fig.savefig(ratio_path, dpi=200, bbox_inches="tight")
@@ -95,7 +106,11 @@ def _write_figures(payload: dict, output_root: Path) -> dict[str, str]:
 
     labels = [scenario["scenario"] for scenario in scenarios]
     x = np.arange(len(labels))
-    width = 0.36
+    width = 0.26
+    constant_position = [
+        scenario["summary"]["constant_position"]["collapse_fraction"]
+        for scenario in scenarios
+    ]
     baseline = [
         scenario["summary"]["baseline"]["collapse_fraction"]
         for scenario in scenarios
@@ -105,8 +120,15 @@ def _write_figures(payload: dict, output_root: Path) -> dict[str, str]:
         for scenario in scenarios
     ]
     fig, ax = plt.subplots(figsize=(7.0, 3.0))
-    ax.bar(x - width / 2.0, baseline, width, label="vanilla SCGP", color="#4c78a8")
-    ax.bar(x + width / 2.0, dvs_enact, width, label="DVS-ENACT", color="#f58518")
+    ax.bar(
+        x - width,
+        constant_position,
+        width,
+        label="constant position",
+        color="#54a24b",
+    )
+    ax.bar(x, baseline, width, label="vanilla SCGP", color="#4c78a8")
+    ax.bar(x + width, dvs_enact, width, label="DVS-ENACT", color="#f58518")
     ax.set_xticks(x, labels, rotation=20, ha="right")
     ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("collapse fraction")
