@@ -1,7 +1,7 @@
 # Paper artifact pipeline
 
-This document defines the canonical bridge between `DVS-ENACT` and the
-`2026-05-DVS-ENACT-Paper` repository.
+This document defines the canonical bridge between `IPS-Stuttgart/DVS-ENACT`
+and the separate private `FlorianPfaff/2026-05-DVS-ENACT-Paper` repository.
 
 The code repository owns experiment execution. The paper repository should
 consume generated JSON evidence and figures, rather than carrying duplicate

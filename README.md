@@ -3,8 +3,9 @@
 Event-based Normal-flow Active Contour Tracking for extended objects observed by
 Dynamic Vision Sensor (DVS) / event-camera measurements.
 
-This repository is for implementation and evaluation code. Small generated
-results, figures, notes, and manuscript text belong in
+This repository is for implementation and evaluation code. The separate paper
+repository has not moved with the code repository; small generated results,
+figures, notes, and manuscript text belong in
 `FlorianPfaff/2026-05-DVS-ENACT-Paper`.
 
 ## Core Idea
