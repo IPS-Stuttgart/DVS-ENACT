@@ -10,6 +10,7 @@ from dvs_enact import (
     WindowFilterConfig,
     bbox_metrics,
     compare_trackers_on_labels,
+    event_cloud_centroid_bbox,
     rectangle_radial_shape,
     subsample_events_chronologically,
     window_filter_reasons,
@@ -99,6 +100,55 @@ def test_window_filter_reasons_report_geometry_failures():
     assert "height_change" in reasons
 
 
+def test_event_cloud_centroid_bbox_uses_event_center_with_extent_safeguards():
+    reference = BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0)
+    events = EventBatch(
+        ts=np.array([1, 2, 3], dtype=np.int64),
+        x=np.array([8, 9, 10], dtype=np.int32),
+        y=np.array([4, 5, 6], dtype=np.int32),
+        p=np.array([1, 1, 1], dtype=np.int8),
+    )
+
+    bbox, metadata = event_cloud_centroid_bbox(
+        events,
+        reference,
+        min_extent_fraction=0.25,
+        min_extent_px=2.0,
+        min_event_count=3,
+    )
+
+    assert bbox["center_x"] == pytest.approx(9.0)
+    assert bbox["center_y"] == pytest.approx(5.0)
+    assert bbox["width"] == pytest.approx(2.5)
+    assert bbox["height"] == pytest.approx(2.5)
+    assert metadata["center_source"] == "event_cloud_centroid"
+    assert metadata["extent_source"] == "event_cloud_span_with_reference_minimum"
+    assert metadata["fallback_reason"] is None
+
+
+def test_event_cloud_centroid_bbox_falls_back_for_low_event_count():
+    reference = BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0)
+    events = EventBatch(
+        ts=np.array([1], dtype=np.int64),
+        x=np.array([8], dtype=np.int32),
+        y=np.array([4], dtype=np.int32),
+        p=np.array([1], dtype=np.int8),
+    )
+
+    bbox, metadata = event_cloud_centroid_bbox(
+        events,
+        reference,
+        min_event_count=2,
+    )
+
+    assert bbox["center_x"] == pytest.approx(5.0)
+    assert bbox["center_y"] == pytest.approx(5.0)
+    assert bbox["width"] == pytest.approx(10.0)
+    assert bbox["height"] == pytest.approx(10.0)
+    assert metadata["fallback_reason"] == "low_event_count"
+    assert metadata["finite_event_count"] == 1
+
+
 @pytest.mark.skipif(
     pyrecest.backend.__backend_name__ != "numpy",
     reason="MEVDT comparison fixture uses numpy tracker assertions",
@@ -127,8 +177,15 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     assert payload["summary"]["windows_considered"] == 1
     assert payload["summary"]["windows_evaluated"] == 1
     assert "constant_position" in payload["summary"]
+    assert "event_cloud_centroid" in payload["summary"]
+    assert "event_cloud_centroid_minus_constant_position" in payload["summary"]
     assert "baseline_minus_constant_position" in payload["summary"]
+    assert "baseline_minus_event_cloud_centroid" in payload["summary"]
     assert "dvs_enact_minus_constant_position" in payload["summary"]
+    assert "dvs_enact_minus_event_cloud_centroid" in payload["summary"]
+    assert "not an autonomous learned tracker" in (
+        payload["baseline_descriptions"]["event_cloud_centroid"]
+    )
     window = payload["windows"][0]
     assert window["used_event_count"] == 4
     assert window["constant_position"]["bbox"] == window["reference_bbox"]
@@ -136,6 +193,13 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     assert constant_metrics["bbox_iou"] == pytest.approx(2.0 / 3.0)
     assert constant_metrics["center_error_px"] == pytest.approx(2.0)
     assert constant_metrics["inactive_axis_ratio"] == pytest.approx(1.0)
+    event_cloud = window["event_cloud_centroid"]
+    assert event_cloud["metadata"]["fallback_reason"] is None
+    assert event_cloud["metadata"]["center_source"] == "event_cloud_centroid"
+    assert event_cloud["bbox"]["center_x"] == pytest.approx(5.0)
+    assert event_cloud["bbox"]["center_y"] == pytest.approx(5.0)
+    assert event_cloud["metrics"]["center_error_px"] == pytest.approx(2.0)
+    assert event_cloud["metrics"]["inactive_axis_ratio"] == pytest.approx(0.6)
     assert "bbox_iou" in window["baseline"]["metrics"]
     assert "inactive_axis_ratio" in window["dvs_enact"]["metrics"]
 
