@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import run_mevdt_support_diagnostics
 import run_mevdt_tracker_comparison
-import run_synthetic_count_likelihood
+import run_synthetic_count_evaluation
 import run_synthetic_cube_activity
 import run_synthetic_tracker_comparison
 
@@ -174,7 +174,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         ),
         (
             "synthetic_count_likelihood",
-            run_synthetic_count_likelihood.run,
+            run_synthetic_count_evaluation.run,
             (output_root, args.synthetic_total_events, args.seed),
             {},
             True,
