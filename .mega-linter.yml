@@ -1,0 +1,15 @@
+---
+# Keep MegaLinter focused on checks that are useful across these Python repos
+# before strict typing, spelling, and security-scan baselines are established.
+ENABLE_LINTERS:
+  - ACTION_ACTIONLINT
+  - MARKDOWN_MARKDOWNLINT
+  - PYTHON_RUFF
+  - REPOSITORY_GIT_DIFF
+  - YAML_YAMLLINT
+  - YAML_V8R
+
+VALIDATE_ALL_CODEBASE: true
+PRINT_ALPACA: false
+SHOW_ELAPSED_TIME: true
+FLAVOR_SUGGESTIONS: false
