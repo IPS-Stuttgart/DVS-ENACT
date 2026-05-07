@@ -98,7 +98,8 @@ jobs:
           export RCLONE_CONFIG_MEVDTDATA_URL="$MEVDT_WEBDAV_URL"
           export RCLONE_CONFIG_MEVDTDATA_VENDOR=owncloud
           export RCLONE_CONFIG_MEVDTDATA_USER="$MEVDT_DATA_KEY"
-          export RCLONE_CONFIG_MEVDTDATA_PASS="$(rclone obscure "$MEVDT_DATA_PASSWORD")"
+          RCLONE_CONFIG_MEVDTDATA_PASS="$(rclone obscure "$MEVDT_DATA_PASSWORD")"
+          export RCLONE_CONFIG_MEVDTDATA_PASS
 
           rclone copy MEVDTDATA: "$MEVDT_DATASET_ROOT" \
             --fast-list \
