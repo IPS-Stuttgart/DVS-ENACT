@@ -9,7 +9,7 @@ on:
         default: false
         type: boolean
       dataset_root:
-        description: "Absolute path to the MEVDT extraction root on the runner"
+        description: "Optional MEVDT cache root on the runner; defaults to $HOME/.cache/datasets/MEVDT"
         required: false
         default: ""
         type: string
@@ -21,7 +21,7 @@ on:
       output_artifact_name:
         description: "GitHub Actions artifact name"
         required: true
-        default: "dvs-enact-paper-artifacts"
+        default: "paper-output"
         type: string
 
 env:
@@ -42,6 +42,83 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Resolve MEVDT dataset cache path
+        shell: bash
+        run: |
+          set -euo pipefail
+          dataset_root="${{ inputs.dataset_root }}"
+          if [[ -z "$dataset_root" ]]; then
+            dataset_root="${HOME}/.cache/datasets/MEVDT"
+          fi
+          echo "MEVDT_DATASET_ROOT=${dataset_root}" >> "$GITHUB_ENV"
+          echo "MEVDT dataset root: ${dataset_root}"
+
+      - name: Install rclone without sudo
+        if: ${{ inputs.include_mevdt == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v rclone >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/rclone-bin" "$RUNNER_TEMP/rclone-download/extract"
+            curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip \
+              -o "$RUNNER_TEMP/rclone-download/rclone.zip"
+            python -m zipfile -e \
+              "$RUNNER_TEMP/rclone-download/rclone.zip" \
+              "$RUNNER_TEMP/rclone-download/extract"
+            RCLONE_BIN="$(find "$RUNNER_TEMP/rclone-download/extract" -type f -name rclone | head -n 1)"
+            if [[ -z "$RCLONE_BIN" ]]; then
+              echo "::error::Downloaded rclone archive did not contain rclone binary"
+              exit 1
+            fi
+            cp "$RCLONE_BIN" "$RUNNER_TEMP/rclone-bin/rclone"
+            chmod 755 "$RUNNER_TEMP/rclone-bin/rclone"
+            echo "$RUNNER_TEMP/rclone-bin" >> "$GITHUB_PATH"
+            export PATH="$RUNNER_TEMP/rclone-bin:$PATH"
+          fi
+          rclone version
+
+      - name: Populate MEVDT dataset cache
+        if: ${{ inputs.include_mevdt == true }}
+        shell: bash
+        env:
+          MEVDT_WEBDAV_URL: ${{ secrets.MEVDT_WEBDAV_URL }}
+          MEVDT_DATA_KEY: ${{ secrets.MEVDT_DATA_KEY }}
+          MEVDT_DATA_PASSWORD: ${{ secrets.MEVDT_DATA_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in MEVDT_WEBDAV_URL MEVDT_DATA_KEY MEVDT_DATA_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::${name} secret is required when include_mevdt is true"
+              exit 1
+            fi
+          done
+
+          mkdir -p "$MEVDT_DATASET_ROOT"
+          export RCLONE_CONFIG_MEVDTDATA_TYPE=webdav
+          export RCLONE_CONFIG_MEVDTDATA_URL="$MEVDT_WEBDAV_URL"
+          export RCLONE_CONFIG_MEVDTDATA_VENDOR=owncloud
+          export RCLONE_CONFIG_MEVDTDATA_USER="$MEVDT_DATA_KEY"
+          export RCLONE_CONFIG_MEVDTDATA_PASS="$(rclone obscure "$MEVDT_DATA_PASSWORD")"
+
+          rclone copy MEVDTDATA: "$MEVDT_DATASET_ROOT" \
+            --fast-list \
+            --create-empty-src-dirs \
+            --transfers 8 \
+            --checkers 16 \
+            --stats 30s \
+            --stats-one-line
+
+          if [[ -d "${MEVDT_DATASET_ROOT}/MEVDT/labels" && -d "${MEVDT_DATASET_ROOT}/MEVDT/sequences" ]]; then
+            MEVDT_DATASET_ROOT="${MEVDT_DATASET_ROOT}/MEVDT"
+            echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
+          fi
+          if [[ ! -d "${MEVDT_DATASET_ROOT}/labels" || ! -d "${MEVDT_DATASET_ROOT}/sequences" ]]; then
+            echo "::error::MEVDT cache must contain labels/ and sequences/: ${MEVDT_DATASET_ROOT}"
+            find "${MEVDT_DATASET_ROOT}" -maxdepth 3 -type d | sort | head -n 50
+            exit 1
+          fi
+          echo "MEVDT cache ready at ${MEVDT_DATASET_ROOT}"
+
       - name: Install package
         run: |
           python -m pip install --upgrade pip
@@ -58,14 +135,125 @@ jobs:
           )
 
           if [[ "${{ inputs.include_mevdt }}" == "true" ]]; then
-            if [[ -z "${{ inputs.dataset_root }}" ]]; then
-              echo "::error::dataset_root must be set when include_mevdt is true"
-              exit 1
-            fi
-            args+=(--dataset-root "${{ inputs.dataset_root }}")
+            args+=(--dataset-root "$MEVDT_DATASET_ROOT")
           fi
 
           python scripts/export_paper_artifacts.py "${args[@]}"
+
+      - name: Run filtered MEVDT evaluation
+        if: ${{ inputs.include_mevdt == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/run_mevdt_filtered_tracker_sweep.py \
+            --dataset-root "$MEVDT_DATASET_ROOT" \
+            --output-root "${GITHUB_WORKSPACE}/paper-output" \
+            --max-windows "${{ inputs.max_windows }}"
+
+      - name: Build compact evaluation summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          evidence = Path("paper-output/data/paper_evidence")
+          summary = {}
+
+          manifest_path = evidence / "artifact_manifest.json"
+          if manifest_path.exists():
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              summary["manifest"] = {
+                  "head": manifest.get("repository", {}).get("head"),
+                  "parameters": manifest.get("parameters", {}),
+                  "summary": manifest.get("summary", {}),
+                  "stages": [
+                      {"name": stage.get("name"), "status": stage.get("status")}
+                      for stage in manifest.get("stages", [])
+                  ],
+              }
+
+          tracker_path = evidence / "mevdt_tracker_comparison.json"
+          if tracker_path.exists():
+              tracker = json.loads(tracker_path.read_text(encoding="utf-8"))
+              tracker_summary = tracker["summary"]
+              summary["mevdt_tracker_comparison"] = {
+                  "windows_evaluated": tracker_summary["windows_evaluated"],
+                  "constant_position": tracker_summary["constant_position"],
+                  "event_cloud_centroid": tracker_summary["event_cloud_centroid"],
+                  "baseline": tracker_summary["baseline"],
+                  "dvs_enact": tracker_summary["dvs_enact"],
+                  "dvs_enact_minus_baseline": tracker_summary["dvs_enact_minus_baseline"],
+              }
+
+          filtered_path = evidence / "mevdt_filtered_tracker_sweep.json"
+          if filtered_path.exists():
+              filtered = json.loads(filtered_path.read_text(encoding="utf-8"))
+              summary["mevdt_filtered_tracker_sweep"] = {
+                  "window_filter": filtered.get("window_filter"),
+                  "filtered_default_summary": filtered["filtered_default_comparison"]["summary"],
+                  "sweep_names": [item["name"] for item in filtered["sweep"]],
+              }
+
+          synthetic_path = evidence / "synthetic_tracker_comparison.json"
+          if synthetic_path.exists():
+              synthetic = json.loads(synthetic_path.read_text(encoding="utf-8"))
+              summary["synthetic_tracker_scenarios"] = {
+                  item["scenario"]: {
+                      "constant_position": item["summary"]["constant_position"],
+                      "event_cloud_centroid": item["summary"]["event_cloud_centroid"],
+                      "baseline": item["summary"]["baseline"],
+                      "dvs_enact": item["summary"]["dvs_enact"],
+                  }
+                  for item in synthetic["scenarios"]
+              }
+
+          evidence.mkdir(parents=True, exist_ok=True)
+          output = evidence / "evaluation_summary.json"
+          output.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Validate paper artifacts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          evidence = Path("paper-output/data/paper_evidence")
+          figures = Path("paper-output/figures")
+          include_mevdt = "${{ inputs.include_mevdt }}" == "true"
+          expected = [
+              evidence / "artifact_manifest.json",
+              evidence / "evaluation_summary.json",
+              evidence / "synthetic_cube_activity.json",
+              evidence / "synthetic_count_likelihood.json",
+              evidence / "synthetic_tracker_comparison.json",
+              figures / "synthetic_cube_activity.png",
+              figures / "synthetic_count_likelihood_counts.png",
+              figures / "synthetic_count_likelihood_nll.png",
+              figures / "synthetic_tracker_inactive_axis_ratio.png",
+              figures / "synthetic_tracker_collapse_fraction.png",
+          ]
+          if include_mevdt:
+              expected.extend(
+                  [
+                      evidence / "mevdt_support_diagnostics.json",
+                      evidence / "mevdt_tracker_comparison.json",
+                      evidence / "mevdt_filtered_tracker_sweep.json",
+                  ]
+              )
+          missing = [str(path) for path in expected if not path.exists()]
+          if missing:
+              raise SystemExit(f"Missing expected artifacts: {missing}")
+
+          manifest = json.loads((evidence / "artifact_manifest.json").read_text(encoding="utf-8"))
+          if manifest["summary"]["failed"]:
+              raise SystemExit(f"Artifact manifest has failed stages: {manifest['summary']}")
+          print(json.dumps({"validated": [str(path) for path in expected]}, indent=2))
+          PY
 
       - name: Upload paper artifacts
         uses: actions/upload-artifact@v6
