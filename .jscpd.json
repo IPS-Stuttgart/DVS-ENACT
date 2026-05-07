@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/kucherenko/jscpd/master/schemas/options.schema.json",
+  "ignore": [
+    "src/dvs_enact/mevdt_comparison.py",
+    "src/dvs_enact/synthetic_tracker.py",
+    "tests/test_mevdt_comparison.py",
+    "scripts/run_mevdt_filtered_tracker_sweep.py",
+    "scripts/run_mevdt_tracker_comparison.py"
+  ],
+  "threshold": 0
+}
