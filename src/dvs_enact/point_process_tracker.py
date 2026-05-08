@@ -57,12 +57,13 @@ class DVSPointProcessSCGPTracker(DVSFullSCGPTracker):
                 [np.cos(world_angle), np.sin(world_angle)],
                 dtype=float,
             )
+            body_angle_vector = array([float(body_angle)])
             basis_row = np.asarray(
-                self._basis_matrix(float(body_angle))[0],
+                self._basis_matrix(body_angle_vector)[0],
                 dtype=float,
             )
             derivative_row = np.asarray(
-                self._basis_derivative(float(body_angle))[0],
+                self._basis_derivative(body_angle_vector)[0],
                 dtype=float,
             )
             radius = float(basis_row @ shape_state)
