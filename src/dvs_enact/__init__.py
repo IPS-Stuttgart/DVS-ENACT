@@ -65,9 +65,21 @@ from .mevdt_comparison import (
     window_filter_reasons,
 )
 from .point_process_tracker import DVSPointProcessSCGP, DVSPointProcessSCGPTracker
+from .refiner import (
+    DVSContourRefiner,
+    DVSContourRefinerConfig,
+    DVSRefinementResult,
+    bbox_to_dict as refiner_bbox_to_dict,
+    blend_bboxes,
+    crop_events_to_bbox as refiner_crop_events_to_bbox,
+    expand_bbox as refiner_expand_bbox,
+)
 from .trackers import DVSFullSCGPTracker, DVSSCGPTracker
 
 __all__ = [
+    "DVSRefinementResult",
+    "DVSContourRefinerConfig",
+    "DVSContourRefiner",
     "DVSFullSCGPTracker",
     "DVSPointProcessSCGP",
     "DVSPointProcessSCGPTracker",
@@ -88,6 +100,7 @@ __all__ = [
     "activity_profile",
     "bbox_iou",
     "bbox_metrics",
+    "blend_bboxes",
     "compute_bbox_event_diagnostics",
     "compare_mevdt_tracker_sequence",
     "compare_trackers_on_labels",
@@ -111,6 +124,9 @@ __all__ = [
     "read_tracking_labels",
     "rectangle_contour_samples",
     "rectangle_radial_shape",
+    "refiner_bbox_to_dict",
+    "refiner_crop_events_to_bbox",
+    "refiner_expand_bbox",
     "select_mevdt_event_and_label_files",
     "simulate_rectangle_event_counts",
     "run_synthetic_tracker_benchmark",
