@@ -760,16 +760,32 @@ def _add_refiner_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-events", type=int, default=128)
     parser.add_argument("--min-events", type=int, default=3)
     parser.add_argument("--refinement-blend", type=float, default=0.25)
+    parser.add_argument("--event-activity-floor", type=float, default=0.05)
+    parser.add_argument("--inactive-activity-threshold", type=float, default=0.05)
+    parser.add_argument("--measurement-noise-variance", type=float, default=4.0)
     parser.add_argument(
         "--disable-event-polarity",
         action="store_true",
         help="Ignore event polarity during DVS-ENACT refinement.",
     )
-    parser.add_argument(
-        "--disable-conservative-gates",
-        action="store_true",
-        help="Write every non-fallback DVS-ENACT refinement instead of guarded output.",
-    )
+    add_acceptance_arguments(parser, include_disable=True)
+
+
+def add_acceptance_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_disable: bool = False,
+) -> None:
+    """Add conservative refinement acceptance threshold CLI arguments."""
+    if include_disable:
+        parser.add_argument(
+            "--disable-conservative-gates",
+            action="store_true",
+            help=(
+                "Write every non-fallback DVS-ENACT refinement instead of "
+                "guarded output."
+            ),
+        )
     parser.add_argument("--min-accept-used-events", type=int, default=10)
     parser.add_argument("--min-accept-active-measurements", type=int, default=3)
     parser.add_argument("--min-accept-mean-activity", type=float, default=0.10)
@@ -787,6 +803,9 @@ def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
             search_expansion_factor=args.search_expansion_factor,
             max_events=args.max_events,
             min_events=args.min_events,
+            event_activity_floor=args.event_activity_floor,
+            inactive_activity_threshold=args.inactive_activity_threshold,
+            measurement_noise_variance=args.measurement_noise_variance,
             use_event_polarity=not args.disable_event_polarity,
             refinement_blend=args.refinement_blend,
         )

@@ -45,8 +45,8 @@ class DVSFullSCGPTracker(FullSCGPTracker):
         super().__init__(*args, **kwargs)
         self.event_activity_floor = float(event_activity_floor)
         self.inactive_activity_threshold = float(inactive_activity_threshold)
-        if self.event_activity_floor <= 0.0:
-            raise ValueError("event_activity_floor must be positive")
+        if self.event_activity_floor < 0.0:
+            raise ValueError("event_activity_floor must be non-negative")
         if self.inactive_activity_threshold < 0.0:
             raise ValueError("inactive_activity_threshold must be non-negative")
         self.polarity_mismatch_weight = self._validate_polarity_mismatch_weight(
@@ -330,8 +330,8 @@ class DVSFullSCGPTracker(FullSCGPTracker):
             inactive_activity_threshold = self.inactive_activity_threshold
         else:
             inactive_activity_threshold = float(inactive_activity_threshold)
-        if event_activity_floor <= 0.0:
-            raise ValueError("event_activity_floor must be positive")
+        if event_activity_floor < 0.0:
+            raise ValueError("event_activity_floor must be non-negative")
         if inactive_activity_threshold < 0.0:
             raise ValueError("inactive_activity_threshold must be non-negative")
         if polarity_mismatch_weight is None:
@@ -395,7 +395,7 @@ class DVSFullSCGPTracker(FullSCGPTracker):
             polarity_weights.append(polarity_weight)
 
             weighted_activity = activity * polarity_weight
-            if weighted_activity < inactive_activity_threshold:
+            if weighted_activity <= 0.0 or weighted_activity < inactive_activity_threshold:
                 continue
 
             effective_activity = (

@@ -98,6 +98,20 @@ least 3 active measurements, mean activity of at least 0.10, IoU of at least
 0.60 with the base box, and refined/base area ratio of at most 1.50. Rejected
 frames keep the base tracker box and are recorded in the diagnostics JSON.
 
+Tune EventVOT refinement parameters on the validation subset only:
+
+```powershell
+python scripts/run_eventvot_validation_sweep.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --base-results path\to\hdetrack_eventvot_validation `
+  --output-root outputs\eventvot-validation-sweep `
+  --split val
+```
+
+The sweep refuses the test split unless `--allow-test-split` is supplied for a
+final held-out evaluation. It ranks configurations by validation SR AUC, with
+PR, NPR, and refinement acceptance rate written as secondary diagnostics.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic

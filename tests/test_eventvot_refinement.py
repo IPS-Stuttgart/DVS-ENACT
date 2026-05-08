@@ -220,6 +220,9 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--eventvot-root" in help_text
     assert "--tracker-name" in help_text
     assert "--event-column-order" in help_text
+    assert "--event-activity-floor" in help_text
+    assert "--inactive-activity-threshold" in help_text
+    assert "--measurement-noise-variance" in help_text
     assert "--min-accept-used-events" in help_text
 
 

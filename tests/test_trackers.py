@@ -64,6 +64,22 @@ class TestDVSFullSCGPTracker(unittest.TestCase):
         self.assertGreater(tracker.last_event_activities[0], 0.99)
         self.assertLess(tracker.last_event_activities[1], 1e-6)
 
+    def test_zero_event_activity_floor_is_allowed_when_inactive_events_are_skipped(self):
+        tracker = self._make_tracker(inactive_activity_threshold=0.25)
+
+        tracker.update(
+            array(
+                [
+                    [1.2, 0.0],
+                    [0.0, 1.2],
+                ]
+            ),
+            event_velocity=array([1.0, 0.0]),
+            event_activity_floor=0.0,
+        )
+
+        self.assertEqual(tracker.last_active_measurement_indices, [0])
+
     def test_update_can_infer_event_velocity_from_kinematics(self):
         tracker = DVSFullSCGPTracker(
             8,
