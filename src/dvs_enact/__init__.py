@@ -4,6 +4,8 @@ from .active_contour import (
     activity_profile,
     normal_flow_activity,
     rectangle_contour_samples,
+    signed_normal_flow,
+    signed_normal_flow_profile,
     unit_vector_from_angle,
 )
 from .synthetic import (
@@ -89,6 +91,8 @@ __all__ = [
     "select_mevdt_event_and_label_files",
     "simulate_rectangle_event_counts",
     "run_synthetic_tracker_benchmark",
+    "signed_normal_flow",
+    "signed_normal_flow_profile",
     "subsample_events_chronologically",
     "summarize_diagnostics",
     "summarize_loaded_sequence",
