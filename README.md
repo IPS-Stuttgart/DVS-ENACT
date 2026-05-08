@@ -75,6 +75,23 @@ without changing the external tracker architecture. `result.to_dict()` includes
 the cropped event count, active-measurement count, mean normal-flow activity,
 polarity-consistency diagnostics, and fallback reason when refinement is skipped.
 
+For EventVOT-style single-object tracking result files, use the dedicated
+adapter. It preserves the official `x,y,width,height` result convention:
+
+```powershell
+python scripts/run_eventvot_refinement.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --base-results path\to\hdetrack_eventvot `
+  --eventvot-toolkit-root path\to\EventVOT_eval_toolkit `
+  --tracker-name HDETrackV2_DVSENACT `
+  --update-config-tracker `
+  --split test
+```
+
+This writes official evaluator files below
+`eventvot_tracking_results/HDETrackV2_DVSENACT_tracking_result/` and adds the
+tracker to `utils/config_tracker.m`.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
