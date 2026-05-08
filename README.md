@@ -131,6 +131,14 @@ By default this expects result directories for `HDETrackV2`,
 strong-tracker-to-refined gains, and attribute-level gains for EventVOT
 challenge factors.
 
+## Benchmark Roadmap
+
+EventVOT is the first benchmark target for tracker-plus-physics claims. Only
+after reproducing the official EventVOT baseline and reporting the held-out
+strong-tracker-to-refined comparison should the adapter be ported to VisEvent
+or FELT. The next-stage guardrails are documented in
+[`docs/tracking_benchmark_roadmap.md`](docs/tracking_benchmark_roadmap.md).
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
@@ -148,6 +156,7 @@ and `outputs/`.
 
 For a compact first probe from the archive:
 
+<!-- markdownlint-disable MD013 -->
 ```powershell
 New-Item -ItemType Directory -Force -Path D:\Uni-Data\MEVDT-one-sequence
 tar -xf D:\Uni-Data\MEVDT.zip -C D:\Uni-Data\MEVDT-one-sequence `
@@ -156,6 +165,7 @@ tar -xf D:\Uni-Data\MEVDT.zip -C D:\Uni-Data\MEVDT-one-sequence `
   labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-custom24.txt `
   labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-mot24.txt
 ```
+<!-- markdownlint-enable MD013 -->
 
 ```powershell
 $env:PYTHONPATH = "src;../PyRecEst/src"
