@@ -68,6 +68,28 @@ include_mevdt = true
 dataset_root = /absolute/path/to/MEVDT-one-sequence
 ```
 
+When `include_mevdt = true` and `dataset_root` is empty, the workflow downloads
+the MEVDT WebDAV share with rclone into:
+
+```text
+$HOME/.cache/datasets/MEVDT
+```
+
+The workflow expects these GitHub secrets to be configured:
+
+```text
+MEVDT_WEBDAV_URL
+MEVDT_DATA_KEY
+MEVDT_DATA_PASSWORD
+```
+
+The real-data workflow also runs the filtered MEVDT tracker sweep and writes:
+
+```text
+data/paper_evidence/mevdt_filtered_tracker_sweep.json
+data/paper_evidence/evaluation_summary.json
+```
+
 The workflow uploads `paper-output/data/paper_evidence` and
 `paper-output/figures` as a GitHub Actions artifact. It does not try to push
 generated files into the private paper repository automatically. That keeps the

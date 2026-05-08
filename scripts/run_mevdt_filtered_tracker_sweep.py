@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +14,12 @@ from dvs_enact import (
     select_mevdt_event_and_label_files,
 )
 from dvs_enact.mevdt import MEVDT_DATASET_URL, MEVDT_DOI
+from mevdt_cli_common import (
+    option_string,
+    parse_and_print,
+    tracker_config_from_options,
+    write_evidence_json,
+)
 
 
 def _path_for_payload(path: Path, dataset_root: Path) -> str:
@@ -64,22 +68,14 @@ def _compact_result(name: str, result: dict) -> dict:
 def run(
     dataset_root: Path,
     output_root: Path,
-    event_csv: str | None = None,
-    label_file: str | None = None,
-    max_events_per_window: int = 64,
-    max_windows: int | None = 500,
-    min_events_per_window: int = 3,
+    **options: object,
 ) -> dict:
-    base_config = TrackerComparisonConfig(
-        max_events_per_window=max_events_per_window,
-        max_windows=max_windows,
-        min_events_per_window=min_events_per_window,
-    )
+    base_config = tracker_config_from_options(options)
     window_filter = WindowFilterConfig()
     selected_event, selected_label = select_mevdt_event_and_label_files(
         dataset_root,
-        event_csv=event_csv,
-        label_file=label_file,
+        event_csv=option_string(options, "event_csv"),
+        label_file=option_string(options, "label_file"),
     )
     labels = read_tracking_labels(selected_label)
     if not labels:
@@ -115,10 +111,11 @@ def run(
         "sweep": sweep_results,
     }
 
-    data_dir = output_root / "data" / "paper_evidence"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    output_path = data_dir / "mevdt_filtered_tracker_sweep.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path = write_evidence_json(
+        output_root,
+        "mevdt_filtered_tracker_sweep.json",
+        payload,
+    )
     return {
         "output": str(output_path),
         "filtered_default_summary": default_result["summary"],
@@ -127,37 +124,7 @@ def run(
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--dataset-root",
-        type=Path,
-        default=Path(r"D:\Uni-Data\MEVDT-one-sequence"),
-    )
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=Path("../2026-05-DVS-ENACT-Paper"),
-    )
-    parser.add_argument("--event-csv")
-    parser.add_argument("--label-file")
-    parser.add_argument("--max-events-per-window", type=int, default=64)
-    parser.add_argument("--max-windows", type=int, default=500)
-    parser.add_argument("--min-events-per-window", type=int, default=3)
-    args = parser.parse_args()
-    print(
-        json.dumps(
-            run(
-                dataset_root=args.dataset_root,
-                output_root=args.output_root,
-                event_csv=args.event_csv,
-                label_file=args.label_file,
-                max_events_per_window=args.max_events_per_window,
-                max_windows=args.max_windows,
-                min_events_per_window=args.min_events_per_window,
-            ),
-            indent=2,
-        )
-    )
+    parse_and_print(run)
 
 
 if __name__ == "__main__":

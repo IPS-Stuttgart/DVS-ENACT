@@ -15,6 +15,7 @@ from .mevdt import (
     MEVDT_DOI,
     BoundingBox,
     EventBatch,
+    empty_event_batch,
     find_event_csv_files,
     find_tracking_label_files,
     read_event_csv,
@@ -177,12 +178,7 @@ def events_for_label_window(
 ) -> EventBatch:
     """Select events in the current label box between consecutive label times."""
     if current.timestamp_ns is None or following.timestamp_ns is None:
-        return EventBatch(
-            ts=np.array([], dtype=np.int64),
-            x=np.array([], dtype=np.int32),
-            y=np.array([], dtype=np.int32),
-            p=np.array([], dtype=np.int8),
-        )
+        return empty_event_batch()
     mask = (
         (events.ts >= current.timestamp_ns)
         & (events.ts < following.timestamp_ns)

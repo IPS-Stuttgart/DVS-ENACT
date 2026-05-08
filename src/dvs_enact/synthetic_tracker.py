@@ -7,7 +7,7 @@ from typing import Iterable
 
 import numpy as np
 
-from .mevdt import BoundingBox, EventBatch
+from .mevdt import BoundingBox, EventBatch, empty_event_batch
 from .mevdt_comparison import (
     TrackerComparisonConfig,
     compare_trackers_on_labels,
@@ -185,15 +185,7 @@ def generate_synthetic_rectangle_events(
             polarities.append(np.full(count, polarity, dtype=np.int8))
 
     if not timestamps:
-        return (
-            EventBatch(
-                ts=np.array([], dtype=np.int64),
-                x=np.array([], dtype=np.int32),
-                y=np.array([], dtype=np.int32),
-                p=np.array([], dtype=np.int8),
-            ),
-            edge_counts,
-        )
+        return empty_event_batch(), edge_counts
     ts = np.concatenate(timestamps)
     order = np.argsort(ts, kind="stable")
     return (

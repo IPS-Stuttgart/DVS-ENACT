@@ -36,6 +36,16 @@ class EventBatch:
         return int(np.min(self.ts)), int(np.max(self.ts))
 
 
+def empty_event_batch() -> EventBatch:
+    """Return an empty event batch with canonical event-array dtypes."""
+    return EventBatch(
+        ts=np.array([], dtype=np.int64),
+        x=np.array([], dtype=np.int32),
+        y=np.array([], dtype=np.int32),
+        p=np.array([], dtype=np.int8),
+    )
+
+
 @dataclass(frozen=True)
 class BoundingBox:
     """One object bounding-box annotation."""

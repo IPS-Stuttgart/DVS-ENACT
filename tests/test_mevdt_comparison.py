@@ -17,6 +17,21 @@ from dvs_enact import (
 )
 
 
+def _two_label_fixture() -> tuple[list[BoundingBox], EventBatch]:
+    return (
+        [
+            BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0),
+            BoundingBox(1, 1, 2.0, 0.0, 12.0, 10.0, timestamp_ns=10),
+        ],
+        EventBatch(
+            ts=np.array([1, 2, 3, 4], dtype=np.int64),
+            x=np.array([0, 10, 0, 10], dtype=np.int32),
+            y=np.array([2, 2, 8, 8], dtype=np.int32),
+            p=np.array([1, 1, 1, 1], dtype=np.int8),
+        ),
+    )
+
+
 def test_rectangle_radial_shape_matches_axis_aligned_rectangle_axes():
     radial = rectangle_radial_shape(width=4.0, height=2.0, n_base_points=4)
 
@@ -154,16 +169,7 @@ def test_event_cloud_centroid_bbox_falls_back_for_low_event_count():
     reason="MEVDT comparison fixture uses numpy tracker assertions",
 )
 def test_compare_trackers_on_labels_returns_valid_payload():
-    labels = [
-        BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0),
-        BoundingBox(1, 1, 2.0, 0.0, 12.0, 10.0, timestamp_ns=10),
-    ]
-    events = EventBatch(
-        ts=np.array([1, 2, 3, 4], dtype=np.int64),
-        x=np.array([0, 10, 0, 10], dtype=np.int32),
-        y=np.array([2, 2, 8, 8], dtype=np.int32),
-        p=np.array([1, 1, 1, 1], dtype=np.int8),
-    )
+    labels, events = _two_label_fixture()
     config = TrackerComparisonConfig(
         n_base_points=8,
         max_events_per_window=4,
@@ -209,16 +215,7 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     reason="MEVDT comparison fixture uses numpy tracker assertions",
 )
 def test_compare_trackers_on_labels_reports_filter_skips():
-    labels = [
-        BoundingBox(0, 1, 0.0, 0.0, 10.0, 10.0, timestamp_ns=0),
-        BoundingBox(1, 1, 2.0, 0.0, 12.0, 10.0, timestamp_ns=10),
-    ]
-    events = EventBatch(
-        ts=np.array([1, 2, 3, 4], dtype=np.int64),
-        x=np.array([0, 10, 0, 10], dtype=np.int32),
-        y=np.array([2, 2, 8, 8], dtype=np.int32),
-        p=np.array([1, 1, 1, 1], dtype=np.int8),
-    )
+    labels, events = _two_label_fixture()
     config = TrackerComparisonConfig(n_base_points=8, max_windows=1)
     window_filter = WindowFilterConfig(border_margin_px=1.0, trim_track_ends=0)
 
