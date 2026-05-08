@@ -1,6 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/kucherenko/jscpd/master/schemas/options.schema.json",
   "ignore": [
+    "**/.github/workflows/**",
     "src/dvs_enact/mevdt_comparison.py",
     "src/dvs_enact/synthetic_tracker.py",
     "tests/test_mevdt_comparison.py",
