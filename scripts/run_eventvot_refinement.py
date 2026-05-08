@@ -10,7 +10,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,28 @@ from dvs_enact import (
     EventBatch,
     empty_event_batch,
 )
+
+
+@dataclass(frozen=True)
+class EventVOTAcceptanceConfig:
+    """Conservative gates for accepting post-hoc EventVOT refinements."""
+
+    enabled: bool = True
+    min_used_event_count: int = 10
+    min_active_measurement_count: int = 3
+    min_mean_event_activity: float = 0.10
+    min_candidate_iou: float = 0.60
+    max_candidate_area_ratio: float = 1.50
+
+
+@dataclass(frozen=True)
+class EventVOTAcceptanceDecision:
+    """Decision record for one candidate/refined EventVOT box pair."""
+
+    accepted: bool
+    rejection_reasons: tuple[str, ...]
+    candidate_iou: float
+    candidate_area_ratio: float
 
 
 @dataclass(frozen=True)
@@ -37,6 +59,9 @@ class EventVOTRefinementOptions:
     event_column_order: str = "auto"
     diagnostics_json: Path | None = None
     config_tracker_path: Path | None = None
+    acceptance_config: EventVOTAcceptanceConfig = field(
+        default_factory=EventVOTAcceptanceConfig
+    )
 
 
 def default_eventvot_refiner() -> DVSContourRefiner:
@@ -181,8 +206,10 @@ def refine_sequence(
     refiner: DVSContourRefiner,
     *,
     event_column_order: str = "auto",
+    acceptance_config: EventVOTAcceptanceConfig | None = None,
 ) -> dict[str, Any]:
     """Refine one EventVOT sequence result file."""
+    acceptance_config = acceptance_config or EventVOTAcceptanceConfig()
     event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
@@ -194,10 +221,18 @@ def refine_sequence(
         {
             "frame_index": 0,
             "fallback_reason": "initial_frame",
-            "candidate_bbox": base_boxes[0].astype(float).tolist(),
-            "output_bbox": refined_boxes[0].astype(float).tolist(),
+            "candidate_bbox": xywh_to_diagnostic_bbox(base_boxes[0]),
+            "output_bbox": xywh_to_diagnostic_bbox(refined_boxes[0]),
+            "refiner_output_bbox": xywh_to_diagnostic_bbox(refined_boxes[0]),
+            "output_xywh": refined_boxes[0].astype(float).tolist(),
+            "refiner_output_xywh": refined_boxes[0].astype(float).tolist(),
             "event_count": 0,
             "used_event_count": 0,
+            "active_measurement_count": 0,
+            "accept_refinement": False,
+            "rejection_reasons": ["initial_frame"],
+            "candidate_iou": 1.0,
+            "candidate_area_ratio": 1.0,
         }
     ]
 
@@ -213,11 +248,29 @@ def refine_sequence(
             previous_candidate_bbox=base_boxes[frame_index - 1],
         )
         timings[frame_index] = time.perf_counter() - started
-        refined_boxes[frame_index] = np.asarray(result.as_xywh(), dtype=float)
+        refiner_output = np.asarray(result.as_xywh(), dtype=float)
+        decision = evaluate_refinement_acceptance(
+            base_boxes[frame_index],
+            result,
+            acceptance_config,
+        )
+        refined_boxes[frame_index] = (
+            refiner_output
+            if decision.accepted
+            else np.asarray(base_boxes[frame_index], dtype=float)
+        )
         frame_record = result.to_dict()
+        refiner_output_bbox = frame_record.get("output_bbox")
         frame_record.update(
             {
                 "frame_index": int(frame_index),
+                "accept_refinement": decision.accepted,
+                "rejection_reasons": list(decision.rejection_reasons),
+                "candidate_iou": float(decision.candidate_iou),
+                "candidate_area_ratio": float(decision.candidate_area_ratio),
+                "refiner_output_bbox": refiner_output_bbox,
+                "refiner_output_xywh": refiner_output.astype(float).tolist(),
+                "output_bbox": xywh_to_diagnostic_bbox(refined_boxes[frame_index]),
                 "output_xywh": refined_boxes[frame_index].astype(float).tolist(),
                 "elapsed_seconds": float(timings[frame_index]),
             }
@@ -230,7 +283,14 @@ def refine_sequence(
         "refined" if frame["fallback_reason"] is None else frame["fallback_reason"]
         for frame in frames
     )
-    refined_frame_count = sum(1 for frame in frames if frame["fallback_reason"] is None)
+    acceptance_counts = Counter(
+        "accepted" if frame["accept_refinement"] else frame["rejection_reasons"][0]
+        for frame in frames
+    )
+    refiner_success_frame_count = sum(
+        1 for frame in frames if frame["fallback_reason"] is None
+    )
+    accepted_refinement_count = sum(1 for frame in frames if frame["accept_refinement"])
     used_event_counts = [int(frame["used_event_count"]) for frame in frames[1:]]
     return {
         "sequence": sequence_name,
@@ -239,8 +299,11 @@ def refine_sequence(
         "base_result_file": str(base_result_file),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
-        "refined_frame_count": int(refined_frame_count),
+        "refined_frame_count": int(accepted_refinement_count),
+        "accepted_refinement_count": int(accepted_refinement_count),
+        "refiner_success_frame_count": int(refiner_success_frame_count),
         "fallback_counts": dict(sorted(fallback_counts.items())),
+        "acceptance_counts": dict(sorted(acceptance_counts.items())),
         "mean_used_event_count": float(np.mean(used_event_counts))
         if used_event_counts
         else 0.0,
@@ -279,6 +342,7 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
                 output_result_file,
                 refiner,
                 event_column_order=options.event_column_order,
+                acceptance_config=options.acceptance_config,
             )
         )
 
@@ -317,6 +381,7 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
             "config_tracker_updated": config_tracker_updated,
         },
         "refiner_config": asdict(refiner.config),
+        "acceptance_config": asdict(options.acceptance_config),
         "summary": summarize_sequence_results(summaries),
         "sequences": summaries,
     }
@@ -329,18 +394,117 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
 def summarize_sequence_results(sequence_summaries: Iterable[dict[str, Any]]) -> dict[str, Any]:
     sequence_summaries = list(sequence_summaries)
     fallback_counts: Counter[str] = Counter()
+    acceptance_counts: Counter[str] = Counter()
     for summary in sequence_summaries:
         fallback_counts.update(summary["fallback_counts"])
+        acceptance_counts.update(summary["acceptance_counts"])
     frame_count = sum(int(summary["frame_count"]) for summary in sequence_summaries)
     refined_frame_count = sum(
         int(summary["refined_frame_count"]) for summary in sequence_summaries
+    )
+    accepted_refinement_count = sum(
+        int(summary["accepted_refinement_count"]) for summary in sequence_summaries
+    )
+    refiner_success_frame_count = sum(
+        int(summary["refiner_success_frame_count"]) for summary in sequence_summaries
     )
     return {
         "sequence_count": len(sequence_summaries),
         "frame_count": int(frame_count),
         "refined_frame_count": int(refined_frame_count),
+        "accepted_refinement_count": int(accepted_refinement_count),
+        "refiner_success_frame_count": int(refiner_success_frame_count),
         "fallback_counts": dict(sorted(fallback_counts.items())),
+        "acceptance_counts": dict(sorted(acceptance_counts.items())),
     }
+
+
+def evaluate_refinement_acceptance(
+    candidate_xywh: np.ndarray,
+    result: Any,
+    config: EventVOTAcceptanceConfig | None = None,
+) -> EventVOTAcceptanceDecision:
+    """Return whether a DVS-ENACT refinement should replace the base box."""
+    config = config or EventVOTAcceptanceConfig()
+    refined_xywh = np.asarray(result.as_xywh(), dtype=float)
+    candidate_iou = box_iou_xywh(candidate_xywh, refined_xywh)
+    candidate_area_ratio = area_ratio_xywh(candidate_xywh, refined_xywh)
+    if not config.enabled:
+        rejection_reasons = () if result.fallback_reason is None else ("fallback_reason",)
+        return EventVOTAcceptanceDecision(
+            accepted=result.fallback_reason is None,
+            rejection_reasons=rejection_reasons,
+            candidate_iou=candidate_iou,
+            candidate_area_ratio=candidate_area_ratio,
+        )
+
+    rejection_reasons: list[str] = []
+    if result.fallback_reason is not None:
+        rejection_reasons.append(f"fallback:{result.fallback_reason}")
+    if int(result.used_event_count) < config.min_used_event_count:
+        rejection_reasons.append("used_event_count")
+    if int(result.active_measurement_count) < config.min_active_measurement_count:
+        rejection_reasons.append("active_measurement_count")
+    if result.mean_event_activity is None:
+        rejection_reasons.append("mean_event_activity_missing")
+    elif float(result.mean_event_activity) < config.min_mean_event_activity:
+        rejection_reasons.append("mean_event_activity")
+    if candidate_iou < config.min_candidate_iou:
+        rejection_reasons.append("candidate_iou")
+    if candidate_area_ratio > config.max_candidate_area_ratio:
+        rejection_reasons.append("candidate_area_ratio")
+
+    return EventVOTAcceptanceDecision(
+        accepted=not rejection_reasons,
+        rejection_reasons=tuple(rejection_reasons),
+        candidate_iou=candidate_iou,
+        candidate_area_ratio=candidate_area_ratio,
+    )
+
+
+def box_iou_xywh(first_xywh: np.ndarray, second_xywh: np.ndarray) -> float:
+    """Return IoU for two ``x,y,width,height`` boxes."""
+    first = np.asarray(first_xywh, dtype=float)
+    second = np.asarray(second_xywh, dtype=float)
+    first_area = _box_area_xywh(first)
+    second_area = _box_area_xywh(second)
+    if first_area <= 0.0 or second_area <= 0.0:
+        return 0.0
+    first_x2 = first[0] + first[2]
+    first_y2 = first[1] + first[3]
+    second_x2 = second[0] + second[2]
+    second_y2 = second[1] + second[3]
+    intersection_width = max(0.0, min(first_x2, second_x2) - max(first[0], second[0]))
+    intersection_height = max(0.0, min(first_y2, second_y2) - max(first[1], second[1]))
+    intersection = intersection_width * intersection_height
+    union = first_area + second_area - intersection
+    return 0.0 if union <= 0.0 else float(intersection / union)
+
+
+def area_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarray) -> float:
+    """Return proposed-box area divided by reference-box area."""
+    reference_area = _box_area_xywh(np.asarray(reference_xywh, dtype=float))
+    proposed_area = _box_area_xywh(np.asarray(proposed_xywh, dtype=float))
+    if reference_area <= 0.0:
+        return math.inf
+    return float(proposed_area / reference_area)
+
+
+def xywh_to_diagnostic_bbox(box_xywh: np.ndarray) -> dict[str, float]:
+    """Return a JSON-friendly bbox dictionary for an ``xywh`` box."""
+    box = np.asarray(box_xywh, dtype=float)
+    return {
+        "x_min": float(box[0]),
+        "y_min": float(box[1]),
+        "width": float(box[2]),
+        "height": float(box[3]),
+        "x_max": float(box[0] + box[2]),
+        "y_max": float(box[1] + box[3]),
+    }
+
+
+def _box_area_xywh(box_xywh: np.ndarray) -> float:
+    return float(max(0.0, float(box_xywh[2])) * max(0.0, float(box_xywh[3])))
 
 
 def resolve_eventvot_split_root(eventvot_root: Path, split: str) -> Path:
@@ -561,6 +725,7 @@ def main() -> int:
             event_column_order=args.event_column_order,
             diagnostics_json=args.diagnostics_json,
             config_tracker_path=config_tracker_path,
+            acceptance_config=_acceptance_config_from_args(args),
         ),
         refiner=refiner,
     )
@@ -600,6 +765,16 @@ def _add_refiner_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Ignore event polarity during DVS-ENACT refinement.",
     )
+    parser.add_argument(
+        "--disable-conservative-gates",
+        action="store_true",
+        help="Write every non-fallback DVS-ENACT refinement instead of guarded output.",
+    )
+    parser.add_argument("--min-accept-used-events", type=int, default=10)
+    parser.add_argument("--min-accept-active-measurements", type=int, default=3)
+    parser.add_argument("--min-accept-mean-activity", type=float, default=0.10)
+    parser.add_argument("--min-accept-candidate-iou", type=float, default=0.60)
+    parser.add_argument("--max-accept-area-ratio", type=float, default=1.50)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -615,6 +790,17 @@ def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
             use_event_polarity=not args.disable_event_polarity,
             refinement_blend=args.refinement_blend,
         )
+    )
+
+
+def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptanceConfig:
+    return EventVOTAcceptanceConfig(
+        enabled=not args.disable_conservative_gates,
+        min_used_event_count=args.min_accept_used_events,
+        min_active_measurement_count=args.min_accept_active_measurements,
+        min_mean_event_activity=args.min_accept_mean_activity,
+        min_candidate_iou=args.min_accept_candidate_iou,
+        max_candidate_area_ratio=args.max_accept_area_ratio,
     )
 
 

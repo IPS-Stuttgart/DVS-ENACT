@@ -92,6 +92,12 @@ This writes official evaluator files below
 `eventvot_tracking_results/HDETrackV2_DVSENACT_tracking_result/` and adds the
 tracker to `utils/config_tracker.m`.
 
+The EventVOT adapter is conservative by default. It only replaces the base
+tracker box when DVS-ENACT has no fallback reason, at least 10 used events, at
+least 3 active measurements, mean activity of at least 0.10, IoU of at least
+0.60 with the base box, and refined/base area ratio of at most 1.50. Rejected
+frames keep the base tracker box and are recorded in the diagnostics JSON.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic

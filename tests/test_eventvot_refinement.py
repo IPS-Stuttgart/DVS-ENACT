@@ -153,6 +153,49 @@ def test_eventvot_refinement_writes_official_tracker_result_layout(tmp_path):
     assert config_tracker.read_text(encoding="utf-8").count("HDETrackV2_DVSENACT") == 1
 
 
+def test_eventvot_refinement_uses_conservative_acceptance_gates(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    refiner = _FakeRefiner(
+        module,
+        [
+            _FakeResult([9.25, 8.0, 10.0, 10.0]),
+            _FakeResult([40.0, 8.0, 10.0, 10.0]),
+        ],
+    )
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=refiner,
+    )
+
+    refined = np.loadtxt(output_results / "recording_0001.txt")
+    np.testing.assert_allclose(
+        refined,
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [9.25, 8.0, 10.0, 10.0],
+                [10.0, 8.0, 10.0, 10.0],
+            ]
+        ),
+    )
+    summary = payload["summary"]
+    assert summary["accepted_refinement_count"] == 1
+    assert summary["refiner_success_frame_count"] == 2
+    assert summary["acceptance_counts"]["accepted"] == 1
+    assert summary["acceptance_counts"]["candidate_iou"] == 1
+    frames = payload["sequences"][0]["frames"]
+    assert frames[1]["accept_refinement"]
+    assert not frames[2]["accept_refinement"]
+    assert frames[2]["rejection_reasons"] == ["candidate_iou"]
+
+
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
@@ -177,3 +220,38 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--eventvot-root" in help_text
     assert "--tracker-name" in help_text
     assert "--event-column-order" in help_text
+    assert "--min-accept-used-events" in help_text
+
+
+class _FakeRefiner:
+    def __init__(self, module, results):
+        self.config = module.DVSContourRefinerConfig(
+            input_bbox_format="xywh",
+            output_bbox_format="xywh",
+        )
+        self._results = list(results)
+
+    def refine(self, _candidate, _events, *, previous_candidate_bbox=None):
+        del previous_candidate_bbox
+        return self._results.pop(0)
+
+
+class _FakeResult:
+    fallback_reason = None
+    used_event_count = 12
+    active_measurement_count = 3
+    mean_event_activity = 0.20
+
+    def __init__(self, xywh):
+        self._xywh = tuple(float(value) for value in xywh)
+
+    def as_xywh(self):
+        return self._xywh
+
+    def to_dict(self):
+        return {
+            "fallback_reason": self.fallback_reason,
+            "used_event_count": self.used_event_count,
+            "active_measurement_count": self.active_measurement_count,
+            "mean_event_activity": self.mean_event_activity,
+        }
