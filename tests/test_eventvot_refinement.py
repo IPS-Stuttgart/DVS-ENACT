@@ -166,16 +166,14 @@ def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
 
 
 def test_eventvot_refinement_help_runs_as_script():
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT_PATH), "--help"],
+    help_text = subprocess.check_output(
+        (sys.executable, str(SCRIPT_PATH), "--help"),
         cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
         text=True,
+        stderr=subprocess.STDOUT,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "Refine EventVOT xywh tracker result files" in result.stdout
-    assert "--eventvot-root" in result.stdout
-    assert "--tracker-name" in result.stdout
-    assert "--event-column-order" in result.stdout
+    assert "Refine EventVOT xywh tracker result files" in help_text
+    assert "--eventvot-root" in help_text
+    assert "--tracker-name" in help_text
+    assert "--event-column-order" in help_text
