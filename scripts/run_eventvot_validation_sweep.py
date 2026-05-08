@@ -363,8 +363,32 @@ def evaluate_eventvot_results(
     success_curve = mean_nonzero_curves(success_curves)
     precision_curve = mean_nonzero_curves(precision_curves)
     normalized_precision_curve = mean_nonzero_curves(normalized_precision_curves)
+    metrics = summarize_eventvot_curves(
+        sequence_count=len(sequence_names),
+        evaluated_frame_count=evaluated_frame_count,
+        success_curve=success_curve,
+        precision_curve=precision_curve,
+        normalized_precision_curve=normalized_precision_curve,
+        mean_ious=mean_ious,
+    )
+    metrics["absent_handling"] = (
+        "mirrors official toolkit: absent.txt is inverted before filtering"
+    )
+    return metrics
+
+
+def summarize_eventvot_curves(
+    *,
+    sequence_count: int,
+    evaluated_frame_count: int,
+    success_curve: np.ndarray,
+    precision_curve: np.ndarray,
+    normalized_precision_curve: np.ndarray,
+    mean_ious: list[float],
+) -> dict[str, Any]:
+    """Return scalar EventVOT metrics and serialized official curves."""
     return {
-        "sequence_count": len(sequence_names),
+        "sequence_count": int(sequence_count),
         "evaluated_frame_count": int(evaluated_frame_count),
         "sr_auc": float(np.mean(success_curve)),
         "pr_auc": float(np.mean(precision_curve)),
@@ -378,7 +402,6 @@ def evaluate_eventvot_results(
         "overlap_thresholds": OVERLAP_THRESHOLDS.astype(float).tolist(),
         "error_thresholds": ERROR_THRESHOLDS.astype(float).tolist(),
         "normalized_error_thresholds": NORMALIZED_ERROR_THRESHOLDS.astype(float).tolist(),
-        "absent_handling": "mirrors official toolkit: absent.txt is inverted before filtering",
     }
 
 

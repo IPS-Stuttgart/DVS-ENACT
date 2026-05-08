@@ -112,6 +112,25 @@ The sweep refuses the test split unless `--allow-test-split` is supplied for a
 final held-out evaluation. It ranks configurations by validation SR AUC, with
 PR, NPR, and refinement acceptance rate written as secondary diagnostics.
 
+After locking the validation-selected configuration and running the held-out
+EventVOT test set, generate the paper comparison table and attribute-level
+gain report:
+
+```powershell
+python scripts/report_eventvot_comparisons.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --result-root path\to\EventVOT_eval_toolkit\eventvot_tracking_results `
+  --eventvot-toolkit-root path\to\EventVOT_eval_toolkit `
+  --output-root outputs\eventvot-paper-report `
+  --split test
+```
+
+By default this expects result directories for `HDETrackV2`,
+`HDETrackV2 + DVS-ENACT`, `OSTrack-event`, `OSTrack-event + DVS-ENACT`, and
+`DVS-ENACT-only`. The report writes the main `SR/PR/NPR/FPS` table, pairwise
+strong-tracker-to-refined gains, and attribute-level gains for EventVOT
+challenge factors.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
