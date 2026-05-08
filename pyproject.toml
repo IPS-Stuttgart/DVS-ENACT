@@ -11,7 +11,7 @@ requires-python = ">=3.11,<3.15"
 dependencies = [
     "numpy",
     "matplotlib",
-    "pyrecest @ git+https://github.com/FlorianPfaff/PyRecEst.git",
+    "pyrecest @ git+https://github.com/FlorianPfaff/PyRecEst.git@main",
 ]
 
 [project.optional-dependencies]
