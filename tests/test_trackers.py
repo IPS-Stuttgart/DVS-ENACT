@@ -5,7 +5,12 @@ import numpy.testing as npt
 # pylint: disable=no-name-in-module,no-member
 import pyrecest.backend
 from pyrecest.backend import array, eye, pi
-from dvs_enact import DVSFullSCGPTracker, DVSSCGPTracker
+from dvs_enact import (
+    DVSFullSCGPTracker,
+    DVSPointProcessSCGPTracker,
+    DVSSCGPTracker,
+    PointProcessUpdateConfig,
+)
 
 
 @unittest.skipIf(
@@ -74,6 +79,38 @@ class TestDVSFullSCGPTracker(unittest.TestCase):
         )
 
         npt.assert_allclose(activities, array([1.0, 0.0]), atol=1e-6)
+
+    def test_point_process_update_records_likelihood_terms(self):
+        tracker = DVSPointProcessSCGPTracker(
+            8,
+            kinematic_state=array([0.0, 0.0, 0.0, 0.0, 0.0]),
+            kinematic_covariance=1e-4 * eye(5),
+            shape_state=array([1.0] * 8),
+            shape_covariance=0.05 * eye(8),
+            measurement_noise=0.01 * eye(2),
+            radial_noise_variance=0.0,
+            point_process_update_config=PointProcessUpdateConfig(
+                contour_samples=16,
+                finite_difference_eps=1e-3,
+                map_step_size=0.01,
+                max_map_iterations=1,
+                shape_update_modes=2,
+            ),
+        )
+
+        tracker.update(
+            array(
+                [
+                    [1.0, -0.1],
+                    [1.0, 0.1],
+                ]
+            ),
+            event_velocity=array([1.0, 0.0]),
+        )
+
+        self.assertIsNotNone(tracker.last_event_likelihood_terms)
+        self.assertEqual(tracker.last_event_likelihood_terms.event_count, 2)
+        self.assertIsNotNone(tracker.last_event_likelihood_gradient)
 
 
 if __name__ == "__main__":
