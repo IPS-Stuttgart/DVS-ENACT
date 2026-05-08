@@ -7,7 +7,7 @@ name = "dvs-enact"
 version = "0.1.0"
 description = "DVS-ENACT: event-based normal-flow active contour tracking for extended objects."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "numpy",
     "matplotlib",
