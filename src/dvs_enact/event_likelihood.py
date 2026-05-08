@@ -288,7 +288,10 @@ def _duration_from_argument(
     config: EventLikelihoodConfig,
     batch_duration: float | None,
 ) -> float:
-    duration = config.batch_duration if batch_duration is None else float(batch_duration)
+    if batch_duration is None:
+        duration = config.batch_duration
+    else:
+        duration = float(batch_duration)
     if duration < 0.0:
         raise ValueError("batch_duration must be non-negative")
     return duration
