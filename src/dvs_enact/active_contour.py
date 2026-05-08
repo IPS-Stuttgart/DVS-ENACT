@@ -21,15 +21,32 @@ def unit_vector_from_angle(angle: float) -> np.ndarray:
     return np.array([np.cos(angle), np.sin(angle)], dtype=float)
 
 
-def normal_flow_activity(normal: np.ndarray, velocity: np.ndarray) -> float:
-    """Return normalized normal-flow activity for one contour normal."""
+def signed_normal_flow(normal: np.ndarray, velocity: np.ndarray) -> float:
+    """Return signed normalized normal flow for one contour normal.
+
+    The sign is the part that event polarity can constrain. The unsigned
+    activity model remains ``abs(signed_normal_flow(...))``.
+    """
     normal = np.asarray(normal, dtype=float)
     velocity = np.asarray(velocity, dtype=float)
     velocity_norm = np.linalg.norm(velocity)
     normal_norm = np.linalg.norm(normal)
     if velocity_norm <= 0.0 or normal_norm <= 0.0:
         return 0.0
-    return float(abs((normal / normal_norm) @ velocity) / velocity_norm)
+    return float((normal / normal_norm) @ velocity / velocity_norm)
+
+
+def normal_flow_activity(normal: np.ndarray, velocity: np.ndarray) -> float:
+    """Return normalized normal-flow activity for one contour normal."""
+    return abs(signed_normal_flow(normal, velocity))
+
+
+def signed_normal_flow_profile(normals: np.ndarray, velocity: np.ndarray) -> np.ndarray:
+    """Evaluate signed normalized normal flow for multiple contour normals."""
+    return np.array(
+        [signed_normal_flow(normal, velocity) for normal in normals],
+        dtype=float,
+    )
 
 
 def activity_profile(
@@ -38,10 +55,7 @@ def activity_profile(
     activity_floor: float | None = None,
 ) -> np.ndarray:
     """Evaluate normalized normal-flow activity for multiple contour normals."""
-    activities = np.array(
-        [normal_flow_activity(normal, velocity) for normal in normals],
-        dtype=float,
-    )
+    activities = np.abs(signed_normal_flow_profile(normals, velocity))
     if activity_floor is not None:
         activities = np.maximum(activities, float(activity_floor))
     return activities
