@@ -42,6 +42,39 @@ It compares vanilla PyRecEst `FullSCGPTracker` with `DVSFullSCGPTracker` on
 side-pair and one-sided synthetic event support before moving back to noisier
 real-data validation.
 
+## Post-hoc Tracker Refinement
+
+`DVSContourRefiner` is the lightweight integration point for comparing an
+external tracker against the same tracker plus DVS-ENACT physics. The external
+tracker still proposes the box; DVS-ENACT only crops events around that proposal
+and performs one polarity-aware contour update.
+
+```python
+from dvs_enact import DVSContourRefiner, DVSContourRefinerConfig
+
+refiner = DVSContourRefiner(
+    DVSContourRefinerConfig(
+        search_expansion_factor=1.25,
+        max_events=128,
+        use_event_polarity=True,
+    )
+)
+
+# candidate_bbox and previous_bbox are external-tracker outputs. event_window is
+# the EventBatch between the previous and current benchmark timestamps.
+result = refiner.refine(
+    candidate_bbox,
+    event_window,
+    previous_candidate_bbox=previous_bbox,
+)
+refined_bbox_xyxy = result.as_xyxy()
+```
+
+This supports ablations such as `Tracker X` versus `Tracker X + DVS-ENACT`
+without changing the external tracker architecture. `result.to_dict()` includes
+the cropped event count, active-measurement count, mean normal-flow activity,
+polarity-consistency diagnostics, and fallback reason when refinement is skipped.
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
