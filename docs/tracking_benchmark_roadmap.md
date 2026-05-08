@@ -80,8 +80,62 @@ Geometric refinement can still be reported as a secondary ablation, but the
 main FELT hypothesis should be that normal-flow event support helps decide when
 the long-term tracker should trust observations and update memory.
 
+## 4. TUMTraf-Style MOT Is Separate
+
+TUMTraf-style evaluation is worthwhile, but it is a separate multi-object
+tracking project. It is not a small port of the EventVOT adapter because
+DVS-ENACT needs to sit inside a detection-association pipeline.
+
+The TUMTraf EMOT paper frames the benchmark as event-based detection plus
+multi-object tracking for traffic scenes. It releases raw event streams,
+event-image sequences at 10 ms, 20 ms, and 30 ms aggregation windows, and
+official train/test splits. The dataset card exposes MOTChallenge-style
+`gt.txt` annotations for car and pedestrian splits.
+
+The correct architecture is:
+
+```text
+raw events / event images
+-> event detector
+-> candidate boxes
+-> association
+-> DVS-ENACT box refinement and association score
+-> MOT output
+```
+
+Use DVS-ENACT as an extra association cost term rather than only as a
+post-hoc box refiner:
+
+```text
+association_cost =
+    lambda_iou * iou_cost
+  + lambda_motion * kalman_cost
+  + lambda_event * negative_dvs_likelihood
+```
+
+Report the full MOT metric set, at least:
+
+```text
+MOTA, MOTP, IDF1, ID switches, false positives, false negatives,
+mostly tracked, partially tracked, mostly lost
+```
+
+If the implementation follows the TUMTraf EMOT paper exactly, also report the
+identity precision and recall metrics (`IDP`, `IDR`) and separate results by
+object class and temporal aggregation window. Vehicle and pedestrian results at
+10 ms, 20 ms, and 30 ms should be compared separately because detector quality,
+event sparsity, motion streaking, and association stability change with the
+aggregation interval.
+
+Do not start here unless the paper's main target becomes traffic MOT. Poor
+detector quality can hide the value of DVS-ENACT, so the detector baseline
+must be reproduced before attributing any MOT gain to the normal-flow physics
+layer.
+
 ## References
 
 - EventVOT project: <https://github.com/Event-AHU/EventVOT_Benchmark>
 - VisEvent project: <https://github.com/wangxiao5791509/VisEvent_SOT_Benchmark>
 - FELT project: <https://github.com/Event-AHU/FELT_SOT_Benchmark>
+- TUMTraf EMOT paper: <https://arxiv.org/abs/2512.14595>
+- TUMTraf EMOT dataset card: <https://huggingface.co/datasets/BigmouthFish/EMOT>

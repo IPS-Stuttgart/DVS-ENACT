@@ -136,7 +136,8 @@ challenge factors.
 EventVOT is the first benchmark target for tracker-plus-physics claims. Only
 after reproducing the official EventVOT baseline and reporting the held-out
 strong-tracker-to-refined comparison should the adapter be ported to VisEvent
-or FELT. The next-stage guardrails are documented in
+or FELT. TUMTraf-style MOT belongs to a separate detection-association project,
+not the single-object adapter track. The next-stage guardrails are documented in
 [`docs/tracking_benchmark_roadmap.md`](docs/tracking_benchmark_roadmap.md).
 
 ## MEVDT Real-Data Validation
