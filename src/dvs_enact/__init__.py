@@ -8,6 +8,17 @@ from .active_contour import (
     signed_normal_flow_profile,
     unit_vector_from_angle,
 )
+from .event_likelihood import (
+    ContourSample,
+    EventLikelihoodConfig,
+    EventLikelihoodTerms,
+    PointProcessUpdateConfig,
+    contour_event_intensity,
+    event_batch_log_likelihood,
+    event_batch_log_likelihood_terms,
+    expected_event_count,
+    normal_flow_activities,
+)
 from .synthetic import (
     EDGE_ORDER,
     count_negative_log_likelihood,
@@ -53,16 +64,23 @@ from .mevdt_comparison import (
     subsample_events_chronologically,
     window_filter_reasons,
 )
+from .point_process_tracker import DVSPointProcessSCGP, DVSPointProcessSCGPTracker
 from .trackers import DVSFullSCGPTracker, DVSSCGPTracker
 
 __all__ = [
     "DVSFullSCGPTracker",
+    "DVSPointProcessSCGP",
+    "DVSPointProcessSCGPTracker",
     "DVSSCGPTracker",
     "EDGE_ORDER",
     "MEVDT_DATASET_URL",
     "MEVDT_DOI",
     "BoundingBox",
+    "ContourSample",
     "EventBatch",
+    "EventLikelihoodConfig",
+    "EventLikelihoodTerms",
+    "PointProcessUpdateConfig",
     "SyntheticRectangleSequenceConfig",
     "TrackWindowDiagnostics",
     "TrackerComparisonConfig",
@@ -73,15 +91,20 @@ __all__ = [
     "compute_bbox_event_diagnostics",
     "compare_mevdt_tracker_sequence",
     "compare_trackers_on_labels",
+    "contour_event_intensity",
     "count_negative_log_likelihood",
     "edge_probabilities_from_activity",
     "empty_event_batch",
+    "event_batch_log_likelihood",
+    "event_batch_log_likelihood_terms",
     "event_cloud_centroid_bbox",
     "events_for_label_window",
+    "expected_event_count",
     "find_event_csv_files",
     "find_tracking_label_files",
     "generate_synthetic_rectangle_events",
     "generate_synthetic_rectangle_sequence",
+    "normal_flow_activities",
     "normal_flow_activity",
     "normal_flow_edge_probabilities",
     "read_event_csv",
