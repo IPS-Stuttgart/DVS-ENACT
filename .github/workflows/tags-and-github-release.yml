@@ -1,0 +1,335 @@
+name: Create version tag and GitHub release
+
+#checkov:skip=CKV_GHA_7: Manual release inputs only control dry-run behavior and release-note generation; package build inputs remain fixed to the checked-out source.
+on: # yamllint disable-line rule:truthy
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only; do not push a tag or create/update a GitHub release"
+        required: true
+        type: boolean
+        default: true
+      release_notes_mode:
+        description: "How to generate release notes for manual runs"
+        required: true
+        type: choice
+        default: github
+        options:
+          - github
+          - copilot
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  check_version_tag:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}
+    outputs:
+      package_name: ${{ steps.extract_project_metadata.outputs.package_name }}
+      tag_version: ${{ steps.extract_project_metadata.outputs.tag_version }}
+      tag_exists: ${{ steps.check_tag.outputs.tag_exists }}
+      dry_run: ${{ steps.set_mode.outputs.dry_run }}
+      release_notes_mode: ${{ steps.set_mode.outputs.release_notes_mode }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.ref_name }}
+
+      - name: Set mode
+        id: set_mode
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release_notes_mode=${{ inputs.release_notes_mode }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_notes_mode=github" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Extract package name and version from pyproject.toml
+        id: extract_project_metadata
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          project = data.get("project", {})
+          poetry = data.get("tool", {}).get("poetry", {})
+
+          package_name = project.get("name") or poetry.get("name")
+          version = project.get("version") or poetry.get("version")
+
+          missing = [name for name, value in {"project/package name": package_name, "version": version}.items() if not value]
+          if missing:
+              raise SystemExit(f"Missing {', '.join(missing)} in pyproject.toml")
+
+          print(f"package_name={package_name}")
+          print(f"tag_version={version}")
+          PY
+
+      - name: Check whether tag already exists
+        id: check_tag
+        shell: bash
+        env:
+          VERSION: ${{ steps.extract_project_metadata.outputs.tag_version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "tag_exists=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_exists=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail manual non-dry run if tag already exists
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && steps.check_tag.outputs.tag_exists == '1' }}
+        shell: bash
+        run: |
+          echo "Tag ${{ steps.extract_project_metadata.outputs.tag_version }} already exists."
+          echo "Run this workflow with dry_run=true to test the build and release notes without creating a release."
+          exit 1
+
+  create_tag:
+    needs: check_version_tag
+    runs-on: ubuntu-latest
+    if: ${{ needs.check_version_tag.outputs.dry_run != 'true' && needs.check_version_tag.outputs.tag_exists != '1' }}
+    outputs:
+      tag_set: ${{ steps.create_tag.outputs.tag_set }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.ref_name }}
+
+      - name: Create annotated version tag
+        id: create_tag
+        shell: bash
+        env:
+          VERSION: ${{ needs.check_version_tag.outputs.tag_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "${VERSION}"
+          echo "tag_set=true" >> "$GITHUB_OUTPUT"
+
+  build_and_release:
+    needs:
+      - check_version_tag
+      - create_tag
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        always() &&
+        needs.check_version_tag.result == 'success' &&
+        (
+          needs.check_version_tag.outputs.dry_run == 'true' ||
+          needs.create_tag.result == 'success'
+        )
+      }}
+    permissions:
+      contents: write
+    env:
+      PACKAGE_NAME: ${{ needs.check_version_tag.outputs.package_name }}
+      VERSION: ${{ needs.check_version_tag.outputs.tag_version }}
+      DRY_RUN: ${{ needs.check_version_tag.outputs.dry_run }}
+      RELEASE_NOTES_MODE: ${{ needs.check_version_tag.outputs.release_notes_mode }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build backend frontend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Find previous tag
+        id: prev_tag
+        shell: bash
+        run: |
+          PREV_TAG="$(git tag --sort=-version:refname | grep -vx "${VERSION}" | sed -n '1p' || true)"
+          echo "tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine head ref for release notes
+        id: head_ref
+        shell: bash
+        run: |
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate Copilot release notes
+        if: ${{ env.RELEASE_NOTES_MODE == 'copilot' && steps.prev_tag.outputs.tag != '' }}
+        id: ai_notes
+        uses: FlorianPfaff/copilot-release-notes@main
+        with:
+          base-ref: ${{ steps.prev_tag.outputs.tag }}
+          head-ref: ${{ steps.head_ref.outputs.ref }}
+          instructions: .github/release-notes-instructions.md
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_TIMEOUT_MS: "900000"
+          COPILOT_HEARTBEAT_MS: "30000"
+          COPILOT_DEBUG_DIR: "${{ runner.temp }}/copilot-debug"
+          COPILOT_SAVE_PROMPT: "false"
+
+      - name: Write Copilot notes to file
+        if: ${{ env.RELEASE_NOTES_MODE == 'copilot' && steps.prev_tag.outputs.tag != '' }}
+        shell: bash
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ${{ steps.ai_notes.outputs.release-notes }}
+          EOF
+
+      - name: Generate GitHub release notes
+        if: ${{ env.RELEASE_NOTES_MODE == 'github' && steps.prev_tag.outputs.tag != '' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          TARGET_COMMITISH: ${{ steps.head_ref.outputs.ref }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import urllib.request
+
+          payload = {
+              "tag_name": os.environ["VERSION"],
+              "target_commitish": os.environ["TARGET_COMMITISH"],
+          }
+
+          previous_tag = os.environ.get("PREV_TAG", "").strip()
+          if previous_tag:
+              payload["previous_tag_name"] = previous_tag
+
+          for candidate in (".github/release.yml", ".github/release.yaml"):
+              if pathlib.Path(candidate).exists():
+                  payload["configuration_file_path"] = candidate
+                  break
+
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/{os.environ["OWNER"]}/{os.environ["REPO"]}/releases/generate-notes',
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f'Bearer {os.environ["GITHUB_TOKEN"]}',
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+              method="POST",
+          )
+
+          with urllib.request.urlopen(request) as response:
+              notes = json.load(response)
+
+          pathlib.Path("RELEASE_NOTES.md").write_text(
+              notes["body"].rstrip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Fallback release notes for first release
+        if: ${{ steps.prev_tag.outputs.tag == '' }}
+        run: echo "Initial release." > RELEASE_NOTES.md
+
+      - name: Build source distribution and wheel
+        run: python -m build
+
+      - name: Verify built wheel metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import subprocess
+          import sys
+          from importlib.metadata import version
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected exactly one wheel in dist/, found {len(wheels)}: {wheels}")
+
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-deps", wheels[0]])
+          installed_version = version(os.environ["PACKAGE_NAME"])
+          expected_version = os.environ["VERSION"]
+          if installed_version != expected_version:
+              raise SystemExit(f"Wheel metadata version {installed_version!r} does not match expected version {expected_version!r}")
+          PY
+
+      - name: Upload dry-run artifacts
+        if: ${{ env.DRY_RUN == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run-${{ env.PACKAGE_NAME }}-${{ env.VERSION }}
+          path: |
+            RELEASE_NOTES.md
+            dist/*
+
+      - name: Show release settings
+        if: ${{ env.DRY_RUN != 'true' }}
+        shell: bash
+        run: |
+          echo "PACKAGE_NAME=${PACKAGE_NAME}"
+          echo "VERSION=${VERSION}"
+          echo "GITHUB_SHA=${GITHUB_SHA}"
+          echo "RELEASE_NOTES_MODE=${RELEASE_NOTES_MODE}"
+          echo "PREVIOUS_TAG=${{ steps.prev_tag.outputs.tag }}"
+
+      - name: Create GitHub Release and upload artifacts
+        if: ${{ env.DRY_RUN != 'true' }}
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
+          bodyFile: RELEASE_NOTES.md
+          artifacts: dist/*
+          artifactErrorsFailBuild: true
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release was created
+        if: ${{ env.DRY_RUN != 'true' }}
+        shell: bash
+        run: |
+          if [ -z "${{ steps.create_release.outputs.html_url }}" ]; then
+            echo "Release step finished but did not return a release URL."
+            exit 1
+          fi
+          echo "Release created: ${{ steps.create_release.outputs.html_url }}"
