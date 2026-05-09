@@ -5,6 +5,7 @@ import numpy.testing as npt
 # pylint: disable=no-name-in-module,no-member
 import pyrecest.backend
 from pyrecest.backend import array, eye, pi
+from pyrecest.filters import FullSCGPTracker
 from dvs_enact import (
     DVSFullSCGPTracker,
     DVSPointProcessSCGPTracker,
@@ -79,6 +80,36 @@ class TestDVSFullSCGPTracker(unittest.TestCase):
         )
 
         self.assertEqual(tracker.last_active_measurement_indices, [0])
+
+    def test_dvs_update_matches_pyrecest_weighted_scgp_update(self):
+        measurements = array([[1.2, 0.0], [0.0, 1.2]])
+        dvs_tracker = self._make_tracker(inactive_activity_threshold=0.25)
+        reference_tracker = FullSCGPTracker(
+            16,
+            kinematic_state=array([0.0, 0.0, 0.0, 0.0, 0.0]),
+            kinematic_covariance=1e-4 * eye(5),
+            shape_state=array([1.0] * 16),
+            shape_covariance=0.05 * eye(16),
+            measurement_noise=0.01 * eye(2),
+            radial_noise_variance=0.0,
+        )
+
+        dvs_tracker.update(
+            measurements,
+            event_velocity=array([1.0, 0.0]),
+        )
+        reference_tracker.update(
+            measurements,
+            measurement_weights=array([1.0, 0.0]),
+            active_measurement_mask=[True, False],
+        )
+
+        npt.assert_allclose(dvs_tracker.state, reference_tracker.state, atol=1e-12)
+        npt.assert_allclose(
+            dvs_tracker.covariance,
+            reference_tracker.covariance,
+            atol=1e-12,
+        )
 
     def test_update_can_infer_event_velocity_from_kinematics(self):
         tracker = DVSFullSCGPTracker(
