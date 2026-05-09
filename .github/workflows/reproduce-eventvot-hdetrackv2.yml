@@ -1,0 +1,590 @@
+name: Reproduce HDETrackV2 on EventVOT
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_root:
+        description: "Persistent dataset cache root on the self-hosted runner."
+        required: true
+        default: "$HOME/.cache/datasets"
+      eventvot_cache_subdir:
+        description: "Subdirectory below cache_root for the EventVOT dataset."
+        required: true
+        default: "EventVOT"
+      hdetrackv2_cache_subdir:
+        description: "Subdirectory below cache_root for official HDETrackV2 raw result files."
+        required: true
+        default: "HDETrackV2_raw_results"
+      eventvot_url:
+        description: "Direct URL to EventVOT archive. Leave empty to require an existing cached copy."
+        required: false
+        default: "https://www.dropbox.com/scl/fo/fv2e3i0ytrjt14ylz81dx/h?rlkey=6c2wk2z7phmbiwqpfhhe29i5p&dl=1"
+      hdetrackv2_results_url:
+        description: "Direct URL to HDETrackV2 raw-results archive. Leave empty to require an existing cached copy or use secret HDETRACKV2_RESULTS_URL."
+        required: false
+        default: ""
+      output_root:
+        description: "Output directory for the reproduction report."
+        required: true
+        default: "outputs/eventvot-hdetrackv2-repro"
+      tracker_name:
+        description: "Display name used in the report table."
+        required: true
+        default: "HDETrack V2"
+      expected_sr:
+        description: "Expected EventVOT SR AUC for HDETrackV2, decimal form."
+        required: true
+        default: "0.590"
+      expected_pr:
+        description: "Expected EventVOT PR AUC for HDETrackV2, decimal form."
+        required: true
+        default: "0.638"
+      expected_npr:
+        description: "Expected EventVOT NPR AUC for HDETrackV2, decimal form."
+        required: true
+        default: "0.749"
+      tolerance:
+        description: "Absolute tolerance for SR/PR/NPR reproduction check."
+        required: true
+        default: "0.001"
+      force_redownload:
+        description: "Delete cached EventVOT/HDETrackV2 artifacts before running."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce-hdetrackv2-eventvot:
+    name: Reproduce HDETrackV2 EventVOT metrics
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 1440
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CACHE_ROOT_INPUT: ${{ inputs.cache_root }}
+      EVENTVOT_CACHE_SUBDIR: ${{ inputs.eventvot_cache_subdir }}
+      HDETRACKV2_CACHE_SUBDIR: ${{ inputs.hdetrackv2_cache_subdir }}
+      EVENTVOT_URL_INPUT: ${{ inputs.eventvot_url }}
+      HDETRACKV2_RESULTS_URL_INPUT: ${{ inputs.hdetrackv2_results_url }}
+      EVENTVOT_URL_SECRET: ${{ secrets.EVENTVOT_ARCHIVE_URL }}
+      HDETRACKV2_RESULTS_URL_SECRET: ${{ secrets.HDETRACKV2_RESULTS_URL }}
+      OUTPUT_ROOT_INPUT: ${{ inputs.output_root }}
+      TRACKER_NAME: ${{ inputs.tracker_name }}
+      EXPECTED_SR: ${{ inputs.expected_sr }}
+      EXPECTED_PR: ${{ inputs.expected_pr }}
+      EXPECTED_NPR: ${{ inputs.expected_npr }}
+      TOLERANCE: ${{ inputs.tolerance }}
+      FORCE_REDOWNLOAD: ${{ inputs.force_redownload }}
+
+    steps:
+      - name: Check out DVS-ENACT
+        uses: actions/checkout@v4
+
+      - name: Prepare cache and output paths
+        run: |
+          set -euo pipefail
+
+          resolve_path() {
+            local value="${1:-}"
+            local fallback="${2:-}"
+
+            if [ -z "$value" ]; then
+              value="$fallback"
+            fi
+
+            case "$value" in
+              \$HOME/*)
+                echo "${value/\$HOME/$HOME}"
+                ;;
+              ~/*)
+                echo "${value/#\~/$HOME}"
+                ;;
+              /*)
+                echo "$value"
+                ;;
+              *)
+                echo "$GITHUB_WORKSPACE/$value"
+                ;;
+            esac
+          }
+
+          CACHE_ROOT="$(resolve_path "$CACHE_ROOT_INPUT" "$HOME/.cache/datasets")"
+          OUTPUT_ROOT="$(resolve_path "$OUTPUT_ROOT_INPUT" "$GITHUB_WORKSPACE/outputs/eventvot-hdetrackv2-repro")"
+
+          EVENTVOT_CACHE_DIR="$CACHE_ROOT/$EVENTVOT_CACHE_SUBDIR"
+          HDETRACKV2_CACHE_DIR="$CACHE_ROOT/$HDETRACKV2_CACHE_SUBDIR"
+
+          EVENTVOT_ARCHIVE="$CACHE_ROOT/downloads/eventvot_archive.zip"
+          HDETRACKV2_ARCHIVE="$CACHE_ROOT/downloads/hdetrackv2_raw_results_archive.zip"
+
+          EVENTVOT_URL="${EVENTVOT_URL_INPUT:-${EVENTVOT_URL_SECRET:-}}"
+          HDETRACKV2_RESULTS_URL="${HDETRACKV2_RESULTS_URL_INPUT:-${HDETRACKV2_RESULTS_URL_SECRET:-}}"
+
+          mkdir -p "$CACHE_ROOT/downloads" "$OUTPUT_ROOT"
+
+          {
+            echo "CACHE_ROOT=$CACHE_ROOT"
+            echo "OUTPUT_ROOT=$OUTPUT_ROOT"
+            echo "EVENTVOT_CACHE_DIR=$EVENTVOT_CACHE_DIR"
+            echo "HDETRACKV2_CACHE_DIR=$HDETRACKV2_CACHE_DIR"
+            echo "EVENTVOT_ARCHIVE=$EVENTVOT_ARCHIVE"
+            echo "HDETRACKV2_ARCHIVE=$HDETRACKV2_ARCHIVE"
+            echo "EVENTVOT_URL=$EVENTVOT_URL"
+            echo "HDETRACKV2_RESULTS_URL=$HDETRACKV2_RESULTS_URL"
+          } >> "$GITHUB_ENV"
+
+          echo "Cache root: $CACHE_ROOT"
+          echo "EventVOT cache dir: $EVENTVOT_CACHE_DIR"
+          echo "HDETrackV2 result cache dir: $HDETRACKV2_CACHE_DIR"
+          echo "Output root: $OUTPUT_ROOT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install DVS-ENACT
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Cache official EventVOT testing sequence list
+        run: |
+          set -euo pipefail
+
+          SEQUENCE_LIST="$CACHE_ROOT/EventVOT_testing_subset.txt"
+
+          if [ ! -s "$SEQUENCE_LIST" ]; then
+            echo "Downloading official EventVOT testing sequence list..."
+            curl -fsSL \
+              "https://raw.githubusercontent.com/Event-AHU/EventVOT_Benchmark/main/EventVOT_eval_toolkit/sequence_evaluation_config/EventVOT_testing_subset.txt" \
+              -o "$SEQUENCE_LIST"
+          else
+            echo "Using cached official EventVOT testing sequence list: $SEQUENCE_LIST"
+          fi
+
+          echo "SEQUENCE_LIST=$SEQUENCE_LIST" >> "$GITHUB_ENV"
+
+          echo "First five sequences:"
+          head -n 5 "$SEQUENCE_LIST"
+
+          echo "Sequence count:"
+          grep -cve '^[[:space:]]*$' "$SEQUENCE_LIST"
+
+      - name: Ensure EventVOT and HDETrackV2 artifacts are cached
+        run: |
+          set -euo pipefail
+
+          if [ "$FORCE_REDOWNLOAD" = "true" ]; then
+            echo "force_redownload=true, removing cached extracted artifacts and archives."
+            rm -rf "$EVENTVOT_CACHE_DIR" "$HDETRACKV2_CACHE_DIR"
+            rm -f "$EVENTVOT_ARCHIVE" "$HDETRACKV2_ARCHIVE"
+          fi
+
+          download_and_extract() {
+            local label="$1"
+            local url="$2"
+            local archive_path="$3"
+            local destination_dir="$4"
+
+            if [ -z "$url" ]; then
+              echo "::error::$label is missing and no direct archive URL was supplied."
+              echo "::error::Provide a workflow input URL, configure a secret, or pre-stage the files under the cache directory."
+              exit 64
+            fi
+
+            mkdir -p "$(dirname "$archive_path")" "$destination_dir"
+
+            if [ ! -s "$archive_path" ]; then
+              echo "Downloading $label archive into cache..."
+              curl -fL --retry 5 --retry-delay 10 -C - -o "$archive_path" "$url"
+            else
+              echo "Using cached $label archive: $archive_path"
+            fi
+
+            echo "Extracting $label archive into: $destination_dir"
+            python - "$archive_path" "$destination_dir" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          destination.mkdir(parents=True, exist_ok=True)
+          destination_resolved = destination.resolve()
+
+          def assert_safe(path: Path) -> None:
+              resolved = path.resolve()
+              if resolved != destination_resolved and destination_resolved not in resolved.parents:
+                  raise RuntimeError(f"Unsafe archive member path: {path}")
+
+          if zipfile.is_zipfile(archive):
+              with zipfile.ZipFile(archive) as zf:
+                  for member in zf.infolist():
+                      assert_safe(destination / member.filename)
+                  zf.extractall(destination)
+          elif tarfile.is_tarfile(archive):
+              with tarfile.open(archive) as tf:
+                  for member in tf.getmembers():
+                      assert_safe(destination / member.name)
+                  tf.extractall(destination)
+          else:
+              raise SystemExit(
+                  f"Unsupported or corrupt archive: {archive}. "
+                  "Expected zip, tar, tar.gz, tgz, tar.bz2, or tar.xz."
+              )
+          PY
+          }
+
+          resolve_eventvot_root() {
+            python - "$EVENTVOT_CACHE_DIR" "$SEQUENCE_LIST" <<'PY'
+          import sys
+          from collections import deque
+          from pathlib import Path
+
+          cache_dir = Path(sys.argv[1])
+          sequence_list = Path(sys.argv[2])
+          sequences = [
+              line.strip()
+              for line in sequence_list.read_text(encoding="utf-8-sig").splitlines()
+              if line.strip()
+          ]
+
+          def iter_candidate_dirs(root: Path, max_depth: int = 4):
+              if not root.exists():
+                  return
+              queue = deque([(root, 0)])
+              while queue:
+                  path, depth = queue.popleft()
+                  yield path
+                  if depth >= max_depth:
+                      continue
+                  try:
+                      children = list(path.iterdir())
+                  except OSError:
+                      continue
+                  for child in children:
+                      if child.is_dir():
+                          queue.append((child, depth + 1))
+
+          def annotation_count(root: Path):
+              split_candidates = [
+                  root / "Testing Subset",
+                  root / "test",
+                  root / "testing",
+                  root,
+              ]
+              best_count = 0
+              best_split = root
+              for split_root in split_candidates:
+                  if not split_root.exists():
+                      continue
+                  count = sum(
+                      (split_root / seq / "groundtruth.txt").exists()
+                      and (split_root / seq / "absent.txt").exists()
+                      for seq in sequences
+                  )
+                  if count > best_count:
+                      best_count = count
+                      best_split = split_root
+              return best_count, best_split
+
+          best_root = None
+          best_split = None
+          best_count = -1
+
+          for candidate in iter_candidate_dirs(cache_dir):
+              count, split = annotation_count(candidate)
+              if count > best_count:
+                  best_count = count
+                  best_root = candidate
+                  best_split = split
+
+          if best_root is not None and best_count == len(sequences):
+              print(best_root)
+              raise SystemExit(0)
+
+          print(
+              f"EventVOT cache incomplete: found {max(best_count, 0)}/{len(sequences)} "
+              f"test annotations. Best split candidate: {best_split}",
+              file=sys.stderr,
+          )
+          raise SystemExit(1)
+          PY
+          }
+
+          resolve_hdetrackv2_results_root() {
+            python - "$HDETRACKV2_CACHE_DIR" "$SEQUENCE_LIST" <<'PY'
+          import sys
+          from collections import deque
+          from pathlib import Path
+
+          cache_dir = Path(sys.argv[1])
+          sequence_list = Path(sys.argv[2])
+          sequences = [
+              line.strip()
+              for line in sequence_list.read_text(encoding="utf-8-sig").splitlines()
+              if line.strip()
+          ]
+
+          def iter_candidate_dirs(root: Path, max_depth: int = 5):
+              if not root.exists():
+                  return
+              queue = deque([(root, 0)])
+              while queue:
+                  path, depth = queue.popleft()
+                  yield path
+                  if depth >= max_depth:
+                      continue
+                  try:
+                      children = list(path.iterdir())
+                  except OSError:
+                      continue
+                  for child in children:
+                      if child.is_dir():
+                          queue.append((child, depth + 1))
+
+          best_root = None
+          best_count = -1
+
+          for candidate in iter_candidate_dirs(cache_dir):
+              count = sum((candidate / f"{seq}.txt").exists() for seq in sequences)
+              if count > best_count:
+                  best_count = count
+                  best_root = candidate
+
+          if best_root is not None and best_count == len(sequences):
+              print(best_root)
+              raise SystemExit(0)
+
+          print(
+              f"HDETrackV2 cache incomplete: found {max(best_count, 0)}/{len(sequences)} "
+              f"result files. Best candidate: {best_root}",
+              file=sys.stderr,
+          )
+          raise SystemExit(1)
+          PY
+          }
+
+          echo "Checking EventVOT dataset cache..."
+          EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root || true)"
+
+          if [ -z "$EVENTVOT_ROOT_RESOLVED" ]; then
+            download_and_extract "EventVOT dataset" "$EVENTVOT_URL" "$EVENTVOT_ARCHIVE" "$EVENTVOT_CACHE_DIR"
+            EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root || true)"
+          fi
+
+          if [ -z "$EVENTVOT_ROOT_RESOLVED" ]; then
+            echo "::error::EventVOT dataset is still incomplete after cache/download step."
+            exit 1
+          fi
+
+          echo "Checking HDETrackV2 raw-results cache..."
+          HDETRACKV2_RESULTS_RESOLVED="$(resolve_hdetrackv2_results_root || true)"
+
+          if [ -z "$HDETRACKV2_RESULTS_RESOLVED" ]; then
+            download_and_extract "HDETrackV2 raw results" "$HDETRACKV2_RESULTS_URL" "$HDETRACKV2_ARCHIVE" "$HDETRACKV2_CACHE_DIR"
+            HDETRACKV2_RESULTS_RESOLVED="$(resolve_hdetrackv2_results_root || true)"
+          fi
+
+          if [ -z "$HDETRACKV2_RESULTS_RESOLVED" ]; then
+            echo "::error::HDETrackV2 raw results are still incomplete after cache/download step."
+            exit 1
+          fi
+
+          {
+            echo "EVENTVOT_ROOT_RESOLVED=$EVENTVOT_ROOT_RESOLVED"
+            echo "HDETRACKV2_RESULTS_RESOLVED=$HDETRACKV2_RESULTS_RESOLVED"
+          } >> "$GITHUB_ENV"
+
+          echo "Resolved EventVOT root: $EVENTVOT_ROOT_RESOLVED"
+          echo "Resolved HDETrackV2 result dir: $HDETRACKV2_RESULTS_RESOLVED"
+
+      - name: Preflight check dataset and HDETrackV2 results
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          eventvot_root = Path(os.environ["EVENTVOT_ROOT_RESOLVED"])
+          results_root = Path(os.environ["HDETRACKV2_RESULTS_RESOLVED"])
+          sequence_list = Path(os.environ["SEQUENCE_LIST"])
+
+          sequences = [
+              line.strip()
+              for line in sequence_list.read_text(encoding="utf-8-sig").splitlines()
+              if line.strip()
+          ]
+
+          split_candidates = [
+              eventvot_root / "Testing Subset",
+              eventvot_root / "test",
+              eventvot_root / "testing",
+              eventvot_root,
+          ]
+
+          split_root = None
+          for candidate in split_candidates:
+              if candidate.exists() and any((candidate / seq).exists() for seq in sequences[:10]):
+                  split_root = candidate
+                  break
+
+          if split_root is None:
+              raise SystemExit(
+                  "Could not resolve EventVOT testing split root. Tried: "
+                  + ", ".join(str(path) for path in split_candidates)
+              )
+
+          missing_results = [
+              seq for seq in sequences
+              if not (results_root / f"{seq}.txt").exists()
+          ]
+
+          missing_annotations = [
+              seq for seq in sequences
+              if not (split_root / seq / "groundtruth.txt").exists()
+              or not (split_root / seq / "absent.txt").exists()
+          ]
+
+          print(f"Resolved EventVOT split root: {split_root}")
+          print(f"Resolved HDETrackV2 result root: {results_root}")
+          print(f"Official sequence count: {len(sequences)}")
+          print(f"Missing result files: {len(missing_results)}")
+          print(f"Missing annotation files: {len(missing_annotations)}")
+
+          if missing_results:
+              print("First missing result files:")
+              for seq in missing_results[:20]:
+                  print(f"  {results_root / (seq + '.txt')}")
+              raise SystemExit("Missing HDETrackV2 result files.")
+
+          if missing_annotations:
+              print("First missing annotation files:")
+              for seq in missing_annotations[:20]:
+                  print(f"  {split_root / seq / 'groundtruth.txt'}")
+                  print(f"  {split_root / seq / 'absent.txt'}")
+              raise SystemExit("Missing EventVOT annotation files.")
+
+          print("Preflight check passed.")
+          PY
+
+      - name: Run local EventVOT evaluator for HDETrackV2
+        run: |
+          set -euo pipefail
+
+          sequence_args=()
+          while IFS= read -r seq; do
+            seq="$(echo "$seq" | tr -d '\r' | xargs)"
+            if [ -n "$seq" ]; then
+              sequence_args+=(--sequence "$seq")
+            fi
+          done < "$SEQUENCE_LIST"
+
+          python scripts/report_eventvot_comparisons.py \
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED" \
+            --split test \
+            --output-root "$OUTPUT_ROOT" \
+            --tracker "${TRACKER_NAME}=${HDETRACKV2_RESULTS_RESOLVED}" \
+            "${sequence_args[@]}"
+
+          echo
+          echo "Generated table:"
+          cat "$OUTPUT_ROOT/eventvot_paper_table.md"
+
+      - name: Check SR/PR/NPR against HDETrackV2 paper values
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import csv
+          import math
+          import os
+          from pathlib import Path
+
+          output_root = Path(os.environ["OUTPUT_ROOT"])
+          tracker_name = os.environ["TRACKER_NAME"]
+
+          expected = {
+              "sr": float(os.environ["EXPECTED_SR"]),
+              "pr": float(os.environ["EXPECTED_PR"]),
+              "npr": float(os.environ["EXPECTED_NPR"]),
+          }
+          tolerance = float(os.environ["TOLERANCE"])
+
+          table_csv = output_root / "eventvot_paper_table.csv"
+          if not table_csv.exists():
+              raise SystemExit(f"Missing evaluator output: {table_csv}")
+
+          with table_csv.open("r", encoding="utf-8", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+
+          row = next((candidate for candidate in rows if candidate["tracker"] == tracker_name), None)
+
+          if row is None:
+              raise SystemExit(
+                  f"Tracker row '{tracker_name}' not found. Available rows: "
+                  + ", ".join(r["tracker"] for r in rows)
+              )
+
+          actual = {
+              "sr": float(row["sr"]),
+              "pr": float(row["pr"]),
+              "npr": float(row["npr"]),
+          }
+
+          print("Metric reproduction check")
+          print("-------------------------")
+
+          passed = True
+          for key in ("sr", "pr", "npr"):
+              delta = actual[key] - expected[key]
+              ok = math.isclose(actual[key], expected[key], abs_tol=tolerance)
+              passed = passed and ok
+              status = "PASS" if ok else "FAIL"
+              print(
+                  f"{key.upper():>3}: actual={actual[key]:.6f} "
+                  f"expected={expected[key]:.6f} "
+                  f"delta={delta:+.6f} "
+                  f"tol={tolerance:.6f} "
+                  f"{status}"
+              )
+
+          if not passed:
+              raise SystemExit("HDETrackV2 EventVOT reproduction check failed.")
+
+          print("HDETrackV2 EventVOT reproduction check passed.")
+          PY
+
+      - name: Stage reproduction report
+        if: always()
+        run: |
+          set -euo pipefail
+
+          STAGE_DIR="$GITHUB_WORKSPACE/eventvot-hdetrackv2-reproduction-report"
+          mkdir -p "$STAGE_DIR"
+
+          cp -f "$OUTPUT_ROOT/eventvot_paper_table.csv" "$STAGE_DIR/" 2>/dev/null || true
+          cp -f "$OUTPUT_ROOT/eventvot_paper_table.md" "$STAGE_DIR/" 2>/dev/null || true
+          cp -f "$OUTPUT_ROOT/eventvot_comparison_report.json" "$STAGE_DIR/" 2>/dev/null || true
+
+          echo "Staged artifacts:"
+          find "$STAGE_DIR" -maxdepth 1 -type f -print
+
+      - name: Upload reproduction report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eventvot-hdetrackv2-reproduction-report
+          path: eventvot-hdetrackv2-reproduction-report/
+          if-no-files-found: warn
