@@ -5,14 +5,14 @@ import pytest
 
 # pylint: disable=no-name-in-module,no-member
 pyrecest_backend = pytest.importorskip("pyrecest.backend")
-from dvs_enact import (  # noqa: E402
-    DVSContourRefiner,
-    DVSContourRefinerConfig,
-    EventBatch,
-    refiner_bbox_to_dict,
-    refiner_crop_events_to_bbox,
-    refiner_expand_bbox,
-)
+dvs_enact = pytest.importorskip("dvs_enact")
+
+DVSContourRefiner = dvs_enact.DVSContourRefiner
+DVSContourRefinerConfig = dvs_enact.DVSContourRefinerConfig
+EventBatch = dvs_enact.EventBatch
+refiner_bbox_to_dict = dvs_enact.refiner_bbox_to_dict
+refiner_crop_events_to_bbox = dvs_enact.refiner_crop_events_to_bbox
+refiner_expand_bbox = dvs_enact.refiner_expand_bbox
 
 
 @unittest.skipIf(
