@@ -86,6 +86,26 @@ jobs:
           MEVDT_DATA_PASSWORD: ${{ secrets.MEVDT_DATA_PASSWORD }}
         run: |
           set -euo pipefail
+          mkdir -p "$MEVDT_DATASET_ROOT"
+
+          resolve_mevdt_cache() {
+            if [[ -d "${MEVDT_DATASET_ROOT}/labels" && -d "${MEVDT_DATASET_ROOT}/sequences" ]]; then
+              echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
+              return 0
+            fi
+            if [[ -d "${MEVDT_DATASET_ROOT}/MEVDT/labels" && -d "${MEVDT_DATASET_ROOT}/MEVDT/sequences" ]]; then
+              MEVDT_DATASET_ROOT="${MEVDT_DATASET_ROOT}/MEVDT"
+              echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
+              return 0
+            fi
+            return 1
+          }
+
+          if resolve_mevdt_cache; then
+            echo "MEVDT cache hit at ${MEVDT_DATASET_ROOT}"
+            exit 0
+          fi
+
           for name in MEVDT_WEBDAV_URL MEVDT_DATA_KEY MEVDT_DATA_PASSWORD; do
             if [[ -z "${!name:-}" ]]; then
               echo "::error::${name} secret is required when include_mevdt is true"
@@ -93,7 +113,6 @@ jobs:
             fi
           done
 
-          mkdir -p "$MEVDT_DATASET_ROOT"
           export RCLONE_CONFIG_MEVDTDATA_TYPE=webdav
           export RCLONE_CONFIG_MEVDTDATA_URL="$MEVDT_WEBDAV_URL"
           export RCLONE_CONFIG_MEVDTDATA_VENDOR=owncloud
@@ -109,11 +128,7 @@ jobs:
             --stats 30s \
             --stats-one-line
 
-          if [[ -d "${MEVDT_DATASET_ROOT}/MEVDT/labels" && -d "${MEVDT_DATASET_ROOT}/MEVDT/sequences" ]]; then
-            MEVDT_DATASET_ROOT="${MEVDT_DATASET_ROOT}/MEVDT"
-            echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
-          fi
-          if [[ ! -d "${MEVDT_DATASET_ROOT}/labels" || ! -d "${MEVDT_DATASET_ROOT}/sequences" ]]; then
+          if ! resolve_mevdt_cache; then
             echo "::error::MEVDT cache must contain labels/ and sequences/: ${MEVDT_DATASET_ROOT}"
             find "${MEVDT_DATASET_ROOT}" -maxdepth 3 -type d | sort | head -n 50
             exit 1
