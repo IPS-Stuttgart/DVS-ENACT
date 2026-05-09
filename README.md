@@ -75,6 +75,71 @@ without changing the external tracker architecture. `result.to_dict()` includes
 the cropped event count, active-measurement count, mean normal-flow activity,
 polarity-consistency diagnostics, and fallback reason when refinement is skipped.
 
+For EventVOT-style single-object tracking result files, use the dedicated
+adapter. It preserves the official `x,y,width,height` result convention:
+
+```powershell
+python scripts/run_eventvot_refinement.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --base-results path\to\hdetrack_eventvot `
+  --eventvot-toolkit-root path\to\EventVOT_eval_toolkit `
+  --tracker-name HDETrackV2_DVSENACT `
+  --update-config-tracker `
+  --split test
+```
+
+This writes official evaluator files below
+`eventvot_tracking_results/HDETrackV2_DVSENACT_tracking_result/` and adds the
+tracker to `utils/config_tracker.m`.
+
+The EventVOT adapter is conservative by default. It only replaces the base
+tracker box when DVS-ENACT has no fallback reason, at least 10 used events, at
+least 3 active measurements, mean activity of at least 0.10, IoU of at least
+0.60 with the base box, and refined/base area ratio of at most 1.50. Rejected
+frames keep the base tracker box and are recorded in the diagnostics JSON.
+
+Tune EventVOT refinement parameters on the validation subset only:
+
+```powershell
+python scripts/run_eventvot_validation_sweep.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --base-results path\to\hdetrack_eventvot_validation `
+  --output-root outputs\eventvot-validation-sweep `
+  --split val
+```
+
+The sweep refuses the test split unless `--allow-test-split` is supplied for a
+final held-out evaluation. It ranks configurations by validation SR AUC, with
+PR, NPR, and refinement acceptance rate written as secondary diagnostics.
+
+After locking the validation-selected configuration and running the held-out
+EventVOT test set, generate the paper comparison table and attribute-level
+gain report:
+
+```powershell
+python scripts/report_eventvot_comparisons.py `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --result-root path\to\EventVOT_eval_toolkit\eventvot_tracking_results `
+  --eventvot-toolkit-root path\to\EventVOT_eval_toolkit `
+  --output-root outputs\eventvot-paper-report `
+  --split test
+```
+
+By default this expects result directories for `HDETrackV2`,
+`HDETrackV2 + DVS-ENACT`, `OSTrack-event`, `OSTrack-event + DVS-ENACT`, and
+`DVS-ENACT-only`. The report writes the main `SR/PR/NPR/FPS` table, pairwise
+strong-tracker-to-refined gains, and attribute-level gains for EventVOT
+challenge factors.
+
+## Benchmark Roadmap
+
+EventVOT is the first benchmark target for tracker-plus-physics claims. Only
+after reproducing the official EventVOT baseline and reporting the held-out
+strong-tracker-to-refined comparison should the adapter be ported to VisEvent
+or FELT. TUMTraf-style MOT belongs to a separate detection-association project,
+not the single-object adapter track. The next-stage guardrails are documented in
+[`docs/tracking_benchmark_roadmap.md`](docs/tracking_benchmark_roadmap.md).
+
 ## MEVDT Real-Data Validation
 
 MEVDT is the first real-data target. It provides stationary DAVIS 240c traffic
@@ -92,6 +157,7 @@ and `outputs/`.
 
 For a compact first probe from the archive:
 
+<!-- markdownlint-disable MD013 -->
 ```powershell
 New-Item -ItemType Directory -Force -Path D:\Uni-Data\MEVDT-one-sequence
 tar -xf D:\Uni-Data\MEVDT.zip -C D:\Uni-Data\MEVDT-one-sequence `
@@ -100,6 +166,7 @@ tar -xf D:\Uni-Data\MEVDT.zip -C D:\Uni-Data\MEVDT-one-sequence `
   labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-custom24.txt `
   labels/tracking_labels/test/Scene_A/1581956422501835936/1581956422501835936-mot24.txt
 ```
+<!-- markdownlint-enable MD013 -->
 
 ```powershell
 $env:PYTHONPATH = "src;../PyRecEst/src"

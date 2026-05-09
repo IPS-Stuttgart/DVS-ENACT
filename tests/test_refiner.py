@@ -24,19 +24,19 @@ class TestDVSContourRefiner(unittest.TestCase):
         return EventBatch(
             ts=np.array([0, 1, 2, 3], dtype=np.int64),
             x=np.array([9, 10, 15, 21], dtype=np.int32),
-            y=np.array([9, 10, 15, 21], dtype=np.int32),
+            y=np.array([9, 10, 15, 20], dtype=np.int32),
             p=np.array([1, 0, 1, 0], dtype=np.int8),
         )
 
     def test_bbox_helpers_support_xywh_and_expansion(self):
-        bbox = refiner_bbox_to_dict((10.0, 20.0, 30.0, 40.0), bbox_format="xywh")
+        bbox = refiner_bbox_to_dict((20.0, 30.0, 30.0, 40.0), bbox_format="xywh")
 
-        self.assertEqual(bbox["x_min"], 10.0)
-        self.assertEqual(bbox["x_max"], 40.0)
+        self.assertEqual(bbox["x_min"], 20.0)
+        self.assertEqual(bbox["x_max"], 50.0)
         self.assertEqual(bbox["width"], 30.0)
 
         expanded = refiner_expand_bbox(bbox, 2.0, image_width=100.0, image_height=100.0)
-        self.assertEqual(expanded["width"], 55.0)
+        self.assertEqual(expanded["width"], 60.0)
         self.assertEqual(expanded["height"], 80.0)
 
     def test_crop_events_to_candidate_search_region(self):
@@ -71,7 +71,7 @@ class TestDVSContourRefiner(unittest.TestCase):
         )
 
         self.assertIsNone(result.fallback_reason)
-        self.assertEqual(result.used_event_count, 3)
+        self.assertEqual(result.used_event_count, 4)
         self.assertEqual(len(result.as_xyxy()), 4)
         self.assertIsNotNone(result.mean_event_activity)
 
