@@ -1,0 +1,530 @@
+name: EventVOT DVS-ENACT SOTA pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "validation_sweep tunes on validation; locked_test uses supplied params; full tunes validation then runs test"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - validation_sweep
+          - locked_test
+          - full
+      eventvot_root:
+        description: "EventVOT dataset root on the self-hosted runner"
+        required: true
+        default: "/data/EventVOT"
+        type: string
+      base_results_val:
+        description: "Validation base-result directory or file, e.g. HDETrackV2 validation results. Required for validation_sweep/full."
+        required: false
+        default: ""
+        type: string
+      base_results_test:
+        description: "Test base-result directory or file, e.g. HDETrackV2 test results. Required for locked_test/full."
+        required: false
+        default: ""
+        type: string
+      eventvot_toolkit_root:
+        description: "EventVOT_eval_toolkit root on the self-hosted runner. Required for locked_test/full."
+        required: false
+        default: "/data/EventVOT_eval_toolkit"
+        type: string
+      base_tracker_name:
+        description: "Display name for the unrefined base tracker in the report"
+        required: true
+        default: "HDETrackV2"
+        type: string
+      tracker_name:
+        description: "Official EventVOT tracker name for refined outputs"
+        required: true
+        default: "HDETrackV2_DVSENACT"
+        type: string
+      tracker_prefix:
+        description: "Prefix for validation-sweep tracker result directories"
+        required: true
+        default: "HDETrackV2_DVSENACT_VAL"
+        type: string
+      event_column_order:
+        description: "Raw EventVOT event CSV column order"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - xypt
+          - txyp
+          - xytp
+          - yxpt
+          - yxpt5
+          - yxt
+      max_configs:
+        description: "Maximum validation configs. Use 0 for the full grid."
+        required: true
+        default: "0"
+        type: string
+      top_k:
+        description: "Number of top validation configs to retain"
+        required: true
+        default: "20"
+        type: string
+      refinement_blend:
+        description: "Locked-test refinement blend; ignored in full mode"
+        required: true
+        default: "0.25"
+        type: string
+      search_expansion_factor:
+        description: "Locked-test search expansion factor; ignored in full mode"
+        required: true
+        default: "1.25"
+        type: string
+      max_events:
+        description: "Locked-test max events per frame; ignored in full mode"
+        required: true
+        default: "128"
+        type: string
+      min_events:
+        description: "Locked-test minimum events; ignored in full mode"
+        required: true
+        default: "3"
+        type: string
+      event_activity_floor:
+        description: "Locked-test event activity floor; ignored in full mode"
+        required: true
+        default: "0.05"
+        type: string
+      inactive_activity_threshold:
+        description: "Locked-test inactive activity threshold; ignored in full mode"
+        required: true
+        default: "0.05"
+        type: string
+      measurement_noise_variance:
+        description: "Locked-test measurement noise variance; ignored in full mode"
+        required: true
+        default: "4.0"
+        type: string
+      min_accept_used_events:
+        description: "Acceptance gate: minimum used events"
+        required: true
+        default: "10"
+        type: string
+      min_accept_active_measurements:
+        description: "Acceptance gate: minimum active measurements"
+        required: true
+        default: "3"
+        type: string
+      min_accept_mean_activity:
+        description: "Acceptance gate: minimum mean normal-flow activity"
+        required: true
+        default: "0.10"
+        type: string
+      min_accept_candidate_iou:
+        description: "Acceptance gate: minimum IoU between base and refined boxes"
+        required: true
+        default: "0.60"
+        type: string
+      max_accept_area_ratio:
+        description: "Acceptance gate: maximum refined/base area ratio"
+        required: true
+        default: "1.50"
+        type: string
+      disable_event_polarity:
+        description: "Ignore event polarity in refinement"
+        required: true
+        default: false
+        type: boolean
+      update_config_tracker:
+        description: "Register tracker_name in EventVOT_eval_toolkit/utils/config_tracker.m"
+        required: true
+        default: false
+        type: boolean
+      run_report:
+        description: "Generate the EventVOT comparison and pairwise-gain report after test refinement"
+        required: true
+        default: true
+        type: boolean
+      output_artifact_name:
+        description: "Base name for uploaded GitHub Actions artifacts"
+        required: true
+        default: "eventvot-dvsenact-sota-output"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eventvot-dvsenact-sota-${{ github.ref }}-${{ inputs.tracker_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUNBUFFERED: "1"
+  OUTPUT_ROOT: eventvot-sota-output
+
+jobs:
+  eventvot-dvsenact:
+    name: EventVOT validation sweep and locked test
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 720
+
+    steps:
+      - name: Check out DVS-ENACT
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Validate common inputs
+        shell: bash
+        env:
+          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
+        run: |
+          set -euo pipefail
+          if [[ ! -e "$EVENTVOT_ROOT" ]]; then
+            echo "::error::eventvot_root does not exist on this runner: $EVENTVOT_ROOT"
+            exit 1
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/${OUTPUT_ROOT}"
+
+      - name: Validate validation inputs
+        if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
+        shell: bash
+        env:
+          BASE_RESULTS_VAL: ${{ inputs.base_results_val }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_RESULTS_VAL" ]]; then
+            echo "::error::base_results_val is required for mode=${{ inputs.mode }}"
+            exit 1
+          fi
+          if [[ ! -e "$BASE_RESULTS_VAL" ]]; then
+            echo "::error::base_results_val does not exist on this runner: $BASE_RESULTS_VAL"
+            exit 1
+          fi
+
+      - name: Run validation-only DVS-ENACT sweep
+        if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
+        shell: bash
+        env:
+          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
+          BASE_RESULTS_VAL: ${{ inputs.base_results_val }}
+        run: |
+          set -euo pipefail
+          SWEEP_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/validation"
+          mkdir -p "$SWEEP_OUT"
+
+          args=(
+            --eventvot-root "$EVENTVOT_ROOT"
+            --base-results "$BASE_RESULTS_VAL"
+            --output-root "$SWEEP_OUT"
+            --split val
+            --tracker-prefix "${{ inputs.tracker_prefix }}"
+            --event-column-order "${{ inputs.event_column_order }}"
+            --top-k "${{ inputs.top_k }}"
+            --min-accept-used-events "${{ inputs.min_accept_used_events }}"
+            --min-accept-active-measurements "${{ inputs.min_accept_active_measurements }}"
+            --min-accept-mean-activity "${{ inputs.min_accept_mean_activity }}"
+            --min-accept-candidate-iou "${{ inputs.min_accept_candidate_iou }}"
+            --max-accept-area-ratio "${{ inputs.max_accept_area_ratio }}"
+          )
+
+          if [[ "${{ inputs.max_configs }}" != "" && "${{ inputs.max_configs }}" != "0" ]]; then
+            args+=(--max-configs "${{ inputs.max_configs }}")
+          fi
+          if [[ "${{ inputs.disable_event_polarity }}" == "true" ]]; then
+            args+=(--disable-event-polarity)
+          fi
+
+          python scripts/run_eventvot_validation_sweep.py "${args[@]}"
+
+      - name: Select best validation config
+        if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"] / "validation" / "validation_sweep_summary.json"
+          payload = json.loads(summary_path.read_text(encoding="utf-8"))
+          top_configs = payload.get("top_configs", [])
+          if not top_configs:
+              raise SystemExit(f"No validation configs completed; inspect {summary_path}")
+          best = top_configs[0]
+
+          mapping = {
+              "LOCKED_CONFIG_ID": best["config_id"],
+              "LOCKED_REFINEMENT_BLEND": best["refinement_blend"],
+              "LOCKED_SEARCH_EXPANSION_FACTOR": best["search_expansion_factor"],
+              "LOCKED_MAX_EVENTS": best["max_events"],
+              "LOCKED_MIN_EVENTS": best["min_events"],
+              "LOCKED_EVENT_ACTIVITY_FLOOR": best["event_activity_floor"],
+              "LOCKED_INACTIVE_ACTIVITY_THRESHOLD": best["inactive_activity_threshold"],
+              "LOCKED_MEASUREMENT_NOISE_VARIANCE": best["measurement_noise_variance"],
+          }
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              for key, value in mapping.items():
+                  print(f"{key}={value}", file=env_file)
+
+          selected_path = summary_path.parent / "selected_validation_config.json"
+          selected_path.write_text(json.dumps(best, indent=2) + "\n", encoding="utf-8")
+
+          lines = [
+              "# EventVOT DVS-ENACT validation sweep",
+              "",
+              f"Completed configs: `{payload['summary'].get('completed_config_count')}` / `{payload['summary'].get('config_count')}`",
+              f"Base SR AUC: `{payload.get('base_metrics', {}).get('sr_auc')}`",
+              "",
+              "| Rank | Config | SR AUC | PR AUC | NPR AUC | Acceptance rate |",
+              "|---:|---|---:|---:|---:|---:|",
+          ]
+          for rank, row in enumerate(top_configs[:10], start=1):
+              lines.append(
+                  f"| {rank} | {row['config_id']} | {float(row['sr_auc']):.6f} | "
+                  f"{float(row['pr_auc']):.6f} | {float(row['npr_auc']):.6f} | "
+                  f"{float(row['acceptance_rate']):.4f} |"
+              )
+          markdown = "\n".join(lines) + "\n"
+          (summary_path.parent / "validation-summary.md").write_text(markdown, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write(markdown)
+          PY
+
+      - name: Resolve manual locked config
+        if: ${{ inputs.mode == 'locked_test' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "LOCKED_CONFIG_ID=manual_locked_inputs"
+            echo "LOCKED_REFINEMENT_BLEND=${{ inputs.refinement_blend }}"
+            echo "LOCKED_SEARCH_EXPANSION_FACTOR=${{ inputs.search_expansion_factor }}"
+            echo "LOCKED_MAX_EVENTS=${{ inputs.max_events }}"
+            echo "LOCKED_MIN_EVENTS=${{ inputs.min_events }}"
+            echo "LOCKED_EVENT_ACTIVITY_FLOOR=${{ inputs.event_activity_floor }}"
+            echo "LOCKED_INACTIVE_ACTIVITY_THRESHOLD=${{ inputs.inactive_activity_threshold }}"
+            echo "LOCKED_MEASUREMENT_NOISE_VARIANCE=${{ inputs.measurement_noise_variance }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate test inputs
+        if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
+        shell: bash
+        env:
+          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
+          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_RESULTS_TEST" ]]; then
+            echo "::error::base_results_test is required for mode=${{ inputs.mode }}"
+            exit 1
+          fi
+          if [[ -z "$EVENTVOT_TOOLKIT_ROOT" ]]; then
+            echo "::error::eventvot_toolkit_root is required for mode=${{ inputs.mode }}"
+            exit 1
+          fi
+          if [[ ! -e "$BASE_RESULTS_TEST" ]]; then
+            echo "::error::base_results_test does not exist on this runner: $BASE_RESULTS_TEST"
+            exit 1
+          fi
+          if [[ ! -e "$EVENTVOT_TOOLKIT_ROOT" ]]; then
+            echo "::error::eventvot_toolkit_root does not exist on this runner: $EVENTVOT_TOOLKIT_ROOT"
+            exit 1
+          fi
+
+      - name: Run locked held-out test refinement
+        if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
+        shell: bash
+        env:
+          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
+          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
+          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
+          TRACKER_NAME: ${{ inputs.tracker_name }}
+        run: |
+          set -euo pipefail
+          TEST_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/test"
+          mkdir -p "$TEST_OUT"
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          keys = [
+              "LOCKED_CONFIG_ID",
+              "LOCKED_REFINEMENT_BLEND",
+              "LOCKED_SEARCH_EXPANSION_FACTOR",
+              "LOCKED_MAX_EVENTS",
+              "LOCKED_MIN_EVENTS",
+              "LOCKED_EVENT_ACTIVITY_FLOOR",
+              "LOCKED_INACTIVE_ACTIVITY_THRESHOLD",
+              "LOCKED_MEASUREMENT_NOISE_VARIANCE",
+          ]
+          missing = [key for key in keys if not os.environ.get(key)]
+          if missing:
+              raise SystemExit(f"Locked configuration is incomplete: {missing}")
+          payload = {key: os.environ[key] for key in keys}
+          payload["mode"] = "${{ inputs.mode }}"
+          payload["acceptance"] = {
+              "min_accept_used_events": "${{ inputs.min_accept_used_events }}",
+              "min_accept_active_measurements": "${{ inputs.min_accept_active_measurements }}",
+              "min_accept_mean_activity": "${{ inputs.min_accept_mean_activity }}",
+              "min_accept_candidate_iou": "${{ inputs.min_accept_candidate_iou }}",
+              "max_accept_area_ratio": "${{ inputs.max_accept_area_ratio }}",
+          }
+          out = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"] / "test" / "locked_test_config.json"
+          out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          args=(
+            --eventvot-root "$EVENTVOT_ROOT"
+            --base-results "$BASE_RESULTS_TEST"
+            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT"
+            --tracker-name "$TRACKER_NAME"
+            --split test
+            --event-column-order "${{ inputs.event_column_order }}"
+            --diagnostics-json "$TEST_OUT/${TRACKER_NAME}_diagnostics.json"
+            --refinement-blend "$LOCKED_REFINEMENT_BLEND"
+            --search-expansion-factor "$LOCKED_SEARCH_EXPANSION_FACTOR"
+            --max-events "$LOCKED_MAX_EVENTS"
+            --min-events "$LOCKED_MIN_EVENTS"
+            --event-activity-floor "$LOCKED_EVENT_ACTIVITY_FLOOR"
+            --inactive-activity-threshold "$LOCKED_INACTIVE_ACTIVITY_THRESHOLD"
+            --measurement-noise-variance "$LOCKED_MEASUREMENT_NOISE_VARIANCE"
+            --min-accept-used-events "${{ inputs.min_accept_used_events }}"
+            --min-accept-active-measurements "${{ inputs.min_accept_active_measurements }}"
+            --min-accept-mean-activity "${{ inputs.min_accept_mean_activity }}"
+            --min-accept-candidate-iou "${{ inputs.min_accept_candidate_iou }}"
+            --max-accept-area-ratio "${{ inputs.max_accept_area_ratio }}"
+          )
+          if [[ "${{ inputs.disable_event_polarity }}" == "true" ]]; then
+            args+=(--disable-event-polarity)
+          fi
+          if [[ "${{ inputs.update_config_tracker }}" == "true" ]]; then
+            args+=(--update-config-tracker)
+          fi
+
+          python scripts/run_eventvot_refinement.py "${args[@]}"
+
+          REFINED_RESULT_DIR="${EVENTVOT_TOOLKIT_ROOT}/eventvot_tracking_results/${TRACKER_NAME}_tracking_result"
+          if [[ ! -d "$REFINED_RESULT_DIR" ]]; then
+            echo "::error::Expected refined result directory was not created: $REFINED_RESULT_DIR"
+            exit 1
+          fi
+          echo "REFINED_RESULT_DIR=$REFINED_RESULT_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$TEST_OUT/refined-results"
+          cp -a "$REFINED_RESULT_DIR"/. "$TEST_OUT/refined-results/"
+
+      - name: Generate EventVOT comparison report
+        if: ${{ (inputs.mode == 'locked_test' || inputs.mode == 'full') && inputs.run_report == true }}
+        shell: bash
+        env:
+          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
+          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
+          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
+          BASE_TRACKER_NAME: ${{ inputs.base_tracker_name }}
+        run: |
+          set -euo pipefail
+          REPORT_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/report"
+          mkdir -p "$REPORT_OUT"
+
+          python scripts/report_eventvot_comparisons.py \
+            --eventvot-root "$EVENTVOT_ROOT" \
+            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT" \
+            --output-root "$REPORT_OUT" \
+            --split test \
+            --tracker "${BASE_TRACKER_NAME}=${BASE_RESULTS_TEST}" \
+            --tracker "${BASE_TRACKER_NAME} + DVS-ENACT=${REFINED_RESULT_DIR}" \
+            --pair "${BASE_TRACKER_NAME}=${BASE_TRACKER_NAME} + DVS-ENACT"
+
+      - name: Build held-out test summary
+        if: ${{ always() && (inputs.mode == 'locked_test' || inputs.mode == 'full') }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"]
+          report_path = root / "report" / "eventvot_comparison_report.json"
+          diagnostic_paths = sorted((root / "test").glob("*_diagnostics.json"))
+          lines = ["# EventVOT DVS-ENACT held-out test", ""]
+
+          config_path = root / "test" / "locked_test_config.json"
+          if config_path.exists():
+              config = json.loads(config_path.read_text(encoding="utf-8"))
+              lines.append(f"Locked config: `{config.get('LOCKED_CONFIG_ID')}`")
+              lines.append("")
+
+          if report_path.exists():
+              payload = json.loads(report_path.read_text(encoding="utf-8"))
+              lines.append("## Main table")
+              lines.append("| Tracker | SR | PR | NPR | FPS |")
+              lines.append("|---|---:|---:|---:|---:|")
+              for row in payload.get("table", []):
+                  fps = row.get("fps")
+                  fps_text = "n/a" if fps is None else f"{float(fps):.1f}"
+                  lines.append(
+                      f"| {row['tracker']} | {float(row['sr']):.6f} | "
+                      f"{float(row['pr']):.6f} | {float(row['npr']):.6f} | {fps_text} |"
+                  )
+              gains = payload.get("pairwise_gains", [])
+              if gains:
+                  lines.append("")
+                  lines.append("## Pairwise gains")
+                  lines.append("| Base | Refined | ΔSR | ΔPR | ΔNPR | FPS ratio |")
+                  lines.append("|---|---|---:|---:|---:|---:|")
+                  for row in gains:
+                      fps_ratio = row.get("fps_ratio")
+                      ratio_text = "n/a" if fps_ratio is None else f"{float(fps_ratio):.4f}"
+                      lines.append(
+                          f"| {row['base_tracker']} | {row['refined_tracker']} | "
+                          f"{float(row['sr_delta']):+.6f} | {float(row['pr_delta']):+.6f} | "
+                          f"{float(row['npr_delta']):+.6f} | {ratio_text} |"
+                      )
+          else:
+              lines.append("No comparison report was generated.")
+
+          if diagnostic_paths:
+              diagnostics = json.loads(diagnostic_paths[0].read_text(encoding="utf-8"))
+              summary = diagnostics.get("summary", {})
+              lines.extend([
+                  "",
+                  "## Refinement diagnostics",
+                  f"Sequences: `{summary.get('sequence_count')}`",
+                  f"Frames: `{summary.get('frame_count')}`",
+                  f"Accepted refinements: `{summary.get('accepted_refinement_count')}`",
+                  f"Refiner success frames: `{summary.get('refiner_success_frame_count')}`",
+              ])
+
+          markdown = "\n".join(lines) + "\n"
+          out = root / "test" / "test-summary.md"
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(markdown, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write(markdown)
+          PY
+
+      - name: Upload EventVOT SOTA artifacts
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ${{ inputs.output_artifact_name }}
+          path: |
+            eventvot-sota-output
+          if-no-files-found: warn
+          retention-days: 30
