@@ -140,17 +140,6 @@ on:
         required: true
         default: false
         type: boolean
-      run_report:
-        description: "Generate the EventVOT comparison and pairwise-gain report after test refinement"
-        required: true
-        default: true
-        type: boolean
-      output_artifact_name:
-        description: "Base name for uploaded GitHub Actions artifacts"
-        required: true
-        default: "eventvot-dvsenact-sota-output"
-        type: string
-
 permissions:
   contents: read
 
@@ -429,7 +418,7 @@ jobs:
           cp -a "$REFINED_RESULT_DIR"/. "$TEST_OUT/refined-results/"
 
       - name: Generate EventVOT comparison report
-        if: ${{ (inputs.mode == 'locked_test' || inputs.mode == 'full') && inputs.run_report == true }}
+        if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
         shell: bash
         env:
           EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
@@ -523,7 +512,7 @@ jobs:
         uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: ${{ inputs.output_artifact_name }}
+          name: eventvot-dvsenact-sota-output
           path: |
             eventvot-sota-output
           if-no-files-found: warn
