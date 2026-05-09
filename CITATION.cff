@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use DVS-ENACT, please cite it using the metadata below."
+title: "DVS-ENACT: Event-based normal-flow active contour tracking for extended objects"
+type: software
+authors:
+  - family-names: "Pfaff"
+    given-names: "Florian"
+    affiliation: "Institute of Industrial Automation and Software Engineering (IAS), University of Stuttgart"
+    email: "pfaff@ias.uni-stuttgart.de"
+repository-code: "https://github.com/IPS-Stuttgart/DVS-ENACT"
+url: "https://github.com/IPS-Stuttgart/DVS-ENACT"
+version: "0.1.0"
+license: "MIT"
+abstract: >
+  DVS-ENACT provides implementation and evaluation code for event-based
+  normal-flow active contour tracking of extended objects observed with Dynamic
+  Vision Sensor and event-camera measurements.
+keywords:
+  - event cameras
+  - Dynamic Vision Sensor
+  - active contours
+  - extended object tracking
+  - normal flow
+preferred-citation:
+  type: software
+  title: "DVS-ENACT: Event-based normal-flow active contour tracking for extended objects"
+  authors:
+    - family-names: "Pfaff"
+      given-names: "Florian"
+  year: 2026
+  url: "https://github.com/IPS-Stuttgart/DVS-ENACT"
+  license: "MIT"
