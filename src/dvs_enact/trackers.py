@@ -6,13 +6,11 @@ from __future__ import annotations
 from pyrecest.backend import (
     arctan2,
     array,
-    concatenate,
     cos,
     linalg,
     linspace,
     pi,
     sin,
-    vstack,
 )
 from pyrecest.filters import FullSCGPTracker
 
@@ -304,6 +302,73 @@ class DVSFullSCGPTracker(FullSCGPTracker):
             activities.append(activity)
         return array(activities)
 
+    def _event_measurement_weights(
+        self,
+        measurements,
+        velocity,
+        event_polarities,
+        event_activity_floor,
+        inactive_activity_threshold,
+        polarity_mismatch_weight,
+        polarity_contrast_sign,
+    ):
+        """Return DVS reliability weights for PyRecEst's weighted SCGP update."""
+        signed_flows = [
+            self.signed_normal_flow_for_measurement(measurement, velocity)
+            for measurement in measurements
+        ]
+        activities = [abs(signed_flow) for signed_flow in signed_flows]
+        resolved_polarity_contrast_sign = self._resolve_polarity_contrast_sign(
+            signed_flows,
+            event_polarities,
+            polarity_contrast_sign,
+        )
+
+        polarity_consistencies = []
+        polarity_weights = []
+        measurement_weights = []
+        active_measurement_mask = []
+        for measurement_index, activity in enumerate(activities):
+            polarity_consistency = None
+            polarity_weight = 1.0
+            if (
+                event_polarities is not None
+                and resolved_polarity_contrast_sign is not None
+            ):
+                polarity_consistency = self.polarity_consistency_for_signed_flow(
+                    signed_flows[measurement_index],
+                    event_polarities[measurement_index],
+                    polarity_contrast_sign=resolved_polarity_contrast_sign,
+                )
+                polarity_weight = self.polarity_weight_for_signed_flow(
+                    signed_flows[measurement_index],
+                    event_polarities[measurement_index],
+                    polarity_contrast_sign=resolved_polarity_contrast_sign,
+                    polarity_mismatch_weight=polarity_mismatch_weight,
+                )
+            polarity_consistencies.append(polarity_consistency)
+            polarity_weights.append(polarity_weight)
+
+            weighted_activity = activity * polarity_weight
+            is_active = (
+                weighted_activity > 0.0
+                and weighted_activity >= inactive_activity_threshold
+            )
+            active_measurement_mask.append(is_active)
+            measurement_weights.append(
+                max(weighted_activity, event_activity_floor) if is_active else 0.0
+            )
+
+        return (
+            signed_flows,
+            activities,
+            resolved_polarity_contrast_sign,
+            polarity_consistencies,
+            polarity_weights,
+            array(measurement_weights),
+            active_measurement_mask,
+        )
+
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     def update(
         self,
@@ -346,74 +411,28 @@ class DVSFullSCGPTracker(FullSCGPTracker):
             event_polarities,
             measurements.shape[0],
         )
-        measurement_noise = self.measurement_noise
-        if R is not None:
-            measurement_noise = self._as_covariance_matrix(
-                R,
-                self.measurement_dim,
-                "R",
-                require_positive_semidefinite=False,
-            )
 
         velocity = self._get_event_velocity(event_velocity)
-        signed_flows = [
-            self.signed_normal_flow_for_measurement(measurement, velocity)
-            for measurement in measurements
-        ]
-        activities = [abs(signed_flow) for signed_flow in signed_flows]
-        resolved_polarity_contrast_sign = self._resolve_polarity_contrast_sign(
+        (
             signed_flows,
+            activities,
+            resolved_polarity_contrast_sign,
+            polarity_consistencies,
+            polarity_weights,
+            measurement_weights,
+            active_measurement_mask,
+        ) = self._event_measurement_weights(
+            measurements,
+            velocity,
             event_polarities,
+            event_activity_floor,
+            inactive_activity_threshold,
+            polarity_mismatch_weight,
             polarity_contrast_sign,
         )
-        polarity_consistencies = []
-        polarity_weights = []
-        active_indices = []
-        measurement_jacobians = []
-        predicted_measurements = []
-        noise_covariances = []
-        for measurement_index, measurement in enumerate(measurements):
-            activity = activities[measurement_index]
-            polarity_consistency = None
-            polarity_weight = 1.0
-            if (
-                event_polarities is not None
-                and resolved_polarity_contrast_sign is not None
-            ):
-                polarity_consistency = self.polarity_consistency_for_signed_flow(
-                    signed_flows[measurement_index],
-                    event_polarities[measurement_index],
-                    polarity_contrast_sign=resolved_polarity_contrast_sign,
-                )
-                polarity_weight = self.polarity_weight_for_signed_flow(
-                    signed_flows[measurement_index],
-                    event_polarities[measurement_index],
-                    polarity_contrast_sign=resolved_polarity_contrast_sign,
-                    polarity_mismatch_weight=polarity_mismatch_weight,
-                )
-            polarity_consistencies.append(polarity_consistency)
-            polarity_weights.append(polarity_weight)
-
-            weighted_activity = activity * polarity_weight
-            if weighted_activity <= 0.0 or weighted_activity < inactive_activity_threshold:
-                continue
-
-            effective_activity = (
-                weighted_activity
-                if weighted_activity >= event_activity_floor
-                else event_activity_floor
-            )
-            measurement_jacobian, predicted_measurement, noise_covariance = (
-                self._measurement_model_terms(measurement, measurement_noise)
-            )
-            active_indices.append(measurement_index)
-            measurement_jacobians.append(measurement_jacobian)
-            predicted_measurements.append(predicted_measurement)
-            noise_covariances.append(noise_covariance / effective_activity)
 
         self.last_event_activities = array(activities)
         self.last_event_signed_normal_flows = array(signed_flows)
-        self.last_active_measurement_indices = active_indices
         self.last_polarity_contrast_sign = resolved_polarity_contrast_sign
         if event_polarities is None or resolved_polarity_contrast_sign is None:
             self.last_event_polarity_consistencies = None
@@ -421,33 +440,15 @@ class DVSFullSCGPTracker(FullSCGPTracker):
         else:
             self.last_event_polarity_consistencies = polarity_consistencies
             self.last_event_polarity_weights = array(polarity_weights)
-        if not active_indices:
-            self.last_quadratic_form = None
-            return
 
-        measurement_jacobian = vstack(measurement_jacobians)
-        predicted_measurements = concatenate(predicted_measurements)
-        noise_covariance = linalg.block_diag(*noise_covariances)
-        residual = concatenate([measurements[index] for index in active_indices])
-        residual = residual - predicted_measurements
-        covariance_measurement = self._symmetrize(
-            measurement_jacobian @ self.covariance @ measurement_jacobian.T
-            + noise_covariance
+        super().update(
+            measurements,
+            R=R,
+            s_hat=s_hat,
+            sigma_squared_s=sigma_squared_s,
+            measurement_weights=measurement_weights,
+            active_measurement_mask=active_measurement_mask,
         )
-        cross_covariance = self.covariance @ measurement_jacobian.T
-        gain = linalg.solve(covariance_measurement.T, cross_covariance.T).T
-        self.state = self.state + gain @ residual
-        self.covariance = self._symmetrize(
-            self.covariance - gain @ covariance_measurement @ gain.T
-        )
-        self._sync_state_views()
-        solved_residual = linalg.solve(covariance_measurement, residual)
-        self.last_quadratic_form = residual @ solved_residual
-
-        if self.log_posterior_estimates:
-            self.store_posterior_estimates()
-        if self.log_posterior_extents:
-            self.store_posterior_extents()
 
 
 DVSSCGPTracker = DVSFullSCGPTracker
