@@ -15,7 +15,7 @@ on:
       eventvot_root:
         description: "EventVOT dataset root on the self-hosted runner"
         required: true
-        default: "/data/EventVOT"
+        default: "$HOME/.cache/datasets/EventVOT"
         type: string
       base_results_val:
         description: "Validation base-result directory or file, e.g. HDETrackV2 validation results. Required for validation_sweep/full."
@@ -30,7 +30,7 @@ on:
       eventvot_toolkit_root:
         description: "EventVOT_eval_toolkit root on the self-hosted runner. Required for locked_test/full."
         required: false
-        default: "/data/EventVOT_eval_toolkit"
+        default: "$HOME/.cache/datasets/EventVOT_Benchmark/EventVOT_eval_toolkit"
         type: string
       base_tracker_name:
         description: "Display name for the unrefined base tracker in the report"
@@ -140,17 +140,6 @@ on:
         required: true
         default: false
         type: boolean
-      run_report:
-        description: "Generate the EventVOT comparison and pairwise-gain report after test refinement"
-        required: true
-        default: true
-        type: boolean
-      output_artifact_name:
-        description: "Base name for uploaded GitHub Actions artifacts"
-        required: true
-        default: "eventvot-dvsenact-sota-output"
-        type: string
-
 permissions:
   contents: read
 
@@ -186,14 +175,347 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Validate common inputs
+      - name: Populate and resolve EventVOT cache
         shell: bash
         env:
-          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
+          MODE_INPUT: ${{ inputs.mode }}
+          EVENTVOT_ROOT_INPUT: ${{ inputs.eventvot_root }}
+          BASE_RESULTS_VAL_INPUT: ${{ inputs.base_results_val }}
+          BASE_RESULTS_TEST_INPUT: ${{ inputs.base_results_test }}
+          EVENTVOT_TOOLKIT_ROOT_INPUT: ${{ inputs.eventvot_toolkit_root }}
+          EVENTVOT_URL_SECRET: ${{ secrets.EVENTVOT_ARCHIVE_URL }}
+          EVENTVOT_URL_VAR: ${{ vars.EVENTVOT_ARCHIVE_URL }}
+          HDETRACKV2_RESULTS_URL_SECRET: ${{ secrets.HDETRACKV2_RESULTS_URL }}
+          HDETRACKV2_RESULTS_URL_VAR: ${{ vars.HDETRACKV2_RESULTS_URL }}
         run: |
           set -euo pipefail
-          if [[ ! -e "$EVENTVOT_ROOT" ]]; then
-            echo "::error::eventvot_root does not exist on this runner: $EVENTVOT_ROOT"
+
+          CACHE_ROOT="$HOME/.cache/datasets"
+          EVENTVOT_CACHE_DIR="$CACHE_ROOT/EventVOT"
+          HDETRACKV2_CACHE_DIR="$CACHE_ROOT/HDETrackV2_raw_results"
+          EVENTVOT_BENCHMARK_DIR="$CACHE_ROOT/EventVOT_Benchmark"
+          EVENTVOT_ARCHIVE="$CACHE_ROOT/downloads/eventvot_archive.zip"
+          HDETRACKV2_ARCHIVE="$CACHE_ROOT/downloads/hdetrackv2_raw_results_archive.zip"
+          EVENTVOT_URL="${EVENTVOT_URL_SECRET:-${EVENTVOT_URL_VAR:-https://www.dropbox.com/scl/fo/fv2e3i0ytrjt14ylz81dx/h?rlkey=6c2wk2z7phmbiwqpfhhe29i5p&dl=1}}"
+          HDETRACKV2_RESULTS_URL="${HDETRACKV2_RESULTS_URL_SECRET:-${HDETRACKV2_RESULTS_URL_VAR:-}}"
+          NEEDS_VAL_RESULTS=false
+          NEEDS_TEST_RESULTS=false
+          if [[ "$MODE_INPUT" == "validation_sweep" || "$MODE_INPUT" == "full" ]]; then
+            NEEDS_VAL_RESULTS=true
+          fi
+          if [[ "$MODE_INPUT" == "locked_test" || "$MODE_INPUT" == "full" ]]; then
+            NEEDS_TEST_RESULTS=true
+          fi
+
+          mkdir -p "$CACHE_ROOT/downloads"
+
+          resolve_path() {
+            local value="${1:-}"
+            local fallback="${2:-}"
+
+            if [[ -z "$value" ]]; then
+              value="$fallback"
+            fi
+
+            case "$value" in
+              '$HOME'/*)
+                echo "${value/\$HOME/$HOME}"
+                ;;
+              '~'/*)
+                echo "${value/#\~/$HOME}"
+                ;;
+              /*)
+                echo "$value"
+                ;;
+              "")
+                echo ""
+                ;;
+              *)
+                echo "$GITHUB_WORKSPACE/$value"
+                ;;
+            esac
+          }
+
+          download_and_extract() {
+            local label="$1"
+            local url="$2"
+            local archive_path="$3"
+            local destination_dir="$4"
+
+            if [[ -z "$url" ]]; then
+              echo "::error::$label is missing and no archive URL was supplied."
+              echo "::error::Pre-stage it under $CACHE_ROOT or configure the matching repository secret."
+              exit 64
+            fi
+
+            mkdir -p "$(dirname "$archive_path")" "$destination_dir"
+
+            if [[ ! -s "$archive_path" ]]; then
+              echo "Downloading $label archive into cache."
+              curl -fL --retry 5 --retry-delay 10 -C - -o "$archive_path" "$url"
+            else
+              echo "Using cached $label archive: $archive_path"
+            fi
+
+            echo "Extracting $label archive into: $destination_dir"
+            python - "$archive_path" "$destination_dir" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          destination.mkdir(parents=True, exist_ok=True)
+          destination_resolved = destination.resolve()
+
+          def assert_safe(path: Path) -> None:
+              resolved = path.resolve()
+              if resolved != destination_resolved and destination_resolved not in resolved.parents:
+                  raise RuntimeError(f"Unsafe archive member path: {path}")
+
+          if zipfile.is_zipfile(archive):
+              with zipfile.ZipFile(archive) as zf:
+                  for member in zf.infolist():
+                      assert_safe(destination / member.filename)
+                  zf.extractall(destination)
+          elif tarfile.is_tarfile(archive):
+              with tarfile.open(archive) as tf:
+                  for member in tf.getmembers():
+                      assert_safe(destination / member.name)
+                  tf.extractall(destination)
+          else:
+              raise SystemExit(
+                  f"Unsupported or corrupt archive: {archive}. "
+                  "Expected zip, tar, tar.gz, tgz, tar.bz2, or tar.xz."
+              )
+          PY
+          }
+
+          resolve_eventvot_root() {
+            python - "$EVENTVOT_CACHE_DIR" <<'PY'
+          import sys
+          from collections import deque
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          markers = (
+              "Testing Subset",
+              "validating Subset",
+              "Training Subset",
+              "test",
+              "testing",
+              "val",
+              "validating",
+              "train",
+          )
+
+          def iter_dirs(start: Path, max_depth: int = 4):
+              if not start.exists():
+                  return
+              queue = deque([(start, 0)])
+              while queue:
+                  path, depth = queue.popleft()
+                  yield path
+                  if depth >= max_depth:
+                      continue
+                  try:
+                      children = list(path.iterdir())
+                  except OSError:
+                      continue
+                  for child in children:
+                      if child.is_dir():
+                          queue.append((child, depth + 1))
+
+          def score(candidate: Path) -> int:
+              total = 0
+              for marker in markers:
+                  split = candidate / marker
+                  if not split.exists():
+                      continue
+                  total += 50
+                  try:
+                      total += sum(
+                          (seq / "groundtruth.txt").exists()
+                          and (seq / "absent.txt").exists()
+                          for seq in split.iterdir()
+                          if seq.is_dir()
+                      )
+                  except OSError:
+                      pass
+              return total
+
+          best = None
+          best_score = 0
+          for candidate in iter_dirs(root):
+              candidate_score = score(candidate)
+              if candidate_score > best_score:
+                  best = candidate
+                  best_score = candidate_score
+
+          if best is None:
+              raise SystemExit(f"Could not resolve an EventVOT dataset root below {root}")
+          print(best)
+          PY
+          }
+
+          resolve_result_root() {
+            local split="$1"
+            python - "$HDETRACKV2_CACHE_DIR" "$EVENTVOT_ROOT_RESOLVED" "$split" <<'PY'
+          import sys
+          from collections import deque
+          from pathlib import Path
+
+          result_cache = Path(sys.argv[1])
+          eventvot_root = Path(sys.argv[2])
+          split = sys.argv[3].lower()
+          split_markers = {
+              "val": ("validating Subset", "val", "validating"),
+              "test": ("Testing Subset", "test", "testing"),
+          }[split]
+
+          def find_split_root() -> Path:
+              for marker in split_markers:
+                  candidate = eventvot_root / marker
+                  if candidate.exists():
+                      return candidate
+              return eventvot_root
+
+          split_root = find_split_root()
+          list_file = split_root / "list.txt"
+          if list_file.exists():
+              sequences = [
+                  line.strip()
+                  for line in list_file.read_text(encoding="utf-8-sig").splitlines()
+                  if line.strip()
+              ]
+          else:
+              sequences = [
+                  path.name
+                  for path in split_root.iterdir()
+                  if path.is_dir() and (path / "groundtruth.txt").exists()
+              ]
+
+          if not sequences:
+              raise SystemExit(f"Could not resolve EventVOT {split} sequences below {split_root}")
+
+          def iter_dirs(start: Path, max_depth: int = 6):
+              if not start.exists():
+                  return
+              queue = deque([(start, 0)])
+              while queue:
+                  path, depth = queue.popleft()
+                  yield path
+                  if depth >= max_depth:
+                      continue
+                  try:
+                      children = list(path.iterdir())
+                  except OSError:
+                      continue
+                  for child in children:
+                      if child.is_dir():
+                          queue.append((child, depth + 1))
+
+          best = None
+          best_count = -1
+          for candidate in iter_dirs(result_cache):
+              count = sum((candidate / f"{sequence}.txt").exists() for sequence in sequences)
+              if count > best_count:
+                  best = candidate
+                  best_count = count
+
+          if best is None or best_count <= 0:
+              raise SystemExit(
+                  f"Could not resolve HDETrackV2 {split} result files below {result_cache}"
+              )
+          print(best)
+          PY
+          }
+
+          resolve_existing_input() {
+            local label="$1"
+            local value="$2"
+            local resolved
+            resolved="$(resolve_path "$value" "")"
+            if [[ -n "$resolved" && -e "$resolved" ]]; then
+              echo "$resolved"
+            elif [[ -n "$resolved" ]]; then
+              echo "::notice::$label path does not exist on this runner, falling back to cache: $resolved" >&2
+              echo ""
+            else
+              echo ""
+            fi
+          }
+
+          EVENTVOT_ROOT_RESOLVED="$(resolve_existing_input eventvot_root "$EVENTVOT_ROOT_INPUT")"
+          if [[ -z "$EVENTVOT_ROOT_RESOLVED" ]]; then
+            if ! EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root 2>/dev/null)"; then
+              download_and_extract "EventVOT dataset" "$EVENTVOT_URL" "$EVENTVOT_ARCHIVE" "$EVENTVOT_CACHE_DIR"
+              EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root)"
+            fi
+          fi
+
+          BASE_RESULTS_VAL_RESOLVED=""
+          BASE_RESULTS_TEST_RESOLVED=""
+          if [[ "$NEEDS_VAL_RESULTS" == "true" ]]; then
+            BASE_RESULTS_VAL_RESOLVED="$(resolve_existing_input base_results_val "$BASE_RESULTS_VAL_INPUT")"
+          fi
+          if [[ "$NEEDS_TEST_RESULTS" == "true" ]]; then
+            BASE_RESULTS_TEST_RESOLVED="$(resolve_existing_input base_results_test "$BASE_RESULTS_TEST_INPUT")"
+          fi
+          if [[ ( "$NEEDS_VAL_RESULTS" == "true" && -z "$BASE_RESULTS_VAL_RESOLVED" ) || ( "$NEEDS_TEST_RESULTS" == "true" && -z "$BASE_RESULTS_TEST_RESOLVED" ) ]]; then
+            if ! find "$HDETRACKV2_CACHE_DIR" -type f -name "*.txt" -print -quit 2>/dev/null | grep -q .; then
+              download_and_extract \
+                "HDETrackV2 raw results" \
+                "$HDETRACKV2_RESULTS_URL" \
+                "$HDETRACKV2_ARCHIVE" \
+                "$HDETRACKV2_CACHE_DIR"
+            fi
+          fi
+          if [[ "$NEEDS_VAL_RESULTS" == "true" && -z "$BASE_RESULTS_VAL_RESOLVED" ]]; then
+            BASE_RESULTS_VAL_RESOLVED="$(resolve_result_root val)"
+          fi
+          if [[ "$NEEDS_TEST_RESULTS" == "true" && -z "$BASE_RESULTS_TEST_RESOLVED" ]]; then
+            BASE_RESULTS_TEST_RESOLVED="$(resolve_result_root test)"
+          fi
+
+          EVENTVOT_TOOLKIT_ROOT_RESOLVED=""
+          if [[ "$NEEDS_TEST_RESULTS" == "true" ]]; then
+            EVENTVOT_TOOLKIT_ROOT_RESOLVED="$(resolve_existing_input eventvot_toolkit_root "$EVENTVOT_TOOLKIT_ROOT_INPUT")"
+            if [[ -z "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+              if [[ -d "$EVENTVOT_BENCHMARK_DIR/EventVOT_eval_toolkit" ]]; then
+                EVENTVOT_TOOLKIT_ROOT_RESOLVED="$EVENTVOT_BENCHMARK_DIR/EventVOT_eval_toolkit"
+              else
+                rm -rf "$EVENTVOT_BENCHMARK_DIR"
+                git clone --depth 1 https://github.com/Event-AHU/EventVOT_Benchmark.git "$EVENTVOT_BENCHMARK_DIR"
+                EVENTVOT_TOOLKIT_ROOT_RESOLVED="$EVENTVOT_BENCHMARK_DIR/EventVOT_eval_toolkit"
+              fi
+            fi
+
+            if [[ ! -d "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+              echo "::error::EventVOT toolkit root could not be resolved: $EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "EVENTVOT_ROOT_RESOLVED=$EVENTVOT_ROOT_RESOLVED"
+            echo "BASE_RESULTS_VAL_RESOLVED=$BASE_RESULTS_VAL_RESOLVED"
+            echo "BASE_RESULTS_TEST_RESOLVED=$BASE_RESULTS_TEST_RESOLVED"
+            echo "EVENTVOT_TOOLKIT_ROOT_RESOLVED=$EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+          } >> "$GITHUB_ENV"
+
+          echo "Resolved EventVOT root: $EVENTVOT_ROOT_RESOLVED"
+          echo "Resolved validation base results: $BASE_RESULTS_VAL_RESOLVED"
+          echo "Resolved test base results: $BASE_RESULTS_TEST_RESOLVED"
+          echo "Resolved EventVOT toolkit root: $EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+
+      - name: Validate common inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -e "$EVENTVOT_ROOT_RESOLVED" ]]; then
+            echo "::error::eventvot_root does not exist on this runner: $EVENTVOT_ROOT_RESOLVED"
             exit 1
           fi
           mkdir -p "${GITHUB_WORKSPACE}/${OUTPUT_ROOT}"
@@ -201,33 +523,28 @@ jobs:
       - name: Validate validation inputs
         if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
         shell: bash
-        env:
-          BASE_RESULTS_VAL: ${{ inputs.base_results_val }}
         run: |
           set -euo pipefail
-          if [[ -z "$BASE_RESULTS_VAL" ]]; then
+          if [[ -z "$BASE_RESULTS_VAL_RESOLVED" ]]; then
             echo "::error::base_results_val is required for mode=${{ inputs.mode }}"
             exit 1
           fi
-          if [[ ! -e "$BASE_RESULTS_VAL" ]]; then
-            echo "::error::base_results_val does not exist on this runner: $BASE_RESULTS_VAL"
+          if [[ ! -e "$BASE_RESULTS_VAL_RESOLVED" ]]; then
+            echo "::error::base_results_val does not exist on this runner: $BASE_RESULTS_VAL_RESOLVED"
             exit 1
           fi
 
       - name: Run validation-only DVS-ENACT sweep
         if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
         shell: bash
-        env:
-          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
-          BASE_RESULTS_VAL: ${{ inputs.base_results_val }}
         run: |
           set -euo pipefail
           SWEEP_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/validation"
           mkdir -p "$SWEEP_OUT"
 
           args=(
-            --eventvot-root "$EVENTVOT_ROOT"
-            --base-results "$BASE_RESULTS_VAL"
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED"
+            --base-results "$BASE_RESULTS_VAL_RESOLVED"
             --output-root "$SWEEP_OUT"
             --split val
             --tracker-prefix "${{ inputs.tracker_prefix }}"
@@ -323,25 +640,22 @@ jobs:
       - name: Validate test inputs
         if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
         shell: bash
-        env:
-          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
-          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
         run: |
           set -euo pipefail
-          if [[ -z "$BASE_RESULTS_TEST" ]]; then
+          if [[ -z "$BASE_RESULTS_TEST_RESOLVED" ]]; then
             echo "::error::base_results_test is required for mode=${{ inputs.mode }}"
             exit 1
           fi
-          if [[ -z "$EVENTVOT_TOOLKIT_ROOT" ]]; then
+          if [[ -z "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
             echo "::error::eventvot_toolkit_root is required for mode=${{ inputs.mode }}"
             exit 1
           fi
-          if [[ ! -e "$BASE_RESULTS_TEST" ]]; then
-            echo "::error::base_results_test does not exist on this runner: $BASE_RESULTS_TEST"
+          if [[ ! -e "$BASE_RESULTS_TEST_RESOLVED" ]]; then
+            echo "::error::base_results_test does not exist on this runner: $BASE_RESULTS_TEST_RESOLVED"
             exit 1
           fi
-          if [[ ! -e "$EVENTVOT_TOOLKIT_ROOT" ]]; then
-            echo "::error::eventvot_toolkit_root does not exist on this runner: $EVENTVOT_TOOLKIT_ROOT"
+          if [[ ! -e "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+            echo "::error::eventvot_toolkit_root does not exist on this runner: $EVENTVOT_TOOLKIT_ROOT_RESOLVED"
             exit 1
           fi
 
@@ -349,9 +663,6 @@ jobs:
         if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
         shell: bash
         env:
-          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
-          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
-          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
           TRACKER_NAME: ${{ inputs.tracker_name }}
         run: |
           set -euo pipefail
@@ -390,9 +701,9 @@ jobs:
           PY
 
           args=(
-            --eventvot-root "$EVENTVOT_ROOT"
-            --base-results "$BASE_RESULTS_TEST"
-            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT"
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED"
+            --base-results "$BASE_RESULTS_TEST_RESOLVED"
+            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT_RESOLVED"
             --tracker-name "$TRACKER_NAME"
             --split test
             --event-column-order "${{ inputs.event_column_order }}"
@@ -419,7 +730,7 @@ jobs:
 
           python scripts/run_eventvot_refinement.py "${args[@]}"
 
-          REFINED_RESULT_DIR="${EVENTVOT_TOOLKIT_ROOT}/eventvot_tracking_results/${TRACKER_NAME}_tracking_result"
+          REFINED_RESULT_DIR="${EVENTVOT_TOOLKIT_ROOT_RESOLVED}/eventvot_tracking_results/${TRACKER_NAME}_tracking_result"
           if [[ ! -d "$REFINED_RESULT_DIR" ]]; then
             echo "::error::Expected refined result directory was not created: $REFINED_RESULT_DIR"
             exit 1
@@ -429,12 +740,9 @@ jobs:
           cp -a "$REFINED_RESULT_DIR"/. "$TEST_OUT/refined-results/"
 
       - name: Generate EventVOT comparison report
-        if: ${{ (inputs.mode == 'locked_test' || inputs.mode == 'full') && inputs.run_report == true }}
+        if: ${{ inputs.mode == 'locked_test' || inputs.mode == 'full' }}
         shell: bash
         env:
-          EVENTVOT_ROOT: ${{ inputs.eventvot_root }}
-          EVENTVOT_TOOLKIT_ROOT: ${{ inputs.eventvot_toolkit_root }}
-          BASE_RESULTS_TEST: ${{ inputs.base_results_test }}
           BASE_TRACKER_NAME: ${{ inputs.base_tracker_name }}
         run: |
           set -euo pipefail
@@ -442,11 +750,11 @@ jobs:
           mkdir -p "$REPORT_OUT"
 
           python scripts/report_eventvot_comparisons.py \
-            --eventvot-root "$EVENTVOT_ROOT" \
-            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT" \
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED" \
+            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" \
             --output-root "$REPORT_OUT" \
             --split test \
-            --tracker "${BASE_TRACKER_NAME}=${BASE_RESULTS_TEST}" \
+            --tracker "${BASE_TRACKER_NAME}=${BASE_RESULTS_TEST_RESOLVED}" \
             --tracker "${BASE_TRACKER_NAME} + DVS-ENACT=${REFINED_RESULT_DIR}" \
             --pair "${BASE_TRACKER_NAME}=${BASE_TRACKER_NAME} + DVS-ENACT"
 
@@ -523,7 +831,7 @@ jobs:
         uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: ${{ inputs.output_artifact_name }}
+          name: eventvot-dvsenact-sota-output
           path: |
             eventvot-sota-output
           if-no-files-found: warn
