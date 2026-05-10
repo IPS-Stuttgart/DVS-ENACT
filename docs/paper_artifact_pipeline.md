@@ -76,9 +76,11 @@ first checks for a valid local dataset cache below:
 $HOME/.cache/datasets/MEVDT
 ```
 
-A valid local cache contains `labels/` and `sequences/`. If no valid local cache
-is present, the action downloads the MEVDT WebDAV share with rclone, writes a
-`MANIFEST.txt`, and stores `.dataset-version` in the resolved dataset root.
+A valid local cache contains either the curated `labels/` and `sequences/`
+layout or the raw WebDAV `data_splits/` and `event_samples/` layout. If no valid
+local cache is present, the action downloads the MEVDT WebDAV share with rclone,
+writes a `MANIFEST.txt`, and stores `.dataset-version` in the resolved dataset
+root.
 
 The workflow expects these GitHub secrets to be configured:
 
