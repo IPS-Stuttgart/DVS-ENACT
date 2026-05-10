@@ -1,0 +1,249 @@
+name: Ensure MEVDT dataset
+description: Resolve or populate a persistent MEVDT dataset cache on a self-hosted runner.
+
+inputs:
+  dataset-root:
+    description: >-
+      Optional MEVDT cache root on the runner. Empty defaults to
+      $HOME/.cache/datasets/MEVDT. $HOME and ~ prefixes are expanded.
+    required: false
+    default: ""
+  cache-version:
+    description: Version marker written into the local cache after a successful download.
+    required: false
+    default: "MEVDT-v1"
+  webdav-url:
+    description: MEVDT WebDAV URL.
+    required: false
+    default: ""
+  webdav-user:
+    description: MEVDT WebDAV user/key.
+    required: false
+    default: ""
+  webdav-password:
+    description: MEVDT WebDAV password.
+    required: false
+    default: ""
+  min-label-files:
+    description: Minimum number of files below labels/ required to accept a local cache.
+    required: false
+    default: "1"
+  min-sequence-files:
+    description: Minimum number of files below sequences/ required to accept a local cache.
+    required: false
+    default: "1"
+
+outputs:
+  dataset-root:
+    description: Resolved MEVDT dataset root containing labels/ and sequences/.
+    value: ${{ steps.ensure.outputs.dataset-root }}
+  cache-hit:
+    description: "true when an already valid local cache was found before downloading."
+    value: ${{ steps.ensure.outputs.cache-hit }}
+  manifest:
+    description: Path to the local cache manifest.
+    value: ${{ steps.ensure.outputs.manifest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve or populate MEVDT dataset cache
+      id: ensure
+      shell: bash
+      env:
+        MEVDT_DATASET_ROOT_INPUT: ${{ inputs.dataset-root }}
+        MEVDT_CACHE_VERSION: ${{ inputs.cache-version }}
+        MEVDT_WEBDAV_URL: ${{ inputs.webdav-url }}
+        MEVDT_DATA_KEY: ${{ inputs.webdav-user }}
+        MEVDT_DATA_PASSWORD: ${{ inputs.webdav-password }}
+        MEVDT_MIN_LABEL_FILES: ${{ inputs.min-label-files }}
+        MEVDT_MIN_SEQUENCE_FILES: ${{ inputs.min-sequence-files }}
+      run: |
+        set -euo pipefail
+
+        resolve_path() {
+          local value="${1:-}"
+          local fallback="${2:-}"
+          local home_prefix=\$HOME/
+          local tilde_prefix=\~/
+
+          if [[ -z "$value" ]]; then
+            value="$fallback"
+          fi
+
+          case "$value" in
+            "$home_prefix"*) echo "${HOME}/${value#"${home_prefix}"}" ;;
+            "$tilde_prefix"*) echo "${HOME}/${value#"${tilde_prefix}"}" ;;
+            /*) echo "$value" ;;
+            "") echo "" ;;
+            *) echo "${GITHUB_WORKSPACE}/${value}" ;;
+          esac
+        }
+
+        count_files() {
+          local root="$1"
+          if [[ ! -d "$root" ]]; then
+            echo 0
+            return
+          fi
+          find "$root" -type f -print 2>/dev/null | wc -l | tr -d ' '
+        }
+
+        candidate_is_valid() {
+          local candidate="$1"
+
+          if [[ ! -d "${candidate}/labels" || ! -d "${candidate}/sequences" ]]; then
+            return 1
+          fi
+
+          local label_count
+          local sequence_count
+          label_count="$(count_files "${candidate}/labels")"
+          sequence_count="$(count_files "${candidate}/sequences")"
+
+          if (( label_count < MEVDT_MIN_LABEL_FILES )); then
+            echo "::notice::Rejecting ${candidate}: labels/ contains ${label_count} files, expected at least ${MEVDT_MIN_LABEL_FILES}." >&2
+            return 1
+          fi
+          if (( sequence_count < MEVDT_MIN_SEQUENCE_FILES )); then
+            echo "::notice::Rejecting ${candidate}: sequences/ contains ${sequence_count} files, expected at least ${MEVDT_MIN_SEQUENCE_FILES}." >&2
+            return 1
+          fi
+
+          if [[ -f "${candidate}/.dataset-version" ]]; then
+            local observed_version
+            observed_version="$(tr -d '\r\n' < "${candidate}/.dataset-version")"
+            if [[ "$observed_version" != "$MEVDT_CACHE_VERSION" ]]; then
+              echo "::notice::Rejecting ${candidate}: .dataset-version=${observed_version}, expected ${MEVDT_CACHE_VERSION}." >&2
+              return 1
+            fi
+          fi
+
+          return 0
+        }
+
+        resolve_mevdt_cache() {
+          local root="$1"
+          local candidate
+          for candidate in "$root" "${root}/MEVDT" "${root}/MEVDT-one-sequence"; do
+            if candidate_is_valid "$candidate"; then
+              echo "$candidate"
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        write_manifest() {
+          local root="$1"
+          local manifest="${root}/MANIFEST.txt"
+
+          {
+            echo "Dataset: MEVDT"
+            echo "Cache version: ${MEVDT_CACHE_VERSION}"
+            echo "Prepared at UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Runner: ${RUNNER_NAME:-unknown}"
+            echo "Repository: ${GITHUB_REPOSITORY:-unknown}"
+            echo "Commit: ${GITHUB_SHA:-unknown}"
+            echo "Root: ${root}"
+            echo
+            echo "Directory summary:"
+            find "$root" -maxdepth 2 -type d | sort
+            echo
+            echo "File summary:"
+            find "$root" -type f -printf '%s %p\n' | sort
+          } > "${manifest}.tmp"
+
+          mv "${manifest}.tmp" "$manifest"
+          printf '%s\n' "$MEVDT_CACHE_VERSION" > "${root}/.dataset-version"
+          echo "$manifest"
+        }
+
+        install_rclone() {
+          if command -v rclone >/dev/null 2>&1; then
+            return 0
+          fi
+
+          mkdir -p "$RUNNER_TEMP/rclone-bin" "$RUNNER_TEMP/rclone-download/extract"
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip \
+            -o "$RUNNER_TEMP/rclone-download/rclone.zip"
+          python -m zipfile -e \
+            "$RUNNER_TEMP/rclone-download/rclone.zip" \
+            "$RUNNER_TEMP/rclone-download/extract"
+          local rclone_bin
+          rclone_bin="$(find "$RUNNER_TEMP/rclone-download/extract" -type f -name rclone | head -n 1)"
+          if [[ -z "$rclone_bin" ]]; then
+            echo "::error::Downloaded rclone archive did not contain rclone binary."
+            exit 1
+          fi
+          cp "$rclone_bin" "$RUNNER_TEMP/rclone-bin/rclone"
+          chmod 755 "$RUNNER_TEMP/rclone-bin/rclone"
+          echo "$RUNNER_TEMP/rclone-bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/rclone-bin:$PATH"
+        }
+
+        requested_root="$(resolve_path "$MEVDT_DATASET_ROOT_INPUT" "${HOME}/.cache/datasets/MEVDT")"
+        mkdir -p "$requested_root"
+
+        if resolved_root="$(resolve_mevdt_cache "$requested_root")"; then
+          manifest="$(write_manifest "$resolved_root")"
+          echo "MEVDT cache hit at ${resolved_root}"
+          du -sh "$resolved_root" || true
+          {
+            echo "dataset-root=${resolved_root}"
+            echo "cache-hit=true"
+            echo "manifest=${manifest}"
+          } >> "$GITHUB_OUTPUT"
+          echo "MEVDT_DATASET_ROOT=${resolved_root}" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        for name in MEVDT_WEBDAV_URL MEVDT_DATA_KEY MEVDT_DATA_PASSWORD; do
+          if [[ -z "${!name:-}" ]]; then
+            echo "::error::${name} is required because no valid local MEVDT cache was found at ${requested_root}."
+            exit 1
+          fi
+        done
+
+        install_rclone
+        rclone version
+
+        export RCLONE_CONFIG_MEVDTDATA_TYPE=webdav
+        export RCLONE_CONFIG_MEVDTDATA_URL="$MEVDT_WEBDAV_URL"
+        export RCLONE_CONFIG_MEVDTDATA_VENDOR=owncloud
+        export RCLONE_CONFIG_MEVDTDATA_USER="$MEVDT_DATA_KEY"
+        RCLONE_CONFIG_MEVDTDATA_PASS="$(rclone obscure "$MEVDT_DATA_PASSWORD")"
+        export RCLONE_CONFIG_MEVDTDATA_PASS
+
+        download_lock="${requested_root}/.download-lock"
+        if mkdir "$download_lock" 2>/dev/null; then
+          trap 'rmdir "$download_lock" 2>/dev/null || true' EXIT
+        else
+          echo "::error::Another MEVDT download appears to be active: ${download_lock}"
+          exit 75
+        fi
+
+        echo "Downloading MEVDT WebDAV share into ${requested_root}"
+        rclone copy MEVDTDATA: "$requested_root" \
+          --fast-list \
+          --create-empty-src-dirs \
+          --transfers 8 \
+          --checkers 16 \
+          --stats 30s \
+          --stats-one-line
+
+        if ! resolved_root="$(resolve_mevdt_cache "$requested_root")"; then
+          echo "::error::MEVDT cache must contain labels/ and sequences/ with enough files below ${requested_root}."
+          find "$requested_root" -maxdepth 3 -type d | sort | head -n 100
+          exit 1
+        fi
+
+        manifest="$(write_manifest "$resolved_root")"
+        echo "MEVDT cache ready at ${resolved_root}"
+        du -sh "$resolved_root" || true
+        {
+          echo "dataset-root=${resolved_root}"
+          echo "cache-hit=false"
+          echo "manifest=${manifest}"
+        } >> "$GITHUB_OUTPUT"
+        echo "MEVDT_DATASET_ROOT=${resolved_root}" >> "$GITHUB_ENV"
