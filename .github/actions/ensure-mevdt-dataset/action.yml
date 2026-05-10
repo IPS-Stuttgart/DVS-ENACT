@@ -25,17 +25,17 @@ inputs:
     required: false
     default: ""
   min-label-files:
-    description: Minimum number of files below labels/ required to accept a local cache.
+    description: Minimum number of files below labels/ or data_splits/ required to accept a local cache.
     required: false
     default: "1"
   min-sequence-files:
-    description: Minimum number of files below sequences/ required to accept a local cache.
+    description: Minimum number of files below sequences/ or event_samples/ required to accept a local cache.
     required: false
     default: "1"
 
 outputs:
   dataset-root:
-    description: Resolved MEVDT dataset root containing labels/ and sequences/.
+    description: Resolved MEVDT dataset root containing a curated or raw MEVDT layout.
     value: ${{ steps.ensure.outputs.dataset-root }}
   cache-hit:
     description: "true when an already valid local cache was found before downloading."
@@ -91,22 +91,33 @@ runs:
 
         candidate_is_valid() {
           local candidate="$1"
+          local label_root=""
+          local sequence_root=""
+          local layout=""
 
-          if [[ ! -d "${candidate}/labels" || ! -d "${candidate}/sequences" ]]; then
+          if [[ -d "${candidate}/labels" && -d "${candidate}/sequences" ]]; then
+            label_root="${candidate}/labels"
+            sequence_root="${candidate}/sequences"
+            layout="curated"
+          elif [[ -d "${candidate}/data_splits" && -d "${candidate}/event_samples" ]]; then
+            label_root="${candidate}/data_splits"
+            sequence_root="${candidate}/event_samples"
+            layout="raw-webdav"
+          else
             return 1
           fi
 
           local label_count
           local sequence_count
-          label_count="$(count_files "${candidate}/labels")"
-          sequence_count="$(count_files "${candidate}/sequences")"
+          label_count="$(count_files "$label_root")"
+          sequence_count="$(count_files "$sequence_root")"
 
           if (( label_count < MEVDT_MIN_LABEL_FILES )); then
-            echo "::notice::Rejecting ${candidate}: labels/ contains ${label_count} files, expected at least ${MEVDT_MIN_LABEL_FILES}." >&2
+            echo "::notice::Rejecting ${candidate}: ${label_root} contains ${label_count} files, expected at least ${MEVDT_MIN_LABEL_FILES}." >&2
             return 1
           fi
           if (( sequence_count < MEVDT_MIN_SEQUENCE_FILES )); then
-            echo "::notice::Rejecting ${candidate}: sequences/ contains ${sequence_count} files, expected at least ${MEVDT_MIN_SEQUENCE_FILES}." >&2
+            echo "::notice::Rejecting ${candidate}: ${sequence_root} contains ${sequence_count} files, expected at least ${MEVDT_MIN_SEQUENCE_FILES}." >&2
             return 1
           fi
 
@@ -119,6 +130,7 @@ runs:
             fi
           fi
 
+          echo "::notice::Accepting ${candidate} as ${layout} MEVDT cache." >&2
           return 0
         }
 
@@ -160,7 +172,7 @@ runs:
         }
 
         install_rclone() {
-          if command -v rclone >/dev/null 2>&1; then
+          if command -v rclone >/dev/null 2>&1 && rclone version >/dev/null 2>&1; then
             return 0
           fi
 
@@ -254,7 +266,7 @@ runs:
           --stats-one-line
 
         if ! resolved_root="$(resolve_mevdt_cache "$requested_root")"; then
-          echo "::error::MEVDT cache must contain labels/ and sequences/ with enough files below ${requested_root}."
+          echo "::error::MEVDT cache must contain either labels/ and sequences/ or data_splits/ and event_samples/ with enough files below ${requested_root}."
           find "$requested_root" -maxdepth 3 -type d | sort | head -n 100
           exit 1
         fi
