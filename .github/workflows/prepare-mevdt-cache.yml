@@ -1,0 +1,75 @@
+name: Prepare MEVDT cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset_root:
+        description: "Optional MEVDT cache root on the self-hosted runner; defaults to $HOME/.cache/datasets/MEVDT"
+        required: false
+        default: ""
+        type: string
+      cache_version:
+        description: "Local MEVDT cache version marker"
+        required: true
+        default: "MEVDT-v1"
+        type: string
+      min_label_files:
+        description: "Minimum number of files below labels/ required to accept the cache"
+        required: true
+        default: "1"
+        type: string
+      min_sequence_files:
+        description: "Minimum number of files below sequences/ required to accept the cache"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-mevdt-cache
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  prepare:
+    name: Prepare MEVDT local cache
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 240
+
+    steps:
+      - name: Check out DVS-ENACT
+        uses: actions/checkout@v6
+
+      - name: Ensure MEVDT dataset cache
+        id: mevdt-dataset
+        uses: ./.github/actions/ensure-mevdt-dataset
+        with:
+          dataset-root: ${{ inputs.dataset_root }}
+          cache-version: ${{ inputs.cache_version }}
+          webdav-url: ${{ secrets.MEVDT_WEBDAV_URL }}
+          webdav-user: ${{ secrets.MEVDT_DATA_KEY }}
+          webdav-password: ${{ secrets.MEVDT_DATA_PASSWORD }}
+          min-label-files: ${{ inputs.min_label_files }}
+          min-sequence-files: ${{ inputs.min_sequence_files }}
+
+      - name: Summarize MEVDT cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# MEVDT cache"
+            echo
+            echo "- Resolved root: \`${{ steps.mevdt-dataset.outputs.dataset-root }}\`"
+            echo "- Existing local cache hit: \`${{ steps.mevdt-dataset.outputs.cache-hit }}\`"
+            echo "- Manifest: \`${{ steps.mevdt-dataset.outputs.manifest }}\`"
+            echo
+            echo "## Size"
+            echo
+            echo '```text'
+            du -sh "${{ steps.mevdt-dataset.outputs.dataset-root }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -42,98 +42,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Resolve MEVDT dataset cache path
-        shell: bash
-        run: |
-          set -euo pipefail
-          dataset_root="${{ inputs.dataset_root }}"
-          if [[ -z "$dataset_root" ]]; then
-            dataset_root="${HOME}/.cache/datasets/MEVDT"
-          fi
-          echo "MEVDT_DATASET_ROOT=${dataset_root}" >> "$GITHUB_ENV"
-          echo "MEVDT dataset root: ${dataset_root}"
-
-      - name: Install rclone without sudo
+      - name: Ensure MEVDT dataset cache
+        id: mevdt-dataset
         if: ${{ inputs.include_mevdt == true }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v rclone >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/rclone-bin" "$RUNNER_TEMP/rclone-download/extract"
-            curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip \
-              -o "$RUNNER_TEMP/rclone-download/rclone.zip"
-            python -m zipfile -e \
-              "$RUNNER_TEMP/rclone-download/rclone.zip" \
-              "$RUNNER_TEMP/rclone-download/extract"
-            RCLONE_BIN="$(find "$RUNNER_TEMP/rclone-download/extract" -type f -name rclone | head -n 1)"
-            if [[ -z "$RCLONE_BIN" ]]; then
-              echo "::error::Downloaded rclone archive did not contain rclone binary"
-              exit 1
-            fi
-            cp "$RCLONE_BIN" "$RUNNER_TEMP/rclone-bin/rclone"
-            chmod 755 "$RUNNER_TEMP/rclone-bin/rclone"
-            echo "$RUNNER_TEMP/rclone-bin" >> "$GITHUB_PATH"
-            export PATH="$RUNNER_TEMP/rclone-bin:$PATH"
-          fi
-          rclone version
-
-      - name: Populate MEVDT dataset cache
-        if: ${{ inputs.include_mevdt == true }}
-        shell: bash
-        env:
-          MEVDT_WEBDAV_URL: ${{ secrets.MEVDT_WEBDAV_URL }}
-          MEVDT_DATA_KEY: ${{ secrets.MEVDT_DATA_KEY }}
-          MEVDT_DATA_PASSWORD: ${{ secrets.MEVDT_DATA_PASSWORD }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$MEVDT_DATASET_ROOT"
-
-          resolve_mevdt_cache() {
-            if [[ -d "${MEVDT_DATASET_ROOT}/labels" && -d "${MEVDT_DATASET_ROOT}/sequences" ]]; then
-              echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
-              return 0
-            fi
-            if [[ -d "${MEVDT_DATASET_ROOT}/MEVDT/labels" && -d "${MEVDT_DATASET_ROOT}/MEVDT/sequences" ]]; then
-              MEVDT_DATASET_ROOT="${MEVDT_DATASET_ROOT}/MEVDT"
-              echo "MEVDT_DATASET_ROOT=${MEVDT_DATASET_ROOT}" >> "$GITHUB_ENV"
-              return 0
-            fi
-            return 1
-          }
-
-          if resolve_mevdt_cache; then
-            echo "MEVDT cache hit at ${MEVDT_DATASET_ROOT}"
-            exit 0
-          fi
-
-          for name in MEVDT_WEBDAV_URL MEVDT_DATA_KEY MEVDT_DATA_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "::error::${name} secret is required when include_mevdt is true"
-              exit 1
-            fi
-          done
-
-          export RCLONE_CONFIG_MEVDTDATA_TYPE=webdav
-          export RCLONE_CONFIG_MEVDTDATA_URL="$MEVDT_WEBDAV_URL"
-          export RCLONE_CONFIG_MEVDTDATA_VENDOR=owncloud
-          export RCLONE_CONFIG_MEVDTDATA_USER="$MEVDT_DATA_KEY"
-          RCLONE_CONFIG_MEVDTDATA_PASS="$(rclone obscure "$MEVDT_DATA_PASSWORD")"
-          export RCLONE_CONFIG_MEVDTDATA_PASS
-
-          rclone copy MEVDTDATA: "$MEVDT_DATASET_ROOT" \
-            --fast-list \
-            --create-empty-src-dirs \
-            --transfers 8 \
-            --checkers 16 \
-            --stats 30s \
-            --stats-one-line
-
-          if ! resolve_mevdt_cache; then
-            echo "::error::MEVDT cache must contain labels/ and sequences/: ${MEVDT_DATASET_ROOT}"
-            find "${MEVDT_DATASET_ROOT}" -maxdepth 3 -type d | sort | head -n 50
-            exit 1
-          fi
-          echo "MEVDT cache ready at ${MEVDT_DATASET_ROOT}"
+        uses: ./.github/actions/ensure-mevdt-dataset
+        with:
+          dataset-root: ${{ inputs.dataset_root }}
+          cache-version: MEVDT-v1
+          webdav-url: ${{ secrets.MEVDT_WEBDAV_URL }}
+          webdav-user: ${{ secrets.MEVDT_DATA_KEY }}
+          webdav-password: ${{ secrets.MEVDT_DATA_PASSWORD }}
 
       - name: Install package
         run: |

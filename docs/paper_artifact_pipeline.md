@@ -68,12 +68,17 @@ include_mevdt = true
 dataset_root = /absolute/path/to/MEVDT-one-sequence
 ```
 
-When `include_mevdt = true` and `dataset_root` is empty, the workflow downloads
-the MEVDT WebDAV share with rclone into:
+When `include_mevdt = true` and `dataset_root` is empty, the workflow uses the
+shared local MEVDT cache action at `.github/actions/ensure-mevdt-dataset`. It
+first checks for a valid local dataset cache below:
 
 ```text
 $HOME/.cache/datasets/MEVDT
 ```
+
+A valid local cache contains `labels/` and `sequences/`. If no valid local cache
+is present, the action downloads the MEVDT WebDAV share with rclone, writes a
+`MANIFEST.txt`, and stores `.dataset-version` in the resolved dataset root.
 
 The workflow expects these GitHub secrets to be configured:
 
@@ -95,6 +100,27 @@ The workflow uploads `paper-output/data/paper_evidence` and
 generated files into the private paper repository automatically. That keeps the
 data-producing workflow auditable and avoids coupling the public code repository
 to private-repository credentials.
+
+## MEVDT cache pre-warming
+
+The workflow `.github/workflows/prepare-mevdt-cache.yml` is a manual pre-warm
+entry point for the persistent self-hosted runner cache. Run it before
+real-data paper exports to populate or verify the local cache without executing
+the full artifact pipeline.
+
+Default inputs are sufficient for the standard cache location:
+
+```text
+dataset_root =
+cache_version = MEVDT-v1
+min_label_files = 1
+min_sequence_files = 1
+```
+
+The workflow uses the same `.github/actions/ensure-mevdt-dataset` action as the
+paper-export workflow, so both paths validate and resolve MEVDT identically.
+If the cache already exists, the workflow only refreshes the manifest and prints
+a compact size summary.
 
 ## Manifest contract
 
