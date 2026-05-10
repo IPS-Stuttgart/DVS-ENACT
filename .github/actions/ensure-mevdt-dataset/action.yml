@@ -160,8 +160,11 @@ runs:
         }
 
         install_rclone() {
-          if command -v rclone >/dev/null 2>&1; then
+          if command -v rclone >/dev/null 2>&1 && rclone version >/dev/null 2>&1; then
             return 0
+          fi
+          if command -v rclone >/dev/null 2>&1; then
+            echo "::notice::Existing rclone is not usable in this runner context; installing local rclone binary."
           fi
 
           mkdir -p "$RUNNER_TEMP/rclone-bin" "$RUNNER_TEMP/rclone-download/extract"
