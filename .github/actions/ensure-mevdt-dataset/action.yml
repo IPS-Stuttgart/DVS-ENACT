@@ -164,10 +164,31 @@ runs:
             return 0
           fi
 
+          extract_zip() {
+            local archive="$1"
+            local target="$2"
+
+            if command -v python3 >/dev/null 2>&1; then
+              python3 -m zipfile -e "$archive" "$target"
+              return 0
+            fi
+            if command -v python >/dev/null 2>&1; then
+              python -m zipfile -e "$archive" "$target"
+              return 0
+            fi
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "$archive" -d "$target"
+              return 0
+            fi
+
+            echo "::error::Need python3, python, or unzip to extract the rclone archive."
+            exit 1
+          }
+
           mkdir -p "$RUNNER_TEMP/rclone-bin" "$RUNNER_TEMP/rclone-download/extract"
           curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip \
             -o "$RUNNER_TEMP/rclone-download/rclone.zip"
-          python -m zipfile -e \
+          extract_zip \
             "$RUNNER_TEMP/rclone-download/rclone.zip" \
             "$RUNNER_TEMP/rclone-download/extract"
           local rclone_bin
