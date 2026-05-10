@@ -177,6 +177,7 @@ jobs:
 
       - name: Populate and resolve EventVOT cache
         shell: bash
+        timeout-minutes: 240
         env:
           MODE_INPUT: ${{ inputs.mode }}
           EVENTVOT_ROOT_INPUT: ${{ inputs.eventvot_root }}
@@ -196,6 +197,7 @@ jobs:
           EVENTVOT_BENCHMARK_DIR="$CACHE_ROOT/EventVOT_Benchmark"
           EVENTVOT_ARCHIVE="$CACHE_ROOT/downloads/eventvot_archive.zip"
           HDETRACKV2_ARCHIVE="$CACHE_ROOT/downloads/hdetrackv2_raw_results_archive.zip"
+          DOWNLOAD_TIMEOUT_SECONDS=14400
           EVENTVOT_URL="${EVENTVOT_URL_SECRET:-${EVENTVOT_URL_VAR:-https://www.dropbox.com/scl/fo/fv2e3i0ytrjt14ylz81dx/h?rlkey=6c2wk2z7phmbiwqpfhhe29i5p&dl=1}}"
           HDETRACKV2_RESULTS_URL="${HDETRACKV2_RESULTS_URL_SECRET:-${HDETRACKV2_RESULTS_URL_VAR:-}}"
           NEEDS_VAL_RESULTS=false
@@ -208,6 +210,12 @@ jobs:
           fi
 
           mkdir -p "$CACHE_ROOT/downloads"
+
+          echo "Dataset cache root: $CACHE_ROOT"
+          echo "EventVOT cache dir: $EVENTVOT_CACHE_DIR"
+          echo "HDETrackV2 result cache dir: $HDETRACKV2_CACHE_DIR"
+          echo "EventVOT archive cache: $EVENTVOT_ARCHIVE"
+          echo "HDETrackV2 archive cache: $HDETRACKV2_ARCHIVE"
 
           resolve_path() {
             local value="${1:-}"
@@ -238,6 +246,56 @@ jobs:
             esac
           }
 
+          is_supported_archive() {
+            local archive_path="$1"
+            python - "$archive_path" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          if archive.exists() and (zipfile.is_zipfile(archive) or tarfile.is_tarfile(archive)):
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+          }
+
+          download_archive() {
+            local label="$1"
+            local url="$2"
+            local archive_path="$3"
+            local tmp_path="${archive_path}.tmp"
+
+            echo "Downloading $label archive into cache: $archive_path"
+            rm -f "$tmp_path"
+            if ! timeout "$DOWNLOAD_TIMEOUT_SECONDS" \
+              curl \
+              --fail \
+              --location \
+              --show-error \
+              --retry 5 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --speed-time 300 \
+              --speed-limit 1024 \
+              --output "$tmp_path" \
+              "$url"; then
+              rm -f "$tmp_path"
+              echo "::error::$label download failed or timed out after ${DOWNLOAD_TIMEOUT_SECONDS}s."
+              exit 66
+            fi
+
+            if ! is_supported_archive "$tmp_path"; then
+              rm -f "$tmp_path"
+              echo "::error::$label download did not produce a supported archive."
+              exit 65
+            fi
+
+            mv "$tmp_path" "$archive_path"
+          }
+
           download_and_extract() {
             local label="$1"
             local url="$2"
@@ -252,15 +310,19 @@ jobs:
 
             mkdir -p "$(dirname "$archive_path")" "$destination_dir"
 
+            if [[ -s "$archive_path" ]] && ! is_supported_archive "$archive_path"; then
+              echo "::warning::Cached $label archive is not a supported archive, removing: $archive_path"
+              rm -f "$archive_path"
+            fi
+
             if [[ ! -s "$archive_path" ]]; then
-              echo "Downloading $label archive into cache."
-              curl -fL --retry 5 --retry-delay 10 -C - -o "$archive_path" "$url"
+              download_archive "$label" "$url" "$archive_path"
             else
               echo "Using cached $label archive: $archive_path"
             fi
 
             echo "Extracting $label archive into: $destination_dir"
-            python - "$archive_path" "$destination_dir" <<'PY'
+            python -u - "$archive_path" "$destination_dir" <<'PY'
           import sys
           import tarfile
           import zipfile
@@ -270,6 +332,8 @@ jobs:
           destination = Path(sys.argv[2])
           destination.mkdir(parents=True, exist_ok=True)
           destination_resolved = destination.resolve()
+
+          print(f"Archive size: {archive.stat().st_size} bytes", flush=True)
 
           def assert_safe(path: Path) -> None:
               resolved = path.resolve()
@@ -291,6 +355,7 @@ jobs:
                   f"Unsupported or corrupt archive: {archive}. "
                   "Expected zip, tar, tar.gz, tgz, tar.bz2, or tar.xz."
               )
+          print(f"Finished extracting into: {destination}", flush=True)
           PY
           }
 
@@ -451,6 +516,7 @@ jobs:
 
           EVENTVOT_ROOT_RESOLVED="$(resolve_existing_input eventvot_root "$EVENTVOT_ROOT_INPUT")"
           if [[ -z "$EVENTVOT_ROOT_RESOLVED" ]]; then
+            echo "Checking cached EventVOT dataset below $EVENTVOT_CACHE_DIR"
             if ! EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root 2>/dev/null)"; then
               download_and_extract "EventVOT dataset" "$EVENTVOT_URL" "$EVENTVOT_ARCHIVE" "$EVENTVOT_CACHE_DIR"
               EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root)"
@@ -466,6 +532,7 @@ jobs:
             BASE_RESULTS_TEST_RESOLVED="$(resolve_existing_input base_results_test "$BASE_RESULTS_TEST_INPUT")"
           fi
           if [[ ( "$NEEDS_VAL_RESULTS" == "true" && -z "$BASE_RESULTS_VAL_RESOLVED" ) || ( "$NEEDS_TEST_RESULTS" == "true" && -z "$BASE_RESULTS_TEST_RESOLVED" ) ]]; then
+            echo "Checking cached HDETrackV2 raw results below $HDETRACKV2_CACHE_DIR"
             if ! find "$HDETRACKV2_CACHE_DIR" -type f -name "*.txt" -print -quit 2>/dev/null | grep -q .; then
               download_and_extract \
                 "HDETrackV2 raw results" \
