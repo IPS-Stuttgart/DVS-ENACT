@@ -7,6 +7,7 @@ import numpy as np
 from dvs_enact import (
     BoundingBox,
     compute_bbox_event_diagnostics,
+    find_tracking_label_files,
     read_event_csv,
     read_tracking_labels,
     summarize_diagnostics,
@@ -126,6 +127,27 @@ def test_read_tracking_labels_supports_json_annotation_lists():
     assert len(labels) == 1
     assert labels[0].frame == 2
     assert labels[0].track_id == 4
+
+
+def test_find_tracking_label_files_ignores_cache_metadata(tmp_path):
+    (tmp_path / "MANIFEST.txt").write_text("Dataset: MEVDT\n", encoding="utf-8")
+    (tmp_path / "data_splits").mkdir()
+    (tmp_path / "data_splits" / "train.txt").write_text("scene\n", encoding="utf-8")
+    (tmp_path / "event_samples" / "MEVDT_100_ms").mkdir(parents=True)
+    (tmp_path / "event_samples" / "MEVDT_100_ms" / "events.csv").write_text(
+        "1,2,3,1\n",
+        encoding="utf-8",
+    )
+    label_dir = tmp_path / "labels" / "tracking_labels" / "test" / "Scene_A"
+    label_dir.mkdir(parents=True)
+    label_file = label_dir / "sequence-custom24.txt"
+    label_file.write_text(
+        "1, 1581956422501835936\n"
+        "7, 1581956422760238936, 0, 236.5, 77.2, 3.4, 13.2\n",
+        encoding="utf-8",
+    )
+
+    assert find_tracking_label_files(tmp_path) == [label_file]
 
 
 def test_compute_bbox_event_diagnostics_reports_side_support():

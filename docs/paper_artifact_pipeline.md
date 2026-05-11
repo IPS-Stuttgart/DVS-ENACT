@@ -76,11 +76,12 @@ first checks for a valid local dataset cache below:
 $HOME/.cache/datasets/MEVDT
 ```
 
-A valid local cache contains either the curated `labels/` and `sequences/`
-layout or the raw WebDAV `data_splits/` and `event_samples/` layout. If no valid
-local cache is present, the action downloads the MEVDT WebDAV share with rclone,
-writes a `MANIFEST.txt`, and stores `.dataset-version` in the resolved dataset
-root.
+The paper-export workflow requires the curated `labels/` and `sequences/`
+layout. If the default cache only contains the raw WebDAV `data_splits/` and
+`event_samples/` layout, the action treats it as incomplete for paper export and
+refreshes the cache from the configured WebDAV share. After a successful
+download, it writes a `MANIFEST.txt` and stores `.dataset-version` in the
+resolved dataset root.
 
 The workflow expects these GitHub secrets to be configured:
 
@@ -117,6 +118,7 @@ dataset_root =
 cache_version = MEVDT-v1
 min_label_files = 1
 min_sequence_files = 1
+require_curated_layout = true
 ```
 
 The workflow uses the same `.github/actions/ensure-mevdt-dataset` action as the

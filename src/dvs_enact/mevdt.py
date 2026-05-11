@@ -122,11 +122,26 @@ def find_tracking_label_files(dataset_root: str | Path) -> list[Path]:
     root = Path(dataset_root)
     if not root.exists():
         raise FileNotFoundError(f"MEVDT root does not exist: {root}")
-    preferred_roots = [
-        path
-        for path in root.rglob("*")
-        if path.is_dir() and "tracking" in path.name.lower()
-    ]
+
+    def is_auxiliary_file(path: Path) -> bool:
+        name = path.name.lower()
+        if name in {"manifest.txt", ".dataset-version"}:
+            return True
+        parts = {part.lower() for part in path.parts}
+        return bool(parts & {"data_splits", "event_samples", "sequences"})
+
+    label_root = root / "labels"
+    tracking_label_root = label_root / "tracking_labels"
+    if tracking_label_root.is_dir():
+        preferred_roots = [tracking_label_root]
+    elif label_root.is_dir():
+        preferred_roots = [label_root]
+    else:
+        preferred_roots = [
+            path
+            for path in root.rglob("*")
+            if path.is_dir() and "tracking" in path.name.lower()
+        ]
     search_roots = preferred_roots if preferred_roots else [root]
     files: list[Path] = []
     for search_root in search_roots:
@@ -134,6 +149,7 @@ def find_tracking_label_files(dataset_root: str | Path) -> list[Path]:
             path
             for path in search_root.rglob("*")
             if path.suffix.lower() in {".txt", ".csv", ".json"}
+            and not is_auxiliary_file(path)
         )
     return sorted(files)
 
