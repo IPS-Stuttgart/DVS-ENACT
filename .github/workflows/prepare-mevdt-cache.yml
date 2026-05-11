@@ -23,6 +23,11 @@ on:
         required: true
         default: "1"
         type: string
+      require_curated_layout:
+        description: "Require labels/ and sequences/ rather than only raw WebDAV folders"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
           webdav-password: ${{ secrets.MEVDT_DATA_PASSWORD }}
           min-label-files: ${{ inputs.min_label_files }}
           min-sequence-files: ${{ inputs.min_sequence_files }}
+          require-curated-layout: ${{ inputs.require_curated_layout }}
 
       - name: Summarize MEVDT cache
         shell: bash

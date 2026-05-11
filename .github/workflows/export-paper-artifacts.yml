@@ -52,6 +52,7 @@ jobs:
           webdav-url: ${{ secrets.MEVDT_WEBDAV_URL }}
           webdav-user: ${{ secrets.MEVDT_DATA_KEY }}
           webdav-password: ${{ secrets.MEVDT_DATA_PASSWORD }}
+          require-curated-layout: true
 
       - name: Install package
         run: |
