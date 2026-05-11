@@ -37,6 +37,9 @@ class TrackerComparisonConfig:
     event_cloud_min_extent_px: float = 2.0
     event_activity_floor: float = 0.05
     inactive_activity_threshold: float = 0.05
+    use_event_polarity: bool = True
+    polarity_mismatch_weight: float = 0.25
+    polarity_contrast_sign: float | str | None = "infer"
     collapse_threshold: float = 0.75
     measurement_noise_variance: float = 4.0
     radial_noise_variance: float = 1.0
@@ -423,6 +426,8 @@ def _make_tracker(tracker_cls, initial_label: BoundingBox, config: TrackerCompar
             {
                 "event_activity_floor": config.event_activity_floor,
                 "inactive_activity_threshold": config.inactive_activity_threshold,
+                "polarity_mismatch_weight": config.polarity_mismatch_weight,
+                "polarity_contrast_sign": config.polarity_contrast_sign,
             }
         )
     return tracker_cls(config.n_base_points, **tracker_kwargs)
@@ -615,7 +620,12 @@ def compare_trackers_on_labels(
             measurements = _event_measurements(sampled_events)
             velocity = following.center - current.center
             baseline_tracker.update(measurements)
-            dvs_tracker.update(measurements, event_velocity=velocity)
+            event_polarities = sampled_events.p if config.use_event_polarity else None
+            dvs_tracker.update(
+                measurements,
+                event_velocity=velocity,
+                event_polarities=event_polarities,
+            )
 
             baseline_bbox = estimated_tracker_bbox(
                 baseline_tracker,
@@ -673,8 +683,14 @@ def compare_trackers_on_labels(
                     },
                     "dvs_enact": {
                         "bbox": dvs_bbox,
+                        "used_event_polarity": bool(config.use_event_polarity),
                         "active_measurement_count": len(
                             dvs_tracker.last_active_measurement_indices or []
+                        ),
+                        "polarity_contrast_sign": (
+                            None
+                            if dvs_tracker.last_polarity_contrast_sign is None
+                            else float(dvs_tracker.last_polarity_contrast_sign)
                         ),
                         "mean_event_activity": float(
                             np.mean(np.asarray(dvs_tracker.last_event_activities))

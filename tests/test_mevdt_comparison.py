@@ -207,6 +207,8 @@ def test_compare_trackers_on_labels_returns_valid_payload():
     assert event_cloud["metrics"]["center_error_px"] == pytest.approx(2.0)
     assert event_cloud["metrics"]["inactive_axis_ratio"] == pytest.approx(0.6)
     assert "bbox_iou" in window["baseline"]["metrics"]
+    assert window["dvs_enact"]["used_event_polarity"] is True
+    assert window["dvs_enact"]["polarity_contrast_sign"] in {-1.0, 1.0}
     assert "inactive_axis_ratio" in window["dvs_enact"]["metrics"]
 
 

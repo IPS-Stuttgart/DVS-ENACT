@@ -45,3 +45,26 @@ def test_exporter_help_runs_as_script():
     assert "Generate canonical DVS-ENACT artifacts" in result.stdout
     assert "--skip-mevdt" in result.stdout
     assert "--synthetic-n-steps" in result.stdout
+
+
+def test_mevdt_cli_options_build_tracker_config(monkeypatch):
+    monkeypatch.syspath_prepend(str(SCRIPTS_DIR))
+    from mevdt_cli_common import tracker_config_from_options
+
+    config = tracker_config_from_options(
+        {
+            "max_events_per_window": 16,
+            "max_windows": 3,
+            "min_events_per_window": 2,
+            "disable_event_polarity": True,
+            "polarity_mismatch_weight": 0.5,
+            "polarity_contrast_sign": "negative",
+        }
+    )
+
+    assert config.max_events_per_window == 16
+    assert config.max_windows == 3
+    assert config.min_events_per_window == 2
+    assert config.use_event_polarity is False
+    assert config.polarity_mismatch_weight == 0.5
+    assert config.polarity_contrast_sign == -1.0
