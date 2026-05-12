@@ -155,7 +155,7 @@ env:
 jobs:
   eventvot-dvsenact:
     name: EventVOT validation sweep and locked test
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, linux, dvs-enact]
     timeout-minutes: 720
 
     steps:

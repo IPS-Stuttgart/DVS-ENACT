@@ -62,7 +62,7 @@ env:
 jobs:
   reproduce-hdetrackv2-eventvot:
     name: Reproduce HDETrackV2 EventVOT metrics
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, linux, dvs-enact]
     timeout-minutes: 1440
 
     defaults:
@@ -192,6 +192,21 @@ jobs:
             rm -f "$EVENTVOT_ARCHIVE" "$HDETRACKV2_ARCHIVE"
           fi
 
+          is_supported_archive() {
+            local archive_path="$1"
+            python - "$archive_path" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          if archive.exists() and (zipfile.is_zipfile(archive) or tarfile.is_tarfile(archive)):
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+          }
+
           download_and_extract() {
             local label="$1"
             local url="$2"
@@ -206,9 +221,19 @@ jobs:
 
             mkdir -p "$(dirname "$archive_path")" "$destination_dir"
 
+            if [ -s "$archive_path" ] && ! is_supported_archive "$archive_path"; then
+              echo "::warning::Cached $label archive is unsupported or corrupt, removing: $archive_path"
+              rm -f "$archive_path"
+            fi
+
             if [ ! -s "$archive_path" ]; then
               echo "Downloading $label archive into cache..."
               curl -fL --retry 5 --retry-delay 10 -C - -o "$archive_path" "$url"
+              if ! is_supported_archive "$archive_path"; then
+                rm -f "$archive_path"
+                echo "::error::$label download did not produce a supported archive."
+                exit 65
+              fi
             else
               echo "Using cached $label archive: $archive_path"
             fi
@@ -378,6 +403,14 @@ jobs:
           PY
           }
 
+          echo "Checking HDETrackV2 raw-results cache..."
+          HDETRACKV2_RESULTS_RESOLVED="$(resolve_hdetrackv2_results_root || true)"
+          if [ -z "$HDETRACKV2_RESULTS_RESOLVED" ] && [ -z "$HDETRACKV2_RESULTS_URL" ]; then
+            echo "::error::HDETrackV2 raw results are not cached and no download URL was supplied."
+            echo "::error::Provide hdetrackv2_results_url, configure secret HDETRACKV2_RESULTS_URL, or pre-stage result files under $HDETRACKV2_CACHE_DIR."
+            exit 64
+          fi
+
           echo "Checking EventVOT dataset cache..."
           EVENTVOT_ROOT_RESOLVED="$(resolve_eventvot_root || true)"
 
@@ -390,9 +423,6 @@ jobs:
             echo "::error::EventVOT dataset is still incomplete after cache/download step."
             exit 1
           fi
-
-          echo "Checking HDETrackV2 raw-results cache..."
-          HDETRACKV2_RESULTS_RESOLVED="$(resolve_hdetrackv2_results_root || true)"
 
           if [ -z "$HDETRACKV2_RESULTS_RESOLVED" ]; then
             download_and_extract "HDETrackV2 raw results" "$HDETRACKV2_RESULTS_URL" "$HDETRACKV2_ARCHIVE" "$HDETRACKV2_CACHE_DIR"
