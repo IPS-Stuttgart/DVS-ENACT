@@ -56,6 +56,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   reproduce-hdetrackv2-eventvot:
     name: Reproduce HDETrackV2 EventVOT metrics
@@ -84,7 +87,7 @@ jobs:
 
     steps:
       - name: Check out DVS-ENACT
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Prepare cache and output paths
         run: |
@@ -145,7 +148,7 @@ jobs:
           echo "Output root: $OUTPUT_ROOT"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
@@ -583,7 +586,7 @@ jobs:
 
       - name: Upload reproduction report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: eventvot-hdetrackv2-reproduction-report
           path: eventvot-hdetrackv2-reproduction-report/
