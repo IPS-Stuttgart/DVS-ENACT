@@ -55,6 +55,8 @@ class EventVOTRefinementOptions:
     output_results: Path
     split: str = "test"
     sequences: tuple[str, ...] = ()
+    sequence_index: int | None = None
+    sequence_count: int | None = None
     tracker_name: str | None = None
     skip_existing: bool = True
     event_column_order: str = "auto"
@@ -531,6 +533,11 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
         options.base_results,
         requested_sequences=options.sequences,
     )
+    sequence_names = select_sequence_chunk(
+        sequence_names,
+        sequence_index=options.sequence_index,
+        sequence_count=options.sequence_count,
+    )
     summaries = []
     for sequence_name in sequence_names:
         sequence_dir = split_root / sequence_name
@@ -770,7 +777,7 @@ def resolve_sequence_names(
     requested_sequences: tuple[str, ...] = (),
 ) -> list[str]:
     if requested_sequences:
-        return list(requested_sequences)
+        return list(dedupe_sequence_names(requested_sequences))
     if base_results.is_file():
         return [base_results.stem]
     if (split_root / "list.txt").exists():
@@ -786,6 +793,77 @@ def resolve_sequence_names(
             if not _is_auxiliary_result_file(path)
         ]
     return sorted(path.name for path in split_root.iterdir() if path.is_dir())
+
+
+def load_requested_sequence_names(
+    sequence_names: Iterable[str],
+    sequence_lists: Iterable[str],
+    sequence_files: Iterable[Path],
+) -> tuple[str, ...]:
+    """Return explicit sequence names from CLI repeated, list, and file inputs."""
+    requested: list[str] = []
+    requested.extend(sequence_names)
+    for sequence_list in sequence_lists:
+        requested.extend(parse_sequence_list(sequence_list))
+    for sequence_file in sequence_files:
+        requested.extend(load_sequence_file(sequence_file))
+    return dedupe_sequence_names(requested)
+
+
+def parse_sequence_list(sequence_list: str) -> tuple[str, ...]:
+    """Parse a comma- or whitespace-separated sequence list."""
+    return tuple(
+        token
+        for token in re.split(r"[\s,]+", sequence_list.strip())
+        if token
+    )
+
+
+def load_sequence_file(sequence_file: Path) -> tuple[str, ...]:
+    """Load sequence names from a text file, ignoring blank lines and comments."""
+    sequence_names: list[str] = []
+    for line in sequence_file.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        sequence_names.extend(parse_sequence_list(stripped))
+    return tuple(sequence_names)
+
+
+def dedupe_sequence_names(sequence_names: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate sequence names while preserving their first-seen order."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for sequence_name in sequence_names:
+        name = sequence_name.strip()
+        if not name or name in seen:
+            continue
+        unique.append(name)
+        seen.add(name)
+    return tuple(unique)
+
+
+def select_sequence_chunk(
+    sequence_names: Iterable[str],
+    *,
+    sequence_index: int | None = None,
+    sequence_count: int | None = None,
+) -> list[str]:
+    """Return one deterministic modulo shard of an ordered sequence list."""
+    names = list(sequence_names)
+    if sequence_index is None and sequence_count is None:
+        return names
+    if sequence_index is None or sequence_count is None:
+        raise ValueError("--sequence-index and --sequence-count must be supplied together")
+    if sequence_count <= 0:
+        raise ValueError("--sequence-count must be positive")
+    if sequence_index < 0 or sequence_index >= sequence_count:
+        raise ValueError("--sequence-index must satisfy 0 <= index < sequence-count")
+    return [
+        name
+        for ordinal, name in enumerate(names)
+        if ordinal % sequence_count == sequence_index
+    ]
 
 
 def resolve_base_result_file(base_results: Path, sequence_name: str) -> Path:
@@ -928,6 +1006,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sequence name to refine. Can be supplied multiple times.",
     )
     parser.add_argument(
+        "--sequence-list",
+        action="append",
+        default=[],
+        help=(
+            "Comma- or whitespace-separated sequence names to refine. Can be "
+            "supplied multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-file",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Text file containing sequence names to refine. Blank lines and "
+            "'#' comments are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-index",
+        type=int,
+        help=(
+            "Zero-based modulo shard index. Use with --sequence-count; selects "
+            "sequences where ordinal %% sequence-count == sequence-index."
+        ),
+    )
+    parser.add_argument(
+        "--sequence-count",
+        type=int,
+        help="Total number of modulo shards. Use with --sequence-index.",
+    )
+    parser.add_argument(
         "--no-skip-existing",
         action="store_true",
         help=(
@@ -954,13 +1064,20 @@ def main() -> int:
     output_results = _resolve_cli_output_results(args)
     config_tracker_path = _resolve_cli_config_tracker_path(args)
     refiner = _refiner_from_args(args)
+    sequence_names = load_requested_sequence_names(
+        args.sequence,
+        args.sequence_list,
+        args.sequence_file,
+    )
     payload = run(
         EventVOTRefinementOptions(
             eventvot_root=args.eventvot_root,
             base_results=args.base_results,
             output_results=output_results,
             split=args.split,
-            sequences=tuple(args.sequence),
+            sequences=sequence_names,
+            sequence_index=args.sequence_index,
+            sequence_count=args.sequence_count,
             tracker_name=args.tracker_name,
             skip_existing=not args.no_skip_existing,
             event_column_order=args.event_column_order,
