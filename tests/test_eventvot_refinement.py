@@ -153,6 +153,35 @@ def test_eventvot_refinement_writes_official_tracker_result_layout(tmp_path):
     assert config_tracker.read_text(encoding="utf-8").count("HDETrackV2_DVSENACT") == 1
 
 
+def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    output_results.mkdir()
+    (output_results / "recording_0001.txt").write_text(
+        "8\t8\t10\t10\n9.5\t8\t10\t10\n10\t8\t10\t10\n",
+        encoding="utf-8",
+    )
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FailingRefiner(module),
+    )
+
+    summary = payload["summary"]
+    sequence = payload["sequences"][0]
+    assert summary["skipped_existing_output_count"] == 1
+    assert summary["fallback_counts"]["skipped_existing_output"] == 3
+    assert sequence["skipped_existing_output"]
+    assert sequence["accepted_refinement_count"] == 1
+    assert sequence["frames"] == []
+    assert (output_results / "recording_0001_time.txt").exists()
+
+
 def test_eventvot_refinement_uses_conservative_acceptance_gates(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
@@ -269,6 +298,7 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "Refine EventVOT xywh tracker result files" in help_text
     assert "--eventvot-root" in help_text
     assert "--tracker-name" in help_text
+    assert "--no-skip-existing" in help_text
     assert "--event-column-order" in help_text
     assert "--event-activity-floor" in help_text
     assert "--inactive-activity-threshold" in help_text
@@ -287,6 +317,18 @@ class _FakeRefiner:
     def refine(self, _candidate, _events, *, previous_candidate_bbox=None):
         del previous_candidate_bbox
         return self._results.pop(0)
+
+
+class _FailingRefiner:
+    def __init__(self, module):
+        self.config = module.DVSContourRefinerConfig(
+            input_bbox_format="xywh",
+            output_bbox_format="xywh",
+        )
+
+    def refine(self, _candidate, _events, *, previous_candidate_bbox=None):
+        del previous_candidate_bbox
+        raise AssertionError("existing complete result should have been skipped")
 
 
 class _FakeResult:

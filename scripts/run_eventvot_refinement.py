@@ -56,6 +56,7 @@ class EventVOTRefinementOptions:
     split: str = "test"
     sequences: tuple[str, ...] = ()
     tracker_name: str | None = None
+    skip_existing: bool = True
     event_column_order: str = "auto"
     diagnostics_json: Path | None = None
     config_tracker_path: Path | None = None
@@ -100,6 +101,28 @@ def save_xywh_result_file(path: Path, boxes: np.ndarray) -> None:
     """Write xywh boxes in a format accepted by the EventVOT evaluator."""
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savetxt(path, np.asarray(boxes, dtype=float), delimiter="\t", fmt="%.6f")
+
+
+def existing_output_result_is_complete(
+    output_result_file: Path,
+    base_boxes: np.ndarray,
+) -> tuple[bool, np.ndarray | None]:
+    """Return whether an existing result file is complete enough to resume."""
+    if not output_result_file.exists():
+        return False, None
+    try:
+        output_boxes = load_xywh_result_file(output_result_file)
+    except (OSError, ValueError):
+        return False, None
+    if output_boxes.shape != base_boxes.shape:
+        return False, None
+    if output_boxes.ndim != 2 or output_boxes.shape[1] != 4:
+        return False, None
+    if not np.all(np.isfinite(output_boxes)):
+        return False, None
+    if np.any(output_boxes[:, 2:] <= 0.0):
+        return False, None
+    return True, output_boxes
 
 
 def read_eventvot_event_time_span(
@@ -338,13 +361,29 @@ def refine_sequence(
     *,
     event_column_order: str = "auto",
     acceptance_config: EventVOTAcceptanceConfig | None = None,
+    skip_existing: bool = True,
 ) -> dict[str, Any]:
     """Refine one EventVOT sequence result file."""
     acceptance_config = acceptance_config or EventVOTAcceptanceConfig()
-    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
+    if skip_existing:
+        complete, output_boxes = existing_output_result_is_complete(
+            output_result_file,
+            base_boxes,
+        )
+        if complete and output_boxes is not None:
+            return summarize_skipped_sequence(
+                sequence_name,
+                sequence_dir,
+                base_result_file,
+                output_result_file,
+                base_boxes,
+                output_boxes,
+            )
+
+    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
 
     refined_boxes = np.array(base_boxes, dtype=float, copy=True)
     timings = np.zeros(frame_count, dtype=float)
@@ -443,6 +482,42 @@ def refine_sequence(
     }
 
 
+def summarize_skipped_sequence(
+    sequence_name: str,
+    sequence_dir: Path,
+    base_result_file: Path,
+    output_result_file: Path,
+    base_boxes: np.ndarray,
+    output_boxes: np.ndarray,
+) -> dict[str, Any]:
+    """Build a diagnostics summary for a complete result reused during resume."""
+    frame_count = int(output_boxes.shape[0])
+    changed_frame_count = int(
+        np.any(~np.isclose(output_boxes, base_boxes, rtol=1e-6, atol=1e-6), axis=1).sum()
+    )
+    timings = load_timing_file(output_result_file, frame_count)
+    if timings is None:
+        timings = np.zeros(frame_count, dtype=float)
+        _save_timing_file(output_result_file, timings)
+    return {
+        "sequence": sequence_name,
+        "sequence_dir": str(sequence_dir),
+        "event_csv": None,
+        "base_result_file": str(base_result_file),
+        "output_result_file": str(output_result_file),
+        "frame_count": frame_count,
+        "refined_frame_count": changed_frame_count,
+        "accepted_refinement_count": changed_frame_count,
+        "refiner_success_frame_count": 0,
+        "fallback_counts": {"skipped_existing_output": frame_count},
+        "acceptance_counts": {"skipped_existing_output": frame_count},
+        "mean_used_event_count": 0.0,
+        "total_refinement_seconds": float(np.sum(timings)),
+        "skipped_existing_output": True,
+        "frames": [],
+    }
+
+
 def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = None) -> dict:
     """Run DVS-ENACT refinement over one or more EventVOT result files."""
     refiner = refiner or default_eventvot_refiner()
@@ -474,6 +549,7 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
                 refiner,
                 event_column_order=options.event_column_order,
                 acceptance_config=options.acceptance_config,
+                skip_existing=options.skip_existing,
             )
         )
 
@@ -539,12 +615,16 @@ def summarize_sequence_results(sequence_summaries: Iterable[dict[str, Any]]) -> 
     refiner_success_frame_count = sum(
         int(summary["refiner_success_frame_count"]) for summary in sequence_summaries
     )
+    skipped_existing_output_count = sum(
+        1 for summary in sequence_summaries if summary.get("skipped_existing_output")
+    )
     return {
         "sequence_count": len(sequence_summaries),
         "frame_count": int(frame_count),
         "refined_frame_count": int(refined_frame_count),
         "accepted_refinement_count": int(accepted_refinement_count),
         "refiner_success_frame_count": int(refiner_success_frame_count),
+        "skipped_existing_output_count": int(skipped_existing_output_count),
         "fallback_counts": dict(sorted(fallback_counts.items())),
         "acceptance_counts": dict(sorted(acceptance_counts.items())),
     }
@@ -848,6 +928,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sequence name to refine. Can be supplied multiple times.",
     )
     parser.add_argument(
+        "--no-skip-existing",
+        action="store_true",
+        help=(
+            "Recompute sequences even when <sequence>.txt already exists and "
+            "looks complete in the output directory."
+        ),
+    )
+    parser.add_argument(
         "--event-column-order",
         default="auto",
         choices=("auto", "xypt", "txyp", "xytp", "yxpt", "yxpt5", "yxt"),
@@ -874,6 +962,7 @@ def main() -> int:
             split=args.split,
             sequences=tuple(args.sequence),
             tracker_name=args.tracker_name,
+            skip_existing=not args.no_skip_existing,
             event_column_order=args.event_column_order,
             diagnostics_json=args.diagnostics_json,
             config_tracker_path=config_tracker_path,
@@ -1016,6 +1105,22 @@ def _validate_sequence_frame_count(
 def _save_timing_file(result_file: Path, timings: np.ndarray) -> None:
     timing_file = result_file.with_name(f"{result_file.stem}_time.txt")
     np.savetxt(timing_file, np.asarray(timings, dtype=float), delimiter="\t", fmt="%.9f")
+
+
+def load_timing_file(result_file: Path, expected_frame_count: int) -> np.ndarray | None:
+    timing_file = result_file.with_name(f"{result_file.stem}_time.txt")
+    if not timing_file.exists():
+        return None
+    try:
+        timings = np.loadtxt(timing_file, dtype=float, ndmin=1)
+    except (OSError, ValueError):
+        return None
+    timings = np.asarray(timings, dtype=float).reshape(-1)
+    if timings.shape[0] != expected_frame_count:
+        return None
+    if not np.all(np.isfinite(timings)):
+        return None
+    return timings
 
 
 def _resolve_event_schema(
