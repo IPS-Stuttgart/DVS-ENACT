@@ -509,26 +509,47 @@ def _box_area_xywh(box_xywh: np.ndarray) -> float:
 
 def resolve_eventvot_split_root(eventvot_root: Path, split: str) -> Path:
     """Resolve the EventVOT split directory from common extraction layouts."""
+    split_key = split.lower()
     subset_names = {
         "test": "Testing Subset",
         "train": "Training Subset",
         "val": "validating Subset",
         "validating": "validating Subset",
     }
-    candidates = [
-        eventvot_root / split,
-        eventvot_root / split.lower(),
-        eventvot_root,
-    ]
-    if split.lower() in subset_names:
-        candidates.insert(2, eventvot_root / subset_names[split.lower()])
+    aliases = [split, split_key]
+    if split_key == "validating":
+        aliases.append("val")
+    candidates = []
+    for alias in aliases:
+        candidates.extend(
+            [
+                eventvot_root / alias / alias,
+                eventvot_root / alias,
+            ]
+        )
+    if split_key in subset_names:
+        candidates.append(eventvot_root / subset_names[split_key])
+    candidates.append(eventvot_root)
+
+    seen: set[Path] = set()
     for candidate in candidates:
-        if candidate.exists() and (
-            (candidate / "list.txt").exists()
-            or any(path.is_dir() for path in candidate.iterdir())
-        ):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _looks_like_eventvot_split_root(candidate):
             return candidate
     raise FileNotFoundError(f"Could not resolve EventVOT split '{split}' below {eventvot_root}")
+
+
+def _looks_like_eventvot_split_root(candidate: Path) -> bool:
+    if not candidate.exists() or not candidate.is_dir():
+        return False
+    if (candidate / "list.txt").exists():
+        return True
+    return any(
+        path.is_dir() and ((path / "img").is_dir() or any(path.glob("*.csv")))
+        for path in candidate.iterdir()
+    )
 
 
 def resolve_sequence_names(

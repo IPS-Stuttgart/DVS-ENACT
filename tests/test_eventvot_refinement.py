@@ -208,6 +208,17 @@ def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     assert windows[1][1].ts.tolist() == [20, 30]
 
 
+def test_eventvot_split_root_resolves_nested_dropbox_layout(tmp_path):
+    module = _load_module()
+    sequence_dir = tmp_path / "EventVOT" / "test" / "test" / "recording_0001"
+    (sequence_dir / "img").mkdir(parents=True)
+    (sequence_dir / "recording_0001.csv").write_text("x,y,p,t\n", encoding="utf-8")
+
+    assert module.resolve_eventvot_split_root(tmp_path / "EventVOT", "test") == (
+        tmp_path / "EventVOT" / "test" / "test"
+    )
+
+
 def test_eventvot_refinement_help_runs_as_script():
     help_text = subprocess.check_output(
         (sys.executable, str(SCRIPT_PATH), "--help"),
