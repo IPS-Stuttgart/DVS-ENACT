@@ -206,9 +206,16 @@ def iter_eventvot_frame_windows(
     """
     if frame_count <= 1:
         return
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
+    try:
+        yield from _iter_eventvot_frame_windows_numpy(event_csv, frame_count, schema)
+        return
+    except ValueError:
+        pass
+
     first_ts, last_ts, _event_count = read_eventvot_event_time_span(
         event_csv,
-        event_column_order=event_column_order,
+        event_column_order=schema,
     )
     if last_ts <= first_ts:
         for frame_index in range(1, frame_count):
@@ -244,6 +251,64 @@ def iter_eventvot_frame_windows(
         yield current_frame, _event_batch_from_lists(timestamps, xs, ys, polarities)
         timestamps, xs, ys, polarities = [], [], [], []
         current_frame += 1
+
+
+def _iter_eventvot_frame_windows_numpy(
+    event_csv: Path,
+    frame_count: int,
+    schema: str,
+) -> Iterator[tuple[int, EventBatch]]:
+    data = np.loadtxt(event_csv, delimiter=",", dtype=np.int64, ndmin=2)
+    if data.size == 0:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+    timestamps, xs, ys, polarities = _eventvot_columns_from_array(data, schema)
+    if timestamps.size == 0:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+
+    first_ts = int(timestamps[0])
+    last_ts = int(timestamps[-1])
+    if last_ts <= first_ts:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+
+    frame_times = np.linspace(float(first_ts), float(last_ts), frame_count)
+    for frame_index in range(1, frame_count):
+        start = int(np.searchsorted(timestamps, frame_times[frame_index - 1], side="left"))
+        end_side = "right" if frame_index == frame_count - 1 else "left"
+        end = int(np.searchsorted(timestamps, frame_times[frame_index], side=end_side))
+        if end <= start:
+            yield frame_index, empty_event_batch()
+            continue
+        yield frame_index, EventBatch(
+            ts=np.asarray(timestamps[start:end], dtype=np.int64),
+            x=np.asarray(xs[start:end], dtype=np.int32),
+            y=np.asarray(ys[start:end], dtype=np.int32),
+            p=np.asarray(polarities[start:end], dtype=np.int8),
+        )
+
+
+def _eventvot_columns_from_array(
+    data: np.ndarray,
+    schema: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if schema == "xypt" and data.shape[1] >= 4:
+        return data[:, 3], data[:, 0], data[:, 1], data[:, 2]
+    if schema == "txyp" and data.shape[1] >= 4:
+        return data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+    if schema == "xytp" and data.shape[1] >= 4:
+        return data[:, 2], data[:, 0], data[:, 1], data[:, 3]
+    if schema == "yxpt" and data.shape[1] >= 4:
+        return data[:, 3], data[:, 1], data[:, 0], data[:, 2]
+    if schema == "yxpt5" and data.shape[1] >= 5:
+        return data[:, 4], data[:, 1], data[:, 0], data[:, 3]
+    if schema == "yxt" and data.shape[1] >= 3:
+        return data[:, 2], data[:, 1], data[:, 0], np.ones(data.shape[0], dtype=np.int8)
+    raise ValueError(f"Unsupported EventVOT array schema {schema!r} for shape {data.shape}")
 
 
 def iter_eventvot_events(

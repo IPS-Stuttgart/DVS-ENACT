@@ -216,6 +216,37 @@ def test_eventvot_time_span_reads_last_event_without_full_count(tmp_path):
     assert module.read_eventvot_event_time_span(event_csv) == (0, 30, -1)
 
 
+def test_eventvot_frame_windows_use_numpy_for_xypt_csv(tmp_path):
+    module = _load_module()
+    event_csv = tmp_path / "events.csv"
+    event_csv.write_text(
+        "\n".join(
+            [
+                "10,20,1,0",
+                "11,20,0,10",
+                "12,21,1,20",
+                "13,22,1,30",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    windows = list(
+        module.iter_eventvot_frame_windows(
+            event_csv,
+            3,
+            event_column_order="xypt",
+        )
+    )
+
+    assert [frame_index for frame_index, _window in windows] == [1, 2]
+    assert windows[0][1].ts.tolist() == [0, 10]
+    assert windows[0][1].x.tolist() == [10, 11]
+    assert windows[1][1].ts.tolist() == [20, 30]
+    assert windows[1][1].p.tolist() == [1, 1]
+
+
 def test_eventvot_split_root_resolves_nested_dropbox_layout(tmp_path):
     module = _load_module()
     sequence_dir = tmp_path / "EventVOT" / "test" / "test" / "recording_0001"
