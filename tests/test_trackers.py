@@ -5,7 +5,7 @@ import numpy.testing as npt
 # pylint: disable=no-name-in-module,no-member
 import pyrecest.backend
 from pyrecest.backend import array, eye, pi
-from pyrecest.filters import FullSCGPTracker
+from pyrecest.filters.gprhm_tracker import FullSCGPTracker
 from dvs_enact import (
     DVSFullSCGPTracker,
     DVSPointProcessSCGPTracker,

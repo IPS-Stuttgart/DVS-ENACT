@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from pyrecest.filters import FullSCGPTracker
+from pyrecest.filters.gprhm_tracker import FullSCGPTracker
 
 from .mevdt import (
     MEVDT_DATASET_URL,

@@ -12,7 +12,7 @@ from pyrecest.backend import (
     pi,
     sin,
 )
-from pyrecest.filters import FullSCGPTracker
+from pyrecest.filters.gprhm_tracker import FullSCGPTracker
 
 
 class DVSFullSCGPTracker(FullSCGPTracker):
