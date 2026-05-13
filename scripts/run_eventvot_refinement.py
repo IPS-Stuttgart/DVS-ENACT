@@ -107,21 +107,87 @@ def read_eventvot_event_time_span(
     *,
     event_column_order: str = "auto",
 ) -> tuple[int, int, int]:
-    """Return first timestamp, last timestamp, and parsed event count."""
-    first_ts: int | None = None
-    last_ts: int | None = None
-    count = 0
-    for timestamp, _x, _y, _polarity in iter_eventvot_events(
-        event_csv,
-        event_column_order=event_column_order,
-    ):
-        if first_ts is None:
-            first_ts = timestamp
-        last_ts = timestamp
-        count += 1
-    if first_ts is None or last_ts is None:
+    """Return first timestamp, last timestamp, and parsed event count if known."""
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
+    first_event = _first_parseable_event(event_csv, schema)
+    last_event = _last_parseable_event(event_csv, schema)
+    if first_event is None or last_event is None:
         raise ValueError(f"No parseable events found in {event_csv}")
-    return int(first_ts), int(last_ts), int(count)
+    return int(first_event[0]), int(last_event[0]), -1
+
+
+def infer_eventvot_event_schema(event_csv: Path, event_column_order: str) -> str:
+    """Infer the raw EventVOT CSV column order from the first numeric row."""
+    if event_column_order != "auto":
+        return event_column_order
+    with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            values = _numeric_row(row)
+            if values is None:
+                continue
+            return _resolve_event_schema(event_csv, values, event_column_order)
+    raise ValueError(f"No parseable events found in {event_csv}")
+
+
+def _first_parseable_event(
+    event_csv: Path,
+    schema: str,
+) -> tuple[int, int, int, int] | None:
+    with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            values = _numeric_row(row)
+            if values is None:
+                continue
+            parsed = _parse_event_row(values, schema)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _last_parseable_event(
+    event_csv: Path,
+    schema: str,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> tuple[int, int, int, int] | None:
+    with event_csv.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            buffer = handle.read(read_size) + remainder
+            lines = buffer.splitlines()
+            if position > 0:
+                remainder = lines[0]
+                lines = lines[1:]
+            else:
+                remainder = b""
+            for raw_line in reversed(lines):
+                parsed = _parse_event_line(raw_line, schema)
+                if parsed is not None:
+                    return parsed
+        if remainder:
+            return _parse_event_line(remainder, schema)
+    return None
+
+
+def _parse_event_line(
+    raw_line: bytes,
+    schema: str,
+) -> tuple[int, int, int, int] | None:
+    try:
+        line = raw_line.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        line = raw_line.decode("utf-8-sig", errors="ignore")
+    values = _numeric_row(next(csv.reader([line])))
+    if values is None:
+        return None
+    return _parse_event_row(values, schema)
 
 
 def iter_eventvot_frame_windows(
@@ -186,13 +252,13 @@ def iter_eventvot_events(
     event_column_order: str = "auto",
 ) -> Iterator[tuple[int, int, int, int]]:
     """Stream EventVOT raw events as ``timestamp, x, y, polarity`` tuples."""
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
     with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         for row in reader:
             values = _numeric_row(row)
             if values is None:
                 continue
-            schema = _resolve_event_schema(event_csv, values, event_column_order)
             parsed = _parse_event_row(values, schema)
             if parsed is not None:
                 yield parsed
