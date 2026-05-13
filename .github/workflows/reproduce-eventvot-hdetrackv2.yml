@@ -158,6 +158,8 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install -e .
+          python -m pip install --upgrade --force-reinstall --no-deps \
+            "pyrecest @ git+https://github.com/FlorianPfaff/PyRecEst.git@main"
 
       - name: Cache official EventVOT testing sequence list
         run: |
