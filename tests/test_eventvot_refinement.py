@@ -25,13 +25,35 @@ def _load_module():
 
 def _write_eventvot_fixture(root: Path) -> tuple[Path, Path, Path]:
     split_root = root / "test"
-    sequence_dir = split_root / "recording_0001"
+    base_results = root / "base_results"
+    base_results.mkdir()
+    _write_eventvot_fixture_sequence(split_root, base_results, "recording_0001")
+    output_results = root / "refined_results"
+    return split_root, base_results, output_results
+
+
+def _write_eventvot_fixture_sequence(
+    split_root: Path,
+    base_results: Path,
+    sequence_name: str,
+) -> None:
+    sequence_dir = split_root / sequence_name
     image_dir = sequence_dir / "img"
     image_dir.mkdir(parents=True)
     for index in range(3):
         (image_dir / f"{index:04d}.png").write_bytes(b"")
-    (split_root / "list.txt").write_text("recording_0001\n", encoding="utf-8")
-    (sequence_dir / "recording_0001.csv").write_text(
+    existing_sequences = []
+    list_path = split_root / "list.txt"
+    if list_path.exists():
+        existing_sequences = [
+            line.strip()
+            for line in list_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    if sequence_name not in existing_sequences:
+        existing_sequences.append(sequence_name)
+    list_path.write_text("\n".join(existing_sequences) + "\n", encoding="utf-8")
+    (sequence_dir / f"{sequence_name}.csv").write_text(
         "\n".join(
             [
                 "x,y,p,t",
@@ -44,14 +66,10 @@ def _write_eventvot_fixture(root: Path) -> tuple[Path, Path, Path]:
         + "\n",
         encoding="utf-8",
     )
-    base_results = root / "base_results"
-    base_results.mkdir()
-    (base_results / "recording_0001.txt").write_text(
+    (base_results / f"{sequence_name}.txt").write_text(
         "8\t8\t10\t10\n9\t8\t10\t10\n10\t8\t10\t10\n",
         encoding="utf-8",
     )
-    output_results = root / "refined_results"
-    return split_root, base_results, output_results
 
 
 def test_eventvot_refinement_writes_xywh_results_and_diagnostics(tmp_path):
@@ -182,6 +200,75 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
     assert (output_results / "recording_0001_time.txt").exists()
 
 
+def test_eventvot_refinement_selects_sequence_chunk(tmp_path):
+    module = _load_module()
+    split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    _write_eventvot_fixture_sequence(split_root, base_results, "recording_0002")
+    _write_eventvot_fixture_sequence(split_root, base_results, "recording_0003")
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+            sequence_index=1,
+            sequence_count=2,
+        ),
+        refiner=module.DVSContourRefiner(
+            module.DVSContourRefinerConfig(
+                input_bbox_format="xywh",
+                output_bbox_format="xywh",
+                min_events=99,
+            )
+        ),
+    )
+
+    assert payload["summary"]["sequence_count"] == 1
+    assert [sequence["sequence"] for sequence in payload["sequences"]] == [
+        "recording_0002"
+    ]
+    assert not (output_results / "recording_0001.txt").exists()
+    assert (output_results / "recording_0002.txt").exists()
+    assert not (output_results / "recording_0003.txt").exists()
+
+
+def test_eventvot_sequence_selection_supports_lists_files_and_shards(tmp_path):
+    module = _load_module()
+    sequence_file = tmp_path / "sequences.txt"
+    sequence_file.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "recording_0003",
+                "recording_0004, recording_0005",
+                "recording_0001",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    requested = module.load_requested_sequence_names(
+        ["recording_0001"],
+        ["recording_0002 recording_0003"],
+        [sequence_file],
+    )
+
+    assert requested == (
+        "recording_0001",
+        "recording_0002",
+        "recording_0003",
+        "recording_0004",
+        "recording_0005",
+    )
+    assert module.select_sequence_chunk(
+        requested,
+        sequence_index=1,
+        sequence_count=2,
+    ) == ["recording_0002", "recording_0004"]
+
+
 def test_eventvot_refinement_uses_conservative_acceptance_gates(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
@@ -298,6 +385,10 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "Refine EventVOT xywh tracker result files" in help_text
     assert "--eventvot-root" in help_text
     assert "--tracker-name" in help_text
+    assert "--sequence-list" in help_text
+    assert "--sequence-file" in help_text
+    assert "--sequence-index" in help_text
+    assert "--sequence-count" in help_text
     assert "--no-skip-existing" in help_text
     assert "--event-column-order" in help_text
     assert "--event-activity-floor" in help_text
