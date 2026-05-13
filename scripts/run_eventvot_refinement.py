@@ -107,21 +107,87 @@ def read_eventvot_event_time_span(
     *,
     event_column_order: str = "auto",
 ) -> tuple[int, int, int]:
-    """Return first timestamp, last timestamp, and parsed event count."""
-    first_ts: int | None = None
-    last_ts: int | None = None
-    count = 0
-    for timestamp, _x, _y, _polarity in iter_eventvot_events(
-        event_csv,
-        event_column_order=event_column_order,
-    ):
-        if first_ts is None:
-            first_ts = timestamp
-        last_ts = timestamp
-        count += 1
-    if first_ts is None or last_ts is None:
+    """Return first timestamp, last timestamp, and parsed event count if known."""
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
+    first_event = _first_parseable_event(event_csv, schema)
+    last_event = _last_parseable_event(event_csv, schema)
+    if first_event is None or last_event is None:
         raise ValueError(f"No parseable events found in {event_csv}")
-    return int(first_ts), int(last_ts), int(count)
+    return int(first_event[0]), int(last_event[0]), -1
+
+
+def infer_eventvot_event_schema(event_csv: Path, event_column_order: str) -> str:
+    """Infer the raw EventVOT CSV column order from the first numeric row."""
+    if event_column_order != "auto":
+        return event_column_order
+    with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            values = _numeric_row(row)
+            if values is None:
+                continue
+            return _resolve_event_schema(event_csv, values, event_column_order)
+    raise ValueError(f"No parseable events found in {event_csv}")
+
+
+def _first_parseable_event(
+    event_csv: Path,
+    schema: str,
+) -> tuple[int, int, int, int] | None:
+    with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            values = _numeric_row(row)
+            if values is None:
+                continue
+            parsed = _parse_event_row(values, schema)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _last_parseable_event(
+    event_csv: Path,
+    schema: str,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> tuple[int, int, int, int] | None:
+    with event_csv.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            buffer = handle.read(read_size) + remainder
+            lines = buffer.splitlines()
+            if position > 0:
+                remainder = lines[0]
+                lines = lines[1:]
+            else:
+                remainder = b""
+            for raw_line in reversed(lines):
+                parsed = _parse_event_line(raw_line, schema)
+                if parsed is not None:
+                    return parsed
+        if remainder:
+            return _parse_event_line(remainder, schema)
+    return None
+
+
+def _parse_event_line(
+    raw_line: bytes,
+    schema: str,
+) -> tuple[int, int, int, int] | None:
+    try:
+        line = raw_line.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        line = raw_line.decode("utf-8-sig", errors="ignore")
+    values = _numeric_row(next(csv.reader([line])))
+    if values is None:
+        return None
+    return _parse_event_row(values, schema)
 
 
 def iter_eventvot_frame_windows(
@@ -140,9 +206,16 @@ def iter_eventvot_frame_windows(
     """
     if frame_count <= 1:
         return
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
+    try:
+        yield from _iter_eventvot_frame_windows_numpy(event_csv, frame_count, schema)
+        return
+    except ValueError:
+        pass
+
     first_ts, last_ts, _event_count = read_eventvot_event_time_span(
         event_csv,
-        event_column_order=event_column_order,
+        event_column_order=schema,
     )
     if last_ts <= first_ts:
         for frame_index in range(1, frame_count):
@@ -180,19 +253,77 @@ def iter_eventvot_frame_windows(
         current_frame += 1
 
 
+def _iter_eventvot_frame_windows_numpy(
+    event_csv: Path,
+    frame_count: int,
+    schema: str,
+) -> Iterator[tuple[int, EventBatch]]:
+    data = np.loadtxt(event_csv, delimiter=",", dtype=np.int64, ndmin=2)
+    if data.size == 0:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+    timestamps, xs, ys, polarities = _eventvot_columns_from_array(data, schema)
+    if timestamps.size == 0:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+
+    first_ts = int(timestamps[0])
+    last_ts = int(timestamps[-1])
+    if last_ts <= first_ts:
+        for frame_index in range(1, frame_count):
+            yield frame_index, empty_event_batch()
+        return
+
+    frame_times = np.linspace(float(first_ts), float(last_ts), frame_count)
+    for frame_index in range(1, frame_count):
+        start = int(np.searchsorted(timestamps, frame_times[frame_index - 1], side="left"))
+        end_side = "right" if frame_index == frame_count - 1 else "left"
+        end = int(np.searchsorted(timestamps, frame_times[frame_index], side=end_side))
+        if end <= start:
+            yield frame_index, empty_event_batch()
+            continue
+        yield frame_index, EventBatch(
+            ts=np.asarray(timestamps[start:end], dtype=np.int64),
+            x=np.asarray(xs[start:end], dtype=np.int32),
+            y=np.asarray(ys[start:end], dtype=np.int32),
+            p=np.asarray(polarities[start:end], dtype=np.int8),
+        )
+
+
+def _eventvot_columns_from_array(
+    data: np.ndarray,
+    schema: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if schema == "xypt" and data.shape[1] >= 4:
+        return data[:, 3], data[:, 0], data[:, 1], data[:, 2]
+    if schema == "txyp" and data.shape[1] >= 4:
+        return data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+    if schema == "xytp" and data.shape[1] >= 4:
+        return data[:, 2], data[:, 0], data[:, 1], data[:, 3]
+    if schema == "yxpt" and data.shape[1] >= 4:
+        return data[:, 3], data[:, 1], data[:, 0], data[:, 2]
+    if schema == "yxpt5" and data.shape[1] >= 5:
+        return data[:, 4], data[:, 1], data[:, 0], data[:, 3]
+    if schema == "yxt" and data.shape[1] >= 3:
+        return data[:, 2], data[:, 1], data[:, 0], np.ones(data.shape[0], dtype=np.int8)
+    raise ValueError(f"Unsupported EventVOT array schema {schema!r} for shape {data.shape}")
+
+
 def iter_eventvot_events(
     event_csv: Path,
     *,
     event_column_order: str = "auto",
 ) -> Iterator[tuple[int, int, int, int]]:
     """Stream EventVOT raw events as ``timestamp, x, y, polarity`` tuples."""
+    schema = infer_eventvot_event_schema(event_csv, event_column_order)
     with event_csv.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         for row in reader:
             values = _numeric_row(row)
             if values is None:
                 continue
-            schema = _resolve_event_schema(event_csv, values, event_column_order)
             parsed = _parse_event_row(values, schema)
             if parsed is not None:
                 yield parsed
@@ -509,26 +640,47 @@ def _box_area_xywh(box_xywh: np.ndarray) -> float:
 
 def resolve_eventvot_split_root(eventvot_root: Path, split: str) -> Path:
     """Resolve the EventVOT split directory from common extraction layouts."""
+    split_key = split.lower()
     subset_names = {
         "test": "Testing Subset",
         "train": "Training Subset",
         "val": "validating Subset",
         "validating": "validating Subset",
     }
-    candidates = [
-        eventvot_root / split,
-        eventvot_root / split.lower(),
-        eventvot_root,
-    ]
-    if split.lower() in subset_names:
-        candidates.insert(2, eventvot_root / subset_names[split.lower()])
+    aliases = [split, split_key]
+    if split_key == "validating":
+        aliases.append("val")
+    candidates = []
+    for alias in aliases:
+        candidates.extend(
+            [
+                eventvot_root / alias / alias,
+                eventvot_root / alias,
+            ]
+        )
+    if split_key in subset_names:
+        candidates.append(eventvot_root / subset_names[split_key])
+    candidates.append(eventvot_root)
+
+    seen: set[Path] = set()
     for candidate in candidates:
-        if candidate.exists() and (
-            (candidate / "list.txt").exists()
-            or any(path.is_dir() for path in candidate.iterdir())
-        ):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if _looks_like_eventvot_split_root(candidate):
             return candidate
     raise FileNotFoundError(f"Could not resolve EventVOT split '{split}' below {eventvot_root}")
+
+
+def _looks_like_eventvot_split_root(candidate: Path) -> bool:
+    if not candidate.exists() or not candidate.is_dir():
+        return False
+    if (candidate / "list.txt").exists():
+        return True
+    return any(
+        path.is_dir() and ((path / "img").is_dir() or any(path.glob("*.csv")))
+        for path in candidate.iterdir()
+    )
 
 
 def resolve_sequence_names(
