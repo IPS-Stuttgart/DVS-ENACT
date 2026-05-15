@@ -42,7 +42,7 @@ env:
 jobs:
   prepare:
     name: Prepare MEVDT local cache
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 240
 
     steps:
