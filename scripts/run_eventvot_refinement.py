@@ -33,7 +33,9 @@ class EventVOTAcceptanceConfig:
     min_active_measurement_count: int = 3
     min_mean_event_activity: float = 0.10
     min_candidate_iou: float = 0.60
+    min_candidate_area_ratio: float = 0.50
     max_candidate_area_ratio: float = 1.50
+    max_center_shift_ratio: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class EventVOTAcceptanceDecision:
     rejection_reasons: tuple[str, ...]
     candidate_iou: float
     candidate_area_ratio: float
+    center_shift_ratio: float
 
 
 @dataclass(frozen=True)
@@ -405,6 +408,7 @@ def refine_sequence(
             "rejection_reasons": ["initial_frame"],
             "candidate_iou": 1.0,
             "candidate_area_ratio": 1.0,
+            "center_shift_ratio": 0.0,
         }
     ]
 
@@ -440,6 +444,7 @@ def refine_sequence(
                 "rejection_reasons": list(decision.rejection_reasons),
                 "candidate_iou": float(decision.candidate_iou),
                 "candidate_area_ratio": float(decision.candidate_area_ratio),
+                "center_shift_ratio": float(decision.center_shift_ratio),
                 "refiner_output_bbox": refiner_output_bbox,
                 "refiner_output_xywh": refiner_output.astype(float).tolist(),
                 "output_bbox": xywh_to_diagnostic_bbox(refined_boxes[frame_index]),
@@ -647,6 +652,7 @@ def evaluate_refinement_acceptance(
     refined_xywh = np.asarray(result.as_xywh(), dtype=float)
     candidate_iou = box_iou_xywh(candidate_xywh, refined_xywh)
     candidate_area_ratio = area_ratio_xywh(candidate_xywh, refined_xywh)
+    center_shift_ratio = center_shift_ratio_xywh(candidate_xywh, refined_xywh)
     if not config.enabled:
         rejection_reasons = () if result.fallback_reason is None else ("fallback_reason",)
         return EventVOTAcceptanceDecision(
@@ -654,6 +660,7 @@ def evaluate_refinement_acceptance(
             rejection_reasons=rejection_reasons,
             candidate_iou=candidate_iou,
             candidate_area_ratio=candidate_area_ratio,
+            center_shift_ratio=center_shift_ratio,
         )
 
     rejection_reasons: list[str] = []
@@ -669,14 +676,19 @@ def evaluate_refinement_acceptance(
         rejection_reasons.append("mean_event_activity")
     if candidate_iou < config.min_candidate_iou:
         rejection_reasons.append("candidate_iou")
+    if candidate_area_ratio < config.min_candidate_area_ratio:
+        rejection_reasons.append("candidate_area_ratio")
     if candidate_area_ratio > config.max_candidate_area_ratio:
         rejection_reasons.append("candidate_area_ratio")
+    if center_shift_ratio > config.max_center_shift_ratio:
+        rejection_reasons.append("center_shift_ratio")
 
     return EventVOTAcceptanceDecision(
         accepted=not rejection_reasons,
         rejection_reasons=tuple(rejection_reasons),
         candidate_iou=candidate_iou,
         candidate_area_ratio=candidate_area_ratio,
+        center_shift_ratio=center_shift_ratio,
     )
 
 
@@ -706,6 +718,18 @@ def area_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarray) -> fl
     if reference_area <= 0.0:
         return math.inf
     return float(proposed_area / reference_area)
+
+
+def center_shift_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarray) -> float:
+    """Return center displacement normalized by the reference-box diagonal."""
+    reference = np.asarray(reference_xywh, dtype=float)
+    proposed = np.asarray(proposed_xywh, dtype=float)
+    reference_diagonal = float(math.hypot(reference[2], reference[3]))
+    if reference_diagonal <= 0.0:
+        return math.inf
+    reference_center = reference[:2] + 0.5 * reference[2:]
+    proposed_center = proposed[:2] + 0.5 * proposed[2:]
+    return float(np.linalg.norm(proposed_center - reference_center) / reference_diagonal)
 
 
 def xywh_to_diagnostic_bbox(box_xywh: np.ndarray) -> dict[str, float]:
@@ -1148,7 +1172,9 @@ def add_acceptance_arguments(
     parser.add_argument("--min-accept-active-measurements", type=int, default=3)
     parser.add_argument("--min-accept-mean-activity", type=float, default=0.10)
     parser.add_argument("--min-accept-candidate-iou", type=float, default=0.60)
+    parser.add_argument("--min-accept-area-ratio", type=float, default=0.50)
     parser.add_argument("--max-accept-area-ratio", type=float, default=1.50)
+    parser.add_argument("--max-accept-center-shift-ratio", type=float, default=0.25)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1177,7 +1203,9 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
         min_active_measurement_count=args.min_accept_active_measurements,
         min_mean_event_activity=args.min_accept_mean_activity,
         min_candidate_iou=args.min_accept_candidate_iou,
+        min_candidate_area_ratio=args.min_accept_area_ratio,
         max_candidate_area_ratio=args.max_accept_area_ratio,
+        max_center_shift_ratio=args.max_accept_center_shift_ratio,
     )
 
 

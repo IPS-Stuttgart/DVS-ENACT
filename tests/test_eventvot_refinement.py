@@ -309,7 +309,44 @@ def test_eventvot_refinement_uses_conservative_acceptance_gates(tmp_path):
     frames = payload["sequences"][0]["frames"]
     assert frames[1]["accept_refinement"]
     assert not frames[2]["accept_refinement"]
-    assert frames[2]["rejection_reasons"] == ["candidate_iou"]
+    assert frames[2]["rejection_reasons"] == ["candidate_iou", "center_shift_ratio"]
+
+
+def test_eventvot_acceptance_rejects_large_center_shift_and_area_change():
+    module = _load_module()
+    config = module.EventVOTAcceptanceConfig(
+        min_candidate_iou=0.0,
+        min_candidate_area_ratio=0.75,
+        max_candidate_area_ratio=1.25,
+        max_center_shift_ratio=0.25,
+    )
+
+    shifted = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([20.0, 10.0, 20.0, 20.0]),
+        config,
+    )
+    shrunk = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([10.0, 10.0, 10.0, 10.0]),
+        config,
+    )
+    grown = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([10.0, 10.0, 30.0, 30.0]),
+        config,
+    )
+
+    assert not shifted.accepted
+    assert shifted.rejection_reasons == ("center_shift_ratio",)
+    assert not shrunk.accepted
+    assert shrunk.rejection_reasons == ("candidate_area_ratio",)
+    assert not grown.accepted
+    assert grown.rejection_reasons == ("candidate_area_ratio",)
+    assert module.center_shift_ratio_xywh(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([20.0, 10.0, 20.0, 20.0]),
+    ) > 0.25
 
 
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
@@ -395,6 +432,8 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--inactive-activity-threshold" in help_text
     assert "--measurement-noise-variance" in help_text
     assert "--min-accept-used-events" in help_text
+    assert "--min-accept-area-ratio" in help_text
+    assert "--max-accept-center-shift-ratio" in help_text
 
 
 class _FakeRefiner:
