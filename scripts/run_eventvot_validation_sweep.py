@@ -252,7 +252,9 @@ def acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptanceC
         min_active_measurement_count=args.min_accept_active_measurements,
         min_mean_event_activity=args.min_accept_mean_activity,
         min_candidate_iou=args.min_accept_candidate_iou,
+        min_candidate_area_ratio=args.min_accept_area_ratio,
         max_candidate_area_ratio=args.max_accept_area_ratio,
+        max_center_shift_ratio=args.max_accept_center_shift_ratio,
     )
 
 
