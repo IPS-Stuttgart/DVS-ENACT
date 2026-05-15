@@ -62,7 +62,7 @@ env:
 jobs:
   reproduce-hdetrackv2-eventvot:
     name: Reproduce HDETrackV2 EventVOT metrics
-    runs-on: [self-hosted, linux, dvs-enact]
+    runs-on: [self-hosted, Linux, dvs-enact]
     timeout-minutes: 1440
 
     defaults:
