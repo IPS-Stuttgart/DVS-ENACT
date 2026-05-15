@@ -155,7 +155,7 @@ env:
 jobs:
   eventvot-dvsenact:
     name: EventVOT validation sweep and locked test
-    runs-on: [self-hosted, linux, dvs-enact]
+    runs-on: [self-hosted, Linux, dvs-enact]
     # Keep below the 24h GITHUB_TOKEN expiry so final artifact upload can still run.
     timeout-minutes: 1430
 

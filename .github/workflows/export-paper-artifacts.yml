@@ -30,7 +30,7 @@ env:
 jobs:
   export:
     name: Export canonical paper artifacts
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 240
 
     steps:
