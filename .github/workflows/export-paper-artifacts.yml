@@ -193,7 +193,7 @@ jobs:
           PY
 
       - name: Upload paper artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ${{ inputs.output_artifact_name }}

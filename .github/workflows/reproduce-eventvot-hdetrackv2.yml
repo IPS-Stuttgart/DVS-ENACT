@@ -618,7 +618,7 @@ jobs:
 
       - name: Upload reproduction report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: eventvot-hdetrackv2-reproduction-report
           path: eventvot-hdetrackv2-reproduction-report/
