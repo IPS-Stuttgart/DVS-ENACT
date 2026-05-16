@@ -3,6 +3,11 @@ name: Export paper artifacts
 on:
   workflow_dispatch:
     inputs:
+      publish_to_paper_repo:
+        description: "Dispatch paper-repo build-results workflow to fetch this raw artifact"
+        required: true
+        type: boolean
+        default: false
       include_mevdt:
         description: "Run MEVDT stages on the self-hosted runner"
         required: true
@@ -192,13 +197,54 @@ jobs:
           print(json.dumps({"validated": [str(path) for path in expected]}, indent=2))
           PY
 
-      - name: Upload paper artifacts
+      - name: Upload raw paper data artifacts
         uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ${{ inputs.output_artifact_name }}
-          path: |
-            paper-output/data/paper_evidence
-            paper-output/figures
+          path: paper-output/data/paper_evidence
           if-no-files-found: error
           retention-days: 30
+
+  dispatch-paper-results:
+    name: Dispatch paper repository build
+    needs: export
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_paper_repo == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch paper repository build-results workflow
+        env:
+          PAPER_REPO_TOKEN: ${{ secrets.PAPER_REPO_TOKEN }}
+          PAPER_REPO: FlorianPfaff/DVS-ENACT-Paper
+          SOURCE_REPO: IPS-Stuttgart/DVS-ENACT
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          ARTIFACT_NAME: ${{ inputs.output_artifact_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PAPER_REPO_TOKEN:-}" ]; then
+            echo "::warning::publish_to_paper_repo=true but PAPER_REPO_TOKEN is not configured; skipping paper workflow dispatch"
+            exit 0
+          fi
+          payload=$(python - <<'PY'
+          import json
+          import os
+
+          print(json.dumps({
+              "ref": "main",
+              "inputs": {
+                  "source_repo": os.environ["SOURCE_REPO"],
+                  "source_run_id": os.environ["SOURCE_RUN_ID"],
+                  "artifact_name": os.environ["ARTIFACT_NAME"],
+              },
+          }))
+          PY
+          )
+
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer ${PAPER_REPO_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${PAPER_REPO}/actions/workflows/build-results.yml/dispatches" \
+            -d "$payload"
