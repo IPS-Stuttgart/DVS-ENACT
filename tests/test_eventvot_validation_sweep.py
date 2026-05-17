@@ -97,3 +97,74 @@ def test_validation_sweep_dry_run_uses_requested_grid(tmp_path, monkeypatch):
     assert payload["summary"]["config_count"] == 2
     assert payload["summary"]["completed_config_count"] == 0
     assert (tmp_path / "out" / "validation_sweep_summary.json").exists()
+
+
+def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = module.build_parser().parse_args(
+        [
+            "--eventvot-root",
+            str(tmp_path),
+            "--base-results",
+            str(result_root),
+            "--output-root",
+            str(tmp_path / "out"),
+            "--split",
+            "val",
+            "--refinement-blend",
+            "0.1",
+            "--search-expansion-factor",
+            "1.1",
+            "--max-events",
+            "64",
+            "--min-events",
+            "3",
+            "--event-activity-floor",
+            "0.0",
+            "--inactive-activity-threshold",
+            "0.1",
+            "--measurement-noise-variance",
+            "1.0",
+            "--min-accept-used-events",
+            "10,20",
+            "--min-accept-candidate-iou",
+            "0.85 0.95",
+            "--dry-run",
+        ]
+    )
+
+    grid = module.iter_parameter_grid(args)
+    payload = module.run_sweep(args)
+
+    assert len(grid) == 4
+    assert payload["summary"]["config_count"] == 4
+    assert sorted({config["min_accept_used_events"] for config in grid}) == [10, 20]
+    assert sorted({config["min_accept_candidate_iou"] for config in grid}) == [
+        0.85,
+        0.95,
+    ]
+    assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
+
+
+def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
+    module = _load_module(monkeypatch)
+    config = {
+        "min_accept_used_events": 40,
+        "min_accept_active_measurements": 8,
+        "min_accept_mean_activity": 0.30,
+        "min_accept_candidate_iou": 0.95,
+        "min_accept_area_ratio": 0.80,
+        "max_accept_area_ratio": 1.10,
+        "max_accept_center_shift_ratio": 0.05,
+    }
+
+    acceptance = module.acceptance_config_from_config(config)
+
+    assert acceptance.min_used_event_count == 40
+    assert acceptance.min_active_measurement_count == 8
+    assert acceptance.min_mean_event_activity == 0.30
+    assert acceptance.min_candidate_iou == 0.95
+    assert acceptance.min_candidate_area_ratio == 0.80
+    assert acceptance.max_candidate_area_ratio == 1.10
+    assert acceptance.max_center_shift_ratio == 0.05

@@ -16,7 +16,6 @@ from dvs_enact import DVSContourRefiner, DVSContourRefinerConfig
 from run_eventvot_refinement import (
     EventVOTAcceptanceConfig,
     EventVOTRefinementOptions,
-    add_acceptance_arguments,
     load_xywh_result_file,
     resolve_base_result_file,
     resolve_eventvot_split_root,
@@ -32,6 +31,39 @@ DEFAULT_MIN_EVENTS = (3, 10, 20)
 DEFAULT_EVENT_ACTIVITY_FLOOR = (0.00, 0.02, 0.05)
 DEFAULT_INACTIVE_ACTIVITY_THRESHOLD = (0.02, 0.05, 0.10)
 DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
+
+REFINER_GRID_KEYS = (
+    "refinement_blend",
+    "search_expansion_factor",
+    "max_events",
+    "min_events",
+    "event_activity_floor",
+    "inactive_activity_threshold",
+    "measurement_noise_variance",
+)
+ACCEPTANCE_GRID_KEYS = (
+    "min_accept_used_events",
+    "min_accept_active_measurements",
+    "min_accept_mean_activity",
+    "min_accept_candidate_iou",
+    "min_accept_area_ratio",
+    "max_accept_area_ratio",
+    "max_accept_center_shift_ratio",
+    "min_raw_candidate_iou",
+    "min_raw_candidate_area_ratio",
+    "max_raw_candidate_area_ratio",
+    "max_raw_center_shift_ratio",
+    "min_polarity_consistency_fraction",
+    "min_mean_event_polarity_weight",
+    "max_quadratic_form_per_active_measurement",
+    "min_active_fraction",
+)
+INT_GRID_KEYS = {
+    "max_events",
+    "min_events",
+    "min_accept_used_events",
+    "min_accept_active_measurements",
+}
 
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
@@ -109,8 +141,111 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(DEFAULT_MEASUREMENT_NOISE_VARIANCE),
     )
-    add_acceptance_arguments(parser)
+    add_acceptance_sweep_arguments(parser)
     return parser
+
+
+def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add acceptance-gate sweep arguments.
+
+    Each value accepts either repeated shell tokens (``--arg 0.1 0.2``) or a
+    single comma/whitespace-separated workflow-dispatch string
+    (``--arg "0.1,0.2"``). Defaults are singletons so the historical refiner
+    grid size is unchanged unless the caller explicitly sweeps gates.
+    """
+    parser.add_argument(
+        "--min-accept-used-events",
+        nargs="+",
+        default=("10",),
+        help="Acceptance sweep values for the minimum used event count.",
+    )
+    parser.add_argument(
+        "--min-accept-active-measurements",
+        nargs="+",
+        default=("3",),
+        help="Acceptance sweep values for the minimum active measurements.",
+    )
+    parser.add_argument(
+        "--min-accept-mean-activity",
+        nargs="+",
+        default=("0.10",),
+        help="Acceptance sweep values for the minimum mean event activity.",
+    )
+    parser.add_argument(
+        "--min-accept-candidate-iou",
+        nargs="+",
+        default=("0.60",),
+        help="Acceptance sweep values for the minimum base/refined IoU.",
+    )
+    parser.add_argument(
+        "--min-accept-area-ratio",
+        nargs="+",
+        default=("0.50",),
+        help="Acceptance sweep values for the minimum refined/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-accept-area-ratio",
+        nargs="+",
+        default=("1.50",),
+        help="Acceptance sweep values for the maximum refined/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-accept-center-shift-ratio",
+        nargs="+",
+        default=("0.25",),
+        help=(
+            "Acceptance sweep values for the maximum center shift normalized "
+            "by the base-box diagonal."
+        ),
+    )
+    parser.add_argument(
+        "--min-raw-candidate-iou",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum raw/base IoU.",
+    )
+    parser.add_argument(
+        "--min-raw-candidate-area-ratio",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum raw/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-raw-candidate-area-ratio",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for maximum raw/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-raw-center-shift-ratio",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for maximum raw/base center shift ratio.",
+    )
+    parser.add_argument(
+        "--min-polarity-consistency-fraction",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum polarity consistency.",
+    )
+    parser.add_argument(
+        "--min-mean-event-polarity-weight",
+        nargs="+",
+        default=("-inf",),
+        help="Acceptance sweep values for minimum mean event polarity weight.",
+    )
+    parser.add_argument(
+        "--max-quadratic-form-per-active-measurement",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for max quadratic-form-per-active-measurement.",
+    )
+    parser.add_argument(
+        "--min-active-fraction",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum active fraction.",
+    )
 
 
 def main() -> int:
@@ -160,7 +295,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
                     tracker_name=tracker_name,
                     event_column_order=args.event_column_order,
                     diagnostics_json=diagnostics_json,
-                    acceptance_config=acceptance_config_from_args(args),
+                    acceptance_config=acceptance_config_from_config(config),
                 ),
                 refiner=make_refiner(config, args),
             )
@@ -200,28 +335,130 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]]:
-    keys = (
-        "refinement_blend",
-        "search_expansion_factor",
-        "max_events",
-        "min_events",
-        "event_activity_floor",
-        "inactive_activity_threshold",
-        "measurement_noise_variance",
+    keys = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
+    acceptance_values = acceptance_value_lists_from_args(args)
+    values = tuple(
+        getattr(args, key) if key in REFINER_GRID_KEYS else acceptance_values[key]
+        for key in keys
     )
-    values = (
-        args.refinement_blend,
-        args.search_expansion_factor,
-        args.max_events,
-        args.min_events,
-        args.event_activity_floor,
-        args.inactive_activity_threshold,
-        args.measurement_noise_variance,
-    )
-    return [
-        dict(zip(keys, combination, strict=True))
-        for combination in itertools.product(*values)
-    ]
+    configs: list[dict[str, float | int]] = []
+    for combination in itertools.product(*values):
+        config: dict[str, float | int] = {}
+        for key, value in zip(keys, combination, strict=True):
+            config[key] = int(value) if key in INT_GRID_KEYS else float(value)
+        configs.append(config)
+    return configs
+
+
+def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[float | int]]:
+    return {
+        "min_accept_used_events": parse_sweep_values(
+            args.min_accept_used_events,
+            cast=int,
+            argument_name="--min-accept-used-events",
+        ),
+        "min_accept_active_measurements": parse_sweep_values(
+            args.min_accept_active_measurements,
+            cast=int,
+            argument_name="--min-accept-active-measurements",
+        ),
+        "min_accept_mean_activity": parse_sweep_values(
+            args.min_accept_mean_activity,
+            cast=float,
+            argument_name="--min-accept-mean-activity",
+        ),
+        "min_accept_candidate_iou": parse_sweep_values(
+            args.min_accept_candidate_iou,
+            cast=float,
+            argument_name="--min-accept-candidate-iou",
+        ),
+        "min_accept_area_ratio": parse_sweep_values(
+            args.min_accept_area_ratio,
+            cast=float,
+            argument_name="--min-accept-area-ratio",
+        ),
+        "max_accept_area_ratio": parse_sweep_values(
+            args.max_accept_area_ratio,
+            cast=float,
+            argument_name="--max-accept-area-ratio",
+        ),
+        "max_accept_center_shift_ratio": parse_sweep_values(
+            args.max_accept_center_shift_ratio,
+            cast=float,
+            argument_name="--max-accept-center-shift-ratio",
+        ),
+        "min_raw_candidate_iou": parse_sweep_values(
+            args.min_raw_candidate_iou,
+            cast=float,
+            argument_name="--min-raw-candidate-iou",
+        ),
+        "min_raw_candidate_area_ratio": parse_sweep_values(
+            args.min_raw_candidate_area_ratio,
+            cast=float,
+            argument_name="--min-raw-candidate-area-ratio",
+        ),
+        "max_raw_candidate_area_ratio": parse_sweep_values(
+            args.max_raw_candidate_area_ratio,
+            cast=float,
+            argument_name="--max-raw-candidate-area-ratio",
+        ),
+        "max_raw_center_shift_ratio": parse_sweep_values(
+            args.max_raw_center_shift_ratio,
+            cast=float,
+            argument_name="--max-raw-center-shift-ratio",
+        ),
+        "min_polarity_consistency_fraction": parse_sweep_values(
+            args.min_polarity_consistency_fraction,
+            cast=float,
+            argument_name="--min-polarity-consistency-fraction",
+        ),
+        "min_mean_event_polarity_weight": parse_sweep_values(
+            args.min_mean_event_polarity_weight,
+            cast=float,
+            argument_name="--min-mean-event-polarity-weight",
+        ),
+        "max_quadratic_form_per_active_measurement": parse_sweep_values(
+            args.max_quadratic_form_per_active_measurement,
+            cast=float,
+            argument_name="--max-quadratic-form-per-active-measurement",
+        ),
+        "min_active_fraction": parse_sweep_values(
+            args.min_active_fraction,
+            cast=float,
+            argument_name="--min-active-fraction",
+        ),
+    }
+
+
+def parse_sweep_values(
+    raw_values: list[str] | tuple[str, ...],
+    *,
+    cast,
+    argument_name: str,
+) -> list[float | int]:
+    """Parse repeated or comma/whitespace-separated sweep values."""
+    values: list[float | int] = []
+    for raw_value in raw_values:
+        for token in re.split(r"[\s,]+", str(raw_value).strip()):
+            if not token:
+                continue
+            try:
+                values.append(cast(token))
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid value for {argument_name}: {token!r}"
+                ) from error
+    if not values:
+        raise ValueError(f"{argument_name} must contain at least one value")
+
+    unique: list[float | int] = []
+    seen: set[float | int] = set()
+    for value in values:
+        if value in seen:
+            continue
+        unique.append(value)
+        seen.add(value)
+    return unique
 
 
 def make_refiner(
@@ -246,25 +483,29 @@ def make_refiner(
     )
 
 
-def acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptanceConfig:
+def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcceptanceConfig:
     return EventVOTAcceptanceConfig(
-        min_used_event_count=args.min_accept_used_events,
-        min_active_measurement_count=args.min_accept_active_measurements,
-        min_mean_event_activity=args.min_accept_mean_activity,
-        min_candidate_iou=args.min_accept_candidate_iou,
-        min_candidate_area_ratio=args.min_accept_area_ratio,
-        max_candidate_area_ratio=args.max_accept_area_ratio,
-        max_center_shift_ratio=args.max_accept_center_shift_ratio,
-        min_raw_candidate_iou=args.min_raw_candidate_iou,
-        min_raw_candidate_area_ratio=args.min_raw_candidate_area_ratio,
-        max_raw_candidate_area_ratio=args.max_raw_candidate_area_ratio,
-        max_raw_center_shift_ratio=args.max_raw_center_shift_ratio,
-        min_polarity_consistency_fraction=args.min_polarity_consistency_fraction,
-        min_mean_event_polarity_weight=args.min_mean_event_polarity_weight,
-        max_quadratic_form_per_active_measurement=(
-            args.max_quadratic_form_per_active_measurement
+        min_used_event_count=int(config["min_accept_used_events"]),
+        min_active_measurement_count=int(config["min_accept_active_measurements"]),
+        min_mean_event_activity=float(config["min_accept_mean_activity"]),
+        min_candidate_iou=float(config["min_accept_candidate_iou"]),
+        min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
+        max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
+        max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
+        min_raw_candidate_iou=float(config.get("min_raw_candidate_iou", 0.0)),
+        min_raw_candidate_area_ratio=float(config.get("min_raw_candidate_area_ratio", 0.0)),
+        max_raw_candidate_area_ratio=float(config.get("max_raw_candidate_area_ratio", float("inf"))),
+        max_raw_center_shift_ratio=float(config.get("max_raw_center_shift_ratio", float("inf"))),
+        min_polarity_consistency_fraction=float(
+            config.get("min_polarity_consistency_fraction", 0.0)
         ),
-        min_active_fraction=args.min_active_fraction,
+        min_mean_event_polarity_weight=float(
+            config.get("min_mean_event_polarity_weight", float("-inf"))
+        ),
+        max_quadratic_form_per_active_measurement=float(
+            config.get("max_quadratic_form_per_active_measurement", float("inf"))
+        ),
+        min_active_fraction=float(config.get("min_active_fraction", 0.0)),
     )
 
 
@@ -597,6 +838,13 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
         f"_af{tag_number(config['event_activity_floor'])}"
         f"_it{tag_number(config['inactive_activity_threshold'])}"
         f"_rn{tag_number(config['measurement_noise_variance'])}"
+        f"_au{int(config['min_accept_used_events'])}"
+        f"_aa{int(config['min_accept_active_measurements'])}"
+        f"_act{tag_number(config['min_accept_mean_activity'])}"
+        f"_ai{tag_number(config['min_accept_candidate_iou'])}"
+        f"_ar{tag_number(config['min_accept_area_ratio'])}"
+        f"_ax{tag_number(config['max_accept_area_ratio'])}"
+        f"_cs{tag_number(config['max_accept_center_shift_ratio'])}"
     )
 
 

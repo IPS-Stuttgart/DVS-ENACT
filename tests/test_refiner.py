@@ -12,7 +12,11 @@ DVSContourRefinerConfig = dvs_enact.DVSContourRefinerConfig
 EventBatch = dvs_enact.EventBatch
 refiner_bbox_to_dict = dvs_enact.refiner_bbox_to_dict
 refiner_crop_events_to_bbox = dvs_enact.refiner_crop_events_to_bbox
+refiner_event_distance_to_bbox_boundary = (
+    dvs_enact.refiner_event_distance_to_bbox_boundary
+)
 refiner_expand_bbox = dvs_enact.refiner_expand_bbox
+refiner_select_refinement_events = dvs_enact.refiner_select_refinement_events
 
 
 @unittest.skipIf(
@@ -46,6 +50,41 @@ class TestDVSContourRefiner(unittest.TestCase):
 
         self.assertEqual(cropped.count, 3)
         np.testing.assert_array_equal(cropped.x, np.array([9, 10, 15]))
+
+    def test_boundary_event_selection_prefers_contour_events(self):
+        events = EventBatch(
+            ts=np.array([0, 1, 2, 3, 4], dtype=np.int64),
+            x=np.array([10, 20, 30, 20, 50], dtype=np.int32),
+            y=np.array([20, 20, 20, 30, 50], dtype=np.int32),
+            p=np.array([1, 1, 0, 0, 1], dtype=np.int8),
+        )
+
+        selected = refiner_select_refinement_events(
+            events,
+            (10.0, 10.0, 30.0, 30.0),
+            2,
+            mode="boundary",
+            angular_bins=4,
+        )
+
+        self.assertEqual(selected.count, 2)
+        np.testing.assert_array_equal(selected.ts, np.array([0, 2]))
+        np.testing.assert_array_equal(selected.x, np.array([10, 30]))
+
+    def test_boundary_distance_handles_inside_and_outside_events(self):
+        events = EventBatch(
+            ts=np.array([0, 1, 2], dtype=np.int64),
+            x=np.array([10, 20, 35], dtype=np.int32),
+            y=np.array([20, 20, 20], dtype=np.int32),
+            p=np.array([1, 1, 1], dtype=np.int8),
+        )
+
+        distances = refiner_event_distance_to_bbox_boundary(
+            events,
+            (10.0, 10.0, 30.0, 30.0),
+        )
+
+        np.testing.assert_allclose(distances, np.array([0.0, 10.0, 5.0]))
 
     def test_refiner_falls_back_without_motion(self):
         refiner = DVSContourRefiner(DVSContourRefinerConfig(min_events=1))
