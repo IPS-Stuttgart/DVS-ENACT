@@ -8,7 +8,7 @@ import itertools
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 import numpy as np
 
@@ -32,11 +32,34 @@ DEFAULT_EVENT_ACTIVITY_FLOOR = (0.00, 0.02, 0.05)
 DEFAULT_INACTIVE_ACTIVITY_THRESHOLD = (0.02, 0.05, 0.10)
 DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
 
+REFINER_GRID_KEYS = (
+    "refinement_blend",
+    "search_expansion_factor",
+    "max_events",
+    "min_events",
+    "event_activity_floor",
+    "inactive_activity_threshold",
+    "measurement_noise_variance",
+)
+ACCEPTANCE_GRID_KEYS = (
+    "min_accept_used_events",
+    "min_accept_active_measurements",
+    "min_accept_mean_activity",
+    "min_accept_candidate_iou",
+    "min_accept_area_ratio",
+    "max_accept_area_ratio",
+    "max_accept_center_shift_ratio",
+)
+INT_GRID_KEYS = {
+    "max_events",
+    "min_events",
+    "min_accept_used_events",
+    "min_accept_active_measurements",
+}
+
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
 NORMALIZED_ERROR_THRESHOLDS = ERROR_THRESHOLDS / 100.0
-
-T = TypeVar("T", int, float)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,48 +138,57 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add validation-sweep grids for guarded-refinement acceptance gates."""
+    """Add acceptance-gate sweep arguments.
+
+    Each value accepts either repeated shell tokens (``--arg 0.1 0.2``) or a
+    single comma/whitespace-separated workflow-dispatch string
+    (``--arg "0.1,0.2"``). Defaults are singletons so the historical refiner
+    grid size is unchanged unless the caller explicitly sweeps gates.
+    """
     parser.add_argument(
         "--min-accept-used-events",
         nargs="+",
-        default=["10"],
-        help="Sweep values for the minimum number of used events.",
+        default=("10",),
+        help="Acceptance sweep values for the minimum used event count.",
     )
     parser.add_argument(
         "--min-accept-active-measurements",
         nargs="+",
-        default=["3"],
-        help="Sweep values for the minimum number of active SCGP measurements.",
+        default=("3",),
+        help="Acceptance sweep values for the minimum active measurements.",
     )
     parser.add_argument(
         "--min-accept-mean-activity",
         nargs="+",
-        default=["0.10"],
-        help="Sweep values for minimum mean normal-flow activity.",
+        default=("0.10",),
+        help="Acceptance sweep values for the minimum mean event activity.",
     )
     parser.add_argument(
         "--min-accept-candidate-iou",
         nargs="+",
-        default=["0.60"],
-        help="Sweep values for minimum base/refined candidate IoU.",
+        default=("0.60",),
+        help="Acceptance sweep values for the minimum base/refined IoU.",
     )
     parser.add_argument(
         "--min-accept-area-ratio",
         nargs="+",
-        default=["0.50"],
-        help="Sweep values for minimum refined/base area ratio.",
+        default=("0.50",),
+        help="Acceptance sweep values for the minimum refined/base area ratio.",
     )
     parser.add_argument(
         "--max-accept-area-ratio",
         nargs="+",
-        default=["1.50"],
-        help="Sweep values for maximum refined/base area ratio.",
+        default=("1.50",),
+        help="Acceptance sweep values for the maximum refined/base area ratio.",
     )
     parser.add_argument(
         "--max-accept-center-shift-ratio",
         nargs="+",
-        default=["0.25"],
-        help="Sweep values for maximum center shift divided by base-box diagonal.",
+        default=("0.25",),
+        help=(
+            "Acceptance sweep values for the maximum center shift normalized "
+            "by the base-box diagonal."
+        ),
     )
 
 
@@ -247,42 +279,90 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]]:
-    keys = (
-        "refinement_blend",
-        "search_expansion_factor",
-        "max_events",
-        "min_events",
-        "event_activity_floor",
-        "inactive_activity_threshold",
-        "measurement_noise_variance",
-        "min_accept_used_events",
-        "min_accept_active_measurements",
-        "min_accept_mean_activity",
-        "min_accept_candidate_iou",
-        "min_accept_area_ratio",
-        "max_accept_area_ratio",
-        "max_accept_center_shift_ratio",
+    keys = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
+    acceptance_values = acceptance_value_lists_from_args(args)
+    values = tuple(
+        getattr(args, key) if key in REFINER_GRID_KEYS else acceptance_values[key]
+        for key in keys
     )
-    values = (
-        args.refinement_blend,
-        args.search_expansion_factor,
-        args.max_events,
-        args.min_events,
-        args.event_activity_floor,
-        args.inactive_activity_threshold,
-        args.measurement_noise_variance,
-        parse_sweep_values(args.min_accept_used_events, int),
-        parse_sweep_values(args.min_accept_active_measurements, int),
-        parse_sweep_values(args.min_accept_mean_activity, float),
-        parse_sweep_values(args.min_accept_candidate_iou, float),
-        parse_sweep_values(args.min_accept_area_ratio, float),
-        parse_sweep_values(args.max_accept_area_ratio, float),
-        parse_sweep_values(args.max_accept_center_shift_ratio, float),
-    )
-    return [
-        dict(zip(keys, combination, strict=True))
-        for combination in itertools.product(*values)
-    ]
+    configs: list[dict[str, float | int]] = []
+    for combination in itertools.product(*values):
+        config: dict[str, float | int] = {}
+        for key, value in zip(keys, combination, strict=True):
+            config[key] = int(value) if key in INT_GRID_KEYS else float(value)
+        configs.append(config)
+    return configs
+
+
+def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[float | int]]:
+    return {
+        "min_accept_used_events": parse_sweep_values(
+            args.min_accept_used_events,
+            cast=int,
+            argument_name="--min-accept-used-events",
+        ),
+        "min_accept_active_measurements": parse_sweep_values(
+            args.min_accept_active_measurements,
+            cast=int,
+            argument_name="--min-accept-active-measurements",
+        ),
+        "min_accept_mean_activity": parse_sweep_values(
+            args.min_accept_mean_activity,
+            cast=float,
+            argument_name="--min-accept-mean-activity",
+        ),
+        "min_accept_candidate_iou": parse_sweep_values(
+            args.min_accept_candidate_iou,
+            cast=float,
+            argument_name="--min-accept-candidate-iou",
+        ),
+        "min_accept_area_ratio": parse_sweep_values(
+            args.min_accept_area_ratio,
+            cast=float,
+            argument_name="--min-accept-area-ratio",
+        ),
+        "max_accept_area_ratio": parse_sweep_values(
+            args.max_accept_area_ratio,
+            cast=float,
+            argument_name="--max-accept-area-ratio",
+        ),
+        "max_accept_center_shift_ratio": parse_sweep_values(
+            args.max_accept_center_shift_ratio,
+            cast=float,
+            argument_name="--max-accept-center-shift-ratio",
+        ),
+    }
+
+
+def parse_sweep_values(
+    raw_values: list[str] | tuple[str, ...],
+    *,
+    cast,
+    argument_name: str,
+) -> list[float | int]:
+    """Parse repeated or comma/whitespace-separated sweep values."""
+    values: list[float | int] = []
+    for raw_value in raw_values:
+        for token in re.split(r"[\s,]+", str(raw_value).strip()):
+            if not token:
+                continue
+            try:
+                values.append(cast(token))
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid value for {argument_name}: {token!r}"
+                ) from error
+    if not values:
+        raise ValueError(f"{argument_name} must contain at least one value")
+
+    unique: list[float | int] = []
+    seen: set[float | int] = set()
+    for value in values:
+        if value in seen:
+            continue
+        unique.append(value)
+        seen.add(value)
+    return unique
 
 
 def make_refiner(
@@ -650,28 +730,16 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
         f"_rn{tag_number(config['measurement_noise_variance'])}"
         f"_au{int(config['min_accept_used_events'])}"
         f"_aa{int(config['min_accept_active_measurements'])}"
-        f"_am{tag_number(config['min_accept_mean_activity'])}"
+        f"_act{tag_number(config['min_accept_mean_activity'])}"
         f"_ai{tag_number(config['min_accept_candidate_iou'])}"
-        f"_al{tag_number(config['min_accept_area_ratio'])}"
-        f"_ah{tag_number(config['max_accept_area_ratio'])}"
+        f"_ar{tag_number(config['min_accept_area_ratio'])}"
+        f"_ax{tag_number(config['max_accept_area_ratio'])}"
         f"_cs{tag_number(config['max_accept_center_shift_ratio'])}"
     )
 
 
 def tag_number(value: float | int) -> str:
     return f"{float(value):g}".replace("-", "m").replace(".", "p")
-
-
-def parse_sweep_values(values: list[str] | tuple[str, ...], cast: Callable[[str], T]) -> list[T]:
-    """Parse repeated, comma-separated, or quoted whitespace-separated sweep values."""
-    parsed: list[T] = []
-    for raw_value in values:
-        tokens = [token for token in re.split(r"[\s,]+", str(raw_value).strip()) if token]
-        for token in tokens:
-            parsed.append(cast(token))
-    if not parsed:
-        raise ValueError("At least one sweep value is required")
-    return parsed
 
 
 def _is_test_split(split: str) -> bool:
