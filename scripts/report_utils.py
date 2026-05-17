@@ -8,16 +8,16 @@ from typing import Any
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write *rows* to a CSV file at *path*, creating parent dirs as needed."""
+    """Write *rows* to a CSV file at *path*, creating parent dirs as needed.
+
+    An empty file is created when *rows* is empty.  Fieldnames are collected
+    from all rows in insertion order, which handles heterogeneous dicts.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         path.write_text("", encoding="utf-8")
         return
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(key)
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
