@@ -45,6 +45,22 @@ def _write_validation_fixture(root: Path) -> tuple[Path, Path]:
     return split_root, result_root
 
 
+def _parse_sweep_args(module, tmp_path: Path, result_root: Path, *extra: str):
+    return module.build_parser().parse_args(
+        [
+            "--eventvot-root",
+            str(tmp_path),
+            "--base-results",
+            str(result_root),
+            "--output-root",
+            str(tmp_path / "out"),
+            "--split",
+            "val",
+            *extra,
+        ],
+    )
+
+
 def test_eventvot_validation_metrics_match_perfect_boxes(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     split_root, result_root = _write_validation_fixture(tmp_path)
@@ -75,20 +91,13 @@ def test_validation_sweep_refuses_test_split(tmp_path, monkeypatch):
 def test_validation_sweep_dry_run_uses_requested_grid(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)
-    args = module.build_parser().parse_args(
-        [
-            "--eventvot-root",
-            str(tmp_path),
-            "--base-results",
-            str(result_root),
-            "--output-root",
-            str(tmp_path / "out"),
-            "--split",
-            "val",
-            "--max-configs",
-            "2",
-            "--dry-run",
-        ]
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        "--max-configs",
+        "2",
+        "--dry-run",
     )
 
     payload = module.run_sweep(args)
@@ -102,36 +111,29 @@ def test_validation_sweep_dry_run_uses_requested_grid(tmp_path, monkeypatch):
 def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)
-    args = module.build_parser().parse_args(
-        [
-            "--eventvot-root",
-            str(tmp_path),
-            "--base-results",
-            str(result_root),
-            "--output-root",
-            str(tmp_path / "out"),
-            "--split",
-            "val",
-            "--refinement-blend",
-            "0.1",
-            "--search-expansion-factor",
-            "1.1",
-            "--max-events",
-            "64",
-            "--min-events",
-            "3",
-            "--event-activity-floor",
-            "0.0",
-            "--inactive-activity-threshold",
-            "0.1",
-            "--measurement-noise-variance",
-            "1.0",
-            "--min-accept-used-events",
-            "10,20",
-            "--min-accept-candidate-iou",
-            "0.85 0.95",
-            "--dry-run",
-        ]
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        "--refinement-blend",
+        "0.1",
+        "--search-expansion-factor",
+        "1.1",
+        "--max-events",
+        "64",
+        "--min-events",
+        "3",
+        "--event-activity-floor",
+        "0.0",
+        "--inactive-activity-threshold",
+        "0.1",
+        "--measurement-noise-variance",
+        "1.0",
+        "--min-accept-used-events",
+        "10,20",
+        "--min-accept-candidate-iou",
+        "0.85 0.95",
+        "--dry-run",
     )
 
     grid = module.iter_parameter_grid(args)

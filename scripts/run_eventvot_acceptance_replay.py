@@ -17,7 +17,7 @@ import json
 import math
 import sys
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -612,6 +612,24 @@ def _append_min_count_gate(
         reasons.append(reason)
 
 
+def _append_float_gate(
+    reasons: list[str],
+    reason: str,
+    value: Any,
+    threshold: float | None,
+    *,
+    is_rejected: Callable[[float, float], bool],
+    missing_reason: str | None = None,
+) -> None:
+    if threshold is None:
+        return
+    numeric = _optional_float(value)
+    if numeric is None:
+        reasons.append(missing_reason or reason)
+    elif is_rejected(numeric, float(threshold)):
+        reasons.append(reason)
+
+
 def _append_min_float_gate(
     reasons: list[str],
     reason: str,
@@ -620,13 +638,14 @@ def _append_min_float_gate(
     *,
     missing_reason: str | None = None,
 ) -> None:
-    if threshold is None:
-        return
-    numeric = _optional_float(value)
-    if numeric is None:
-        reasons.append(missing_reason or reason)
-    elif numeric < float(threshold):
-        reasons.append(reason)
+    _append_float_gate(
+        reasons,
+        reason,
+        value,
+        threshold,
+        is_rejected=lambda numeric, floor: numeric < floor,
+        missing_reason=missing_reason,
+    )
 
 
 def _append_max_float_gate(
@@ -637,13 +656,14 @@ def _append_max_float_gate(
     *,
     missing_reason: str | None = None,
 ) -> None:
-    if threshold is None:
-        return
-    numeric = _optional_float(value)
-    if numeric is None:
-        reasons.append(missing_reason or reason)
-    elif numeric > float(threshold):
-        reasons.append(reason)
+    _append_float_gate(
+        reasons,
+        reason,
+        value,
+        threshold,
+        is_rejected=lambda numeric, ceiling: numeric > ceiling,
+        missing_reason=missing_reason,
+    )
 
 
 def _optional_int(value: Any) -> int | None:
