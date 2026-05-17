@@ -1,3 +1,4 @@
+# one-shot helper; deletes itself after applying the patch
 name: Apply DVS-ENACT acceptance gate patch
 
 on:
