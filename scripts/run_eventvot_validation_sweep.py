@@ -8,7 +8,7 @@ import itertools
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import numpy as np
 
@@ -16,7 +16,6 @@ from dvs_enact import DVSContourRefiner, DVSContourRefinerConfig
 from run_eventvot_refinement import (
     EventVOTAcceptanceConfig,
     EventVOTRefinementOptions,
-    add_acceptance_arguments,
     load_xywh_result_file,
     resolve_base_result_file,
     resolve_eventvot_split_root,
@@ -36,6 +35,8 @@ DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
 NORMALIZED_ERROR_THRESHOLDS = ERROR_THRESHOLDS / 100.0
+
+T = TypeVar("T", int, float)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,8 +110,54 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(DEFAULT_MEASUREMENT_NOISE_VARIANCE),
     )
-    add_acceptance_arguments(parser)
+    add_acceptance_sweep_arguments(parser)
     return parser
+
+
+def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add validation-sweep grids for guarded-refinement acceptance gates."""
+    parser.add_argument(
+        "--min-accept-used-events",
+        nargs="+",
+        default=["10"],
+        help="Sweep values for the minimum number of used events.",
+    )
+    parser.add_argument(
+        "--min-accept-active-measurements",
+        nargs="+",
+        default=["3"],
+        help="Sweep values for the minimum number of active SCGP measurements.",
+    )
+    parser.add_argument(
+        "--min-accept-mean-activity",
+        nargs="+",
+        default=["0.10"],
+        help="Sweep values for minimum mean normal-flow activity.",
+    )
+    parser.add_argument(
+        "--min-accept-candidate-iou",
+        nargs="+",
+        default=["0.60"],
+        help="Sweep values for minimum base/refined candidate IoU.",
+    )
+    parser.add_argument(
+        "--min-accept-area-ratio",
+        nargs="+",
+        default=["0.50"],
+        help="Sweep values for minimum refined/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-accept-area-ratio",
+        nargs="+",
+        default=["1.50"],
+        help="Sweep values for maximum refined/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-accept-center-shift-ratio",
+        nargs="+",
+        default=["0.25"],
+        help="Sweep values for maximum center shift divided by base-box diagonal.",
+    )
 
 
 def main() -> int:
@@ -160,7 +207,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
                     tracker_name=tracker_name,
                     event_column_order=args.event_column_order,
                     diagnostics_json=diagnostics_json,
-                    acceptance_config=acceptance_config_from_args(args),
+                    acceptance_config=acceptance_config_from_config(config),
                 ),
                 refiner=make_refiner(config, args),
             )
@@ -208,6 +255,13 @@ def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]
         "event_activity_floor",
         "inactive_activity_threshold",
         "measurement_noise_variance",
+        "min_accept_used_events",
+        "min_accept_active_measurements",
+        "min_accept_mean_activity",
+        "min_accept_candidate_iou",
+        "min_accept_area_ratio",
+        "max_accept_area_ratio",
+        "max_accept_center_shift_ratio",
     )
     values = (
         args.refinement_blend,
@@ -217,6 +271,13 @@ def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]
         args.event_activity_floor,
         args.inactive_activity_threshold,
         args.measurement_noise_variance,
+        parse_sweep_values(args.min_accept_used_events, int),
+        parse_sweep_values(args.min_accept_active_measurements, int),
+        parse_sweep_values(args.min_accept_mean_activity, float),
+        parse_sweep_values(args.min_accept_candidate_iou, float),
+        parse_sweep_values(args.min_accept_area_ratio, float),
+        parse_sweep_values(args.max_accept_area_ratio, float),
+        parse_sweep_values(args.max_accept_center_shift_ratio, float),
     )
     return [
         dict(zip(keys, combination, strict=True))
@@ -246,15 +307,15 @@ def make_refiner(
     )
 
 
-def acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptanceConfig:
+def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcceptanceConfig:
     return EventVOTAcceptanceConfig(
-        min_used_event_count=args.min_accept_used_events,
-        min_active_measurement_count=args.min_accept_active_measurements,
-        min_mean_event_activity=args.min_accept_mean_activity,
-        min_candidate_iou=args.min_accept_candidate_iou,
-        min_candidate_area_ratio=args.min_accept_area_ratio,
-        max_candidate_area_ratio=args.max_accept_area_ratio,
-        max_center_shift_ratio=args.max_accept_center_shift_ratio,
+        min_used_event_count=int(config["min_accept_used_events"]),
+        min_active_measurement_count=int(config["min_accept_active_measurements"]),
+        min_mean_event_activity=float(config["min_accept_mean_activity"]),
+        min_candidate_iou=float(config["min_accept_candidate_iou"]),
+        min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
+        max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
+        max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
     )
 
 
@@ -587,11 +648,30 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
         f"_af{tag_number(config['event_activity_floor'])}"
         f"_it{tag_number(config['inactive_activity_threshold'])}"
         f"_rn{tag_number(config['measurement_noise_variance'])}"
+        f"_au{int(config['min_accept_used_events'])}"
+        f"_aa{int(config['min_accept_active_measurements'])}"
+        f"_am{tag_number(config['min_accept_mean_activity'])}"
+        f"_ai{tag_number(config['min_accept_candidate_iou'])}"
+        f"_al{tag_number(config['min_accept_area_ratio'])}"
+        f"_ah{tag_number(config['max_accept_area_ratio'])}"
+        f"_cs{tag_number(config['max_accept_center_shift_ratio'])}"
     )
 
 
 def tag_number(value: float | int) -> str:
     return f"{float(value):g}".replace("-", "m").replace(".", "p")
+
+
+def parse_sweep_values(values: list[str] | tuple[str, ...], cast: Callable[[str], T]) -> list[T]:
+    """Parse repeated, comma-separated, or quoted whitespace-separated sweep values."""
+    parsed: list[T] = []
+    for raw_value in values:
+        tokens = [token for token in re.split(r"[\s,]+", str(raw_value).strip()) if token]
+        for token in tokens:
+            parsed.append(cast(token))
+    if not parsed:
+        raise ValueError("At least one sweep value is required")
+    return parsed
 
 
 def _is_test_split(split: str) -> bool:
