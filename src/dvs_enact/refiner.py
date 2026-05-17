@@ -8,7 +8,7 @@ ablations of the form ``Tracker X`` versus ``Tracker X + DVS-ENACT``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +45,8 @@ class DVSContourRefinerConfig:
     kinematic_orientation_variance: float = 1e-4
     refinement_blend: float = 1.0
     bbox_grid_points: int = 128
+    event_selection_mode: str = "boundary"
+    event_selection_angular_bins: int = 16
 
     def __post_init__(self) -> None:
         if self.n_base_points <= 0:
@@ -59,6 +61,10 @@ class DVSContourRefinerConfig:
             raise ValueError("min_event_velocity must be non-negative")
         if not 0.0 <= self.refinement_blend <= 1.0:
             raise ValueError("refinement_blend must be in [0, 1]")
+        if self.event_selection_mode not in {"chronological", "boundary"}:
+            raise ValueError("event_selection_mode must be 'chronological' or 'boundary'")
+        if self.event_selection_angular_bins <= 0:
+            raise ValueError("event_selection_angular_bins must be positive")
 
 
 @dataclass(frozen=True)
@@ -143,7 +149,13 @@ class DVSContourRefiner:
             image_height=self.config.image_height,
         )
         cropped = crop_events_to_bbox(events, search_bbox)
-        sampled = subsample_events_chronologically(cropped, self.config.max_events)
+        sampled = select_refinement_events(
+            cropped,
+            candidate,
+            self.config.max_events,
+            mode=self.config.event_selection_mode,
+            angular_bins=self.config.event_selection_angular_bins,
+        )
         velocity = self._event_velocity(
             candidate,
             previous_candidate_bbox,
@@ -410,6 +422,108 @@ def crop_events_to_bbox(events: EventBatch, bbox: BBoxInput) -> EventBatch:
     )
 
 
+def select_refinement_events(
+    events: EventBatch,
+    candidate_bbox: BBoxInput,
+    max_events: int | None,
+    *,
+    mode: str = "boundary",
+    angular_bins: int = 16,
+) -> EventBatch:
+    """Select events for one post-hoc contour update.
+
+    Chronological subsampling preserves temporal coverage. Boundary-aware
+    selection is more conservative for strong base trackers: it prefers events
+    close to the candidate contour, balances them by angular sector, and then
+    restores chronological order before the update. This reduces the chance that
+    background events inside the expanded search box dominate the SCGP update.
+    """
+    if mode == "chronological":
+        return subsample_events_chronologically(events, max_events)
+    if mode == "boundary":
+        return subsample_events_near_bbox_boundary(
+            events,
+            candidate_bbox,
+            max_events,
+            angular_bins=angular_bins,
+        )
+    raise ValueError("mode must be 'chronological' or 'boundary'")
+
+
+def subsample_events_near_bbox_boundary(
+    events: EventBatch,
+    bbox: BBoxInput,
+    max_events: int | None,
+    *,
+    angular_bins: int = 16,
+) -> EventBatch:
+    """Deterministically subsample events close to a candidate-box contour."""
+    if max_events is not None and max_events <= 0:
+        raise ValueError("max_events must be positive when provided")
+    if angular_bins <= 0:
+        raise ValueError("angular_bins must be positive")
+    if events.count == 0 or max_events is None or events.count <= max_events:
+        return events
+
+    normalized = bbox_to_dict(bbox)
+    distances = event_distance_to_bbox_boundary(events, normalized)
+    angles = np.arctan2(
+        events.y.astype(float) - normalized["center_y"],
+        events.x.astype(float) - normalized["center_x"],
+    )
+    bins = np.floor((angles + np.pi) / (2.0 * np.pi) * angular_bins).astype(np.int64)
+    bins = np.clip(bins, 0, angular_bins - 1)
+
+    selected: list[int] = []
+    per_bin_quota = max(1, int(np.ceil(max_events / angular_bins)))
+    for bin_index in range(angular_bins):
+        candidates = np.flatnonzero(bins == bin_index)
+        if candidates.size == 0:
+            continue
+        local_order = np.lexsort((events.ts[candidates], distances[candidates]))
+        for index in candidates[local_order[:per_bin_quota]]:
+            selected.append(int(index))
+
+    if len(selected) < max_events:
+        already_selected = np.zeros(events.count, dtype=bool)
+        if selected:
+            already_selected[np.asarray(selected, dtype=np.int64)] = True
+        remaining = np.flatnonzero(~already_selected)
+        global_order = np.lexsort((events.ts[remaining], distances[remaining]))
+        fill_count = max_events - len(selected)
+        selected.extend(int(index) for index in remaining[global_order[:fill_count]])
+
+    selected = _deduplicate_indices(selected)[:max_events]
+    selected_array = np.asarray(selected, dtype=np.int64)
+    selected_array = selected_array[np.argsort(events.ts[selected_array], kind="stable")]
+    return _event_batch_subset(events, selected_array)
+
+
+def event_distance_to_bbox_boundary(events: EventBatch, bbox: BBoxInput) -> np.ndarray:
+    """Return each event's distance to the nearest point on a bbox boundary."""
+    normalized = bbox_to_dict(bbox)
+    x = events.x.astype(float)
+    y = events.y.astype(float)
+    x_min = normalized["x_min"]
+    x_max = normalized["x_max"]
+    y_min = normalized["y_min"]
+    y_max = normalized["y_max"]
+
+    inside = (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max)
+    inside_distance = np.minimum.reduce(
+        (
+            np.abs(x - x_min),
+            np.abs(x - x_max),
+            np.abs(y - y_min),
+            np.abs(y - y_max),
+        )
+    )
+    clipped_x = np.clip(x, x_min, x_max)
+    clipped_y = np.clip(y, y_min, y_max)
+    outside_distance = np.hypot(x - clipped_x, y - clipped_y)
+    return np.where(inside, inside_distance, outside_distance)
+
+
 def subsample_events_chronologically(
     events: EventBatch,
     max_events: int | None,
@@ -422,12 +536,7 @@ def subsample_events_chronologically(
     order = np.argsort(events.ts, kind="stable")
     positions = np.linspace(0, events.count - 1, max_events, dtype=np.int64)
     selected = order[positions]
-    return EventBatch(
-        ts=events.ts[selected],
-        x=events.x[selected],
-        y=events.y[selected],
-        p=events.p[selected],
-    )
+    return _event_batch_subset(events, selected)
 
 
 def blend_bboxes(
@@ -483,6 +592,26 @@ def tracker_bbox_to_dict(tracker: DVSFullSCGPTracker, n: int) -> dict[str, float
         max(float(dimension[0]), 0.0),
         max(float(dimension[1]), 0.0),
     )
+
+
+def _event_batch_subset(events: EventBatch, indices: np.ndarray) -> EventBatch:
+    return EventBatch(
+        ts=events.ts[indices],
+        x=events.x[indices],
+        y=events.y[indices],
+        p=events.p[indices],
+    )
+
+
+def _deduplicate_indices(indices: Iterable[int]) -> list[int]:
+    selected: list[int] = []
+    seen: set[int] = set()
+    for index in indices:
+        if index in seen:
+            continue
+        selected.append(index)
+        seen.add(index)
+    return selected
 
 
 def _bbox_from_center_extent(
