@@ -72,7 +72,9 @@ from .refiner import (
     bbox_to_dict as refiner_bbox_to_dict,
     blend_bboxes,
     crop_events_to_bbox as refiner_crop_events_to_bbox,
+    event_distance_to_bbox_boundary as refiner_event_distance_to_bbox_boundary,
     expand_bbox as refiner_expand_bbox,
+    select_refinement_events as refiner_select_refinement_events,
 )
 from .trackers import DVSFullSCGPTracker, DVSSCGPTracker
 
@@ -126,7 +128,9 @@ __all__ = [
     "rectangle_radial_shape",
     "refiner_bbox_to_dict",
     "refiner_crop_events_to_bbox",
+    "refiner_event_distance_to_bbox_boundary",
     "refiner_expand_bbox",
+    "refiner_select_refinement_events",
     "select_mevdt_event_and_label_files",
     "simulate_rectangle_event_counts",
     "run_synthetic_tracker_benchmark",
