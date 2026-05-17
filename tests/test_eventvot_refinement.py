@@ -349,6 +349,25 @@ def test_eventvot_acceptance_rejects_large_center_shift_and_area_change():
     ) > 0.25
 
 
+def test_eventvot_acceptance_rejects_raw_refinement_jump():
+    module = _load_module()
+    config = module.EventVOTAcceptanceConfig(
+        min_candidate_iou=0.0,
+        min_raw_candidate_iou=0.50,
+    )
+
+    decision = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([10.5, 10.0, 20.0, 20.0], raw_xywh=[100.0, 100.0, 20.0, 20.0]),
+        config,
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reasons == ("raw_candidate_iou",)
+    assert decision.candidate_iou > 0.90
+    assert decision.raw_candidate_iou == 0.0
+
+
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
@@ -434,6 +453,8 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--min-accept-used-events" in help_text
     assert "--min-accept-area-ratio" in help_text
     assert "--max-accept-center-shift-ratio" in help_text
+    assert "--min-raw-candidate-iou" in help_text
+    assert "--min-active-fraction" in help_text
 
 
 class _FakeRefiner:
@@ -466,12 +487,26 @@ class _FakeResult:
     used_event_count = 12
     active_measurement_count = 3
     mean_event_activity = 0.20
+    mean_event_polarity_weight = None
+    polarity_consistency_fraction = None
+    quadratic_form = None
 
-    def __init__(self, xywh):
+    def __init__(self, xywh, *, raw_xywh=None):
         self._xywh = tuple(float(value) for value in xywh)
+        self._raw_xywh = tuple(float(value) for value in (raw_xywh or xywh))
 
     def as_xywh(self):
         return self._xywh
+
+    @property
+    def refined_bbox(self):
+        x, y, width, height = self._raw_xywh
+        return {
+            "x_min": x,
+            "y_min": y,
+            "width": width,
+            "height": height,
+        }
 
     def to_dict(self):
         return {
@@ -479,4 +514,8 @@ class _FakeResult:
             "used_event_count": self.used_event_count,
             "active_measurement_count": self.active_measurement_count,
             "mean_event_activity": self.mean_event_activity,
+            "mean_event_polarity_weight": self.mean_event_polarity_weight,
+            "polarity_consistency_fraction": self.polarity_consistency_fraction,
+            "quadratic_form": self.quadratic_form,
+            "refined_bbox": self.refined_bbox,
         }

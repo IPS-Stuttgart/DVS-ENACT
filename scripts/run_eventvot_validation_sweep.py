@@ -255,6 +255,16 @@ def acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptanceC
         min_candidate_area_ratio=args.min_accept_area_ratio,
         max_candidate_area_ratio=args.max_accept_area_ratio,
         max_center_shift_ratio=args.max_accept_center_shift_ratio,
+        min_raw_candidate_iou=args.min_raw_candidate_iou,
+        min_raw_candidate_area_ratio=args.min_raw_candidate_area_ratio,
+        max_raw_candidate_area_ratio=args.max_raw_candidate_area_ratio,
+        max_raw_center_shift_ratio=args.max_raw_center_shift_ratio,
+        min_polarity_consistency_fraction=args.min_polarity_consistency_fraction,
+        min_mean_event_polarity_weight=args.min_mean_event_polarity_weight,
+        max_quadratic_form_per_active_measurement=(
+            args.max_quadratic_form_per_active_measurement
+        ),
+        min_active_fraction=args.min_active_fraction,
     )
 
 

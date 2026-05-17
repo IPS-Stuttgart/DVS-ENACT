@@ -36,6 +36,14 @@ class EventVOTAcceptanceConfig:
     min_candidate_area_ratio: float = 0.50
     max_candidate_area_ratio: float = 1.50
     max_center_shift_ratio: float = 0.25
+    min_raw_candidate_iou: float | None = None
+    min_raw_candidate_area_ratio: float | None = None
+    max_raw_candidate_area_ratio: float | None = None
+    max_raw_center_shift_ratio: float | None = None
+    min_polarity_consistency_fraction: float | None = None
+    min_mean_event_polarity_weight: float | None = None
+    max_quadratic_form_per_active_measurement: float | None = None
+    min_active_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,11 @@ class EventVOTAcceptanceDecision:
     candidate_iou: float
     candidate_area_ratio: float
     center_shift_ratio: float
+    raw_candidate_iou: float
+    raw_candidate_area_ratio: float
+    raw_center_shift_ratio: float
+    active_fraction: float | None
+    quadratic_form_per_active_measurement: float | None
 
 
 @dataclass(frozen=True)
@@ -409,6 +422,11 @@ def refine_sequence(
             "candidate_iou": 1.0,
             "candidate_area_ratio": 1.0,
             "center_shift_ratio": 0.0,
+            "raw_candidate_iou": 1.0,
+            "raw_candidate_area_ratio": 1.0,
+            "raw_center_shift_ratio": 0.0,
+            "active_fraction": None,
+            "quadratic_form_per_active_measurement": None,
         }
     ]
 
@@ -445,6 +463,13 @@ def refine_sequence(
                 "candidate_iou": float(decision.candidate_iou),
                 "candidate_area_ratio": float(decision.candidate_area_ratio),
                 "center_shift_ratio": float(decision.center_shift_ratio),
+                "raw_candidate_iou": float(decision.raw_candidate_iou),
+                "raw_candidate_area_ratio": float(decision.raw_candidate_area_ratio),
+                "raw_center_shift_ratio": float(decision.raw_center_shift_ratio),
+                "active_fraction": decision.active_fraction,
+                "quadratic_form_per_active_measurement": (
+                    decision.quadratic_form_per_active_measurement
+                ),
                 "refiner_output_bbox": refiner_output_bbox,
                 "refiner_output_xywh": refiner_output.astype(float).tolist(),
                 "output_bbox": xywh_to_diagnostic_bbox(refined_boxes[frame_index]),
@@ -650,9 +675,21 @@ def evaluate_refinement_acceptance(
     """Return whether a DVS-ENACT refinement should replace the base box."""
     config = config or EventVOTAcceptanceConfig()
     refined_xywh = np.asarray(result.as_xywh(), dtype=float)
+    raw_refined_xywh = bbox_dict_to_xywh(result.refined_bbox)
     candidate_iou = box_iou_xywh(candidate_xywh, refined_xywh)
     candidate_area_ratio = area_ratio_xywh(candidate_xywh, refined_xywh)
     center_shift_ratio = center_shift_ratio_xywh(candidate_xywh, refined_xywh)
+    raw_candidate_iou = box_iou_xywh(candidate_xywh, raw_refined_xywh)
+    raw_candidate_area_ratio = area_ratio_xywh(candidate_xywh, raw_refined_xywh)
+    raw_center_shift_ratio = center_shift_ratio_xywh(candidate_xywh, raw_refined_xywh)
+    active_fraction = _active_fraction(
+        int(result.active_measurement_count),
+        int(result.used_event_count),
+    )
+    quadratic_form_per_active = _quadratic_per_active(
+        result.quadratic_form,
+        int(result.active_measurement_count),
+    )
     if not config.enabled:
         rejection_reasons = () if result.fallback_reason is None else ("fallback_reason",)
         return EventVOTAcceptanceDecision(
@@ -661,6 +698,11 @@ def evaluate_refinement_acceptance(
             candidate_iou=candidate_iou,
             candidate_area_ratio=candidate_area_ratio,
             center_shift_ratio=center_shift_ratio,
+            raw_candidate_iou=raw_candidate_iou,
+            raw_candidate_area_ratio=raw_candidate_area_ratio,
+            raw_center_shift_ratio=raw_center_shift_ratio,
+            active_fraction=active_fraction,
+            quadratic_form_per_active_measurement=quadratic_form_per_active,
         )
 
     rejection_reasons: list[str] = []
@@ -682,6 +724,58 @@ def evaluate_refinement_acceptance(
         rejection_reasons.append("candidate_area_ratio")
     if center_shift_ratio > config.max_center_shift_ratio:
         rejection_reasons.append("center_shift_ratio")
+    _append_min_float_gate(
+        rejection_reasons,
+        "raw_candidate_iou",
+        raw_candidate_iou,
+        config.min_raw_candidate_iou,
+    )
+    _append_min_float_gate(
+        rejection_reasons,
+        "raw_candidate_area_ratio",
+        raw_candidate_area_ratio,
+        config.min_raw_candidate_area_ratio,
+    )
+    _append_max_float_gate(
+        rejection_reasons,
+        "raw_candidate_area_ratio",
+        raw_candidate_area_ratio,
+        config.max_raw_candidate_area_ratio,
+    )
+    _append_max_float_gate(
+        rejection_reasons,
+        "raw_center_shift_ratio",
+        raw_center_shift_ratio,
+        config.max_raw_center_shift_ratio,
+    )
+    _append_min_float_gate(
+        rejection_reasons,
+        "polarity_consistency_fraction",
+        result.polarity_consistency_fraction,
+        config.min_polarity_consistency_fraction,
+        missing_reason="polarity_consistency_fraction_missing",
+    )
+    _append_min_float_gate(
+        rejection_reasons,
+        "mean_event_polarity_weight",
+        result.mean_event_polarity_weight,
+        config.min_mean_event_polarity_weight,
+        missing_reason="mean_event_polarity_weight_missing",
+    )
+    _append_max_float_gate(
+        rejection_reasons,
+        "quadratic_form_per_active_measurement",
+        quadratic_form_per_active,
+        config.max_quadratic_form_per_active_measurement,
+        missing_reason="quadratic_form_per_active_measurement_missing",
+    )
+    _append_min_float_gate(
+        rejection_reasons,
+        "active_fraction",
+        active_fraction,
+        config.min_active_fraction,
+        missing_reason="active_fraction_missing",
+    )
 
     return EventVOTAcceptanceDecision(
         accepted=not rejection_reasons,
@@ -689,6 +783,11 @@ def evaluate_refinement_acceptance(
         candidate_iou=candidate_iou,
         candidate_area_ratio=candidate_area_ratio,
         center_shift_ratio=center_shift_ratio,
+        raw_candidate_iou=raw_candidate_iou,
+        raw_candidate_area_ratio=raw_candidate_area_ratio,
+        raw_center_shift_ratio=raw_center_shift_ratio,
+        active_fraction=active_fraction,
+        quadratic_form_per_active_measurement=quadratic_form_per_active,
     )
 
 
@@ -730,6 +829,86 @@ def center_shift_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarra
     reference_center = reference[:2] + 0.5 * reference[2:]
     proposed_center = proposed[:2] + 0.5 * proposed[2:]
     return float(np.linalg.norm(proposed_center - reference_center) / reference_diagonal)
+
+
+def bbox_dict_to_xywh(bbox: dict[str, Any]) -> np.ndarray:
+    """Return an ``x,y,width,height`` array from a diagnostic bbox dictionary."""
+    lower = {str(key).lower(): float(value) for key, value in bbox.items()}
+    if {"x", "y", "width", "height"}.issubset(lower):
+        return np.asarray(
+            [lower["x"], lower["y"], lower["width"], lower["height"]],
+            dtype=float,
+        )
+    if {"x_min", "y_min", "width", "height"}.issubset(lower):
+        return np.asarray(
+            [lower["x_min"], lower["y_min"], lower["width"], lower["height"]],
+            dtype=float,
+        )
+    if {"x_min", "y_min", "x_max", "y_max"}.issubset(lower):
+        return np.asarray(
+            [
+                lower["x_min"],
+                lower["y_min"],
+                lower["x_max"] - lower["x_min"],
+                lower["y_max"] - lower["y_min"],
+            ],
+            dtype=float,
+        )
+    raise ValueError(f"Unsupported bbox diagnostic fields: {sorted(bbox)}")
+
+
+def _append_min_float_gate(
+    rejection_reasons: list[str],
+    reason: str,
+    value: float | None,
+    threshold: float | None,
+    *,
+    missing_reason: str | None = None,
+) -> None:
+    if threshold is None:
+        return
+    if value is None:
+        rejection_reasons.append(missing_reason or reason)
+        return
+    value = float(value)
+    if not math.isfinite(value) or value < threshold:
+        rejection_reasons.append(reason)
+
+
+def _append_max_float_gate(
+    rejection_reasons: list[str],
+    reason: str,
+    value: float | None,
+    threshold: float | None,
+    *,
+    missing_reason: str | None = None,
+) -> None:
+    if threshold is None:
+        return
+    if value is None:
+        rejection_reasons.append(missing_reason or reason)
+        return
+    value = float(value)
+    if not math.isfinite(value) or value > threshold:
+        rejection_reasons.append(reason)
+
+
+def _active_fraction(
+    active_measurement_count: int,
+    used_event_count: int,
+) -> float | None:
+    if used_event_count <= 0:
+        return None
+    return float(active_measurement_count) / float(used_event_count)
+
+
+def _quadratic_per_active(
+    quadratic_form: float | None,
+    active_measurement_count: int,
+) -> float | None:
+    if quadratic_form is None or active_measurement_count <= 0:
+        return None
+    return float(quadratic_form) / float(active_measurement_count)
 
 
 def xywh_to_diagnostic_bbox(box_xywh: np.ndarray) -> dict[str, float]:
@@ -1175,6 +1354,14 @@ def add_acceptance_arguments(
     parser.add_argument("--min-accept-area-ratio", type=float, default=0.50)
     parser.add_argument("--max-accept-area-ratio", type=float, default=1.50)
     parser.add_argument("--max-accept-center-shift-ratio", type=float, default=0.25)
+    parser.add_argument("--min-raw-candidate-iou", type=float)
+    parser.add_argument("--min-raw-area-ratio", dest="min_raw_candidate_area_ratio", type=float)
+    parser.add_argument("--max-raw-area-ratio", dest="max_raw_candidate_area_ratio", type=float)
+    parser.add_argument("--max-raw-center-shift-ratio", type=float)
+    parser.add_argument("--min-polarity-consistency-fraction", type=float)
+    parser.add_argument("--min-mean-event-polarity-weight", type=float)
+    parser.add_argument("--max-quadratic-form-per-active-measurement", type=float)
+    parser.add_argument("--min-active-fraction", type=float)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1206,6 +1393,16 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
         min_candidate_area_ratio=args.min_accept_area_ratio,
         max_candidate_area_ratio=args.max_accept_area_ratio,
         max_center_shift_ratio=args.max_accept_center_shift_ratio,
+        min_raw_candidate_iou=args.min_raw_candidate_iou,
+        min_raw_candidate_area_ratio=args.min_raw_candidate_area_ratio,
+        max_raw_candidate_area_ratio=args.max_raw_candidate_area_ratio,
+        max_raw_center_shift_ratio=args.max_raw_center_shift_ratio,
+        min_polarity_consistency_fraction=args.min_polarity_consistency_fraction,
+        min_mean_event_polarity_weight=args.min_mean_event_polarity_weight,
+        max_quadratic_form_per_active_measurement=(
+            args.max_quadratic_form_per_active_measurement
+        ),
+        min_active_fraction=args.min_active_fraction,
     )
 
 
