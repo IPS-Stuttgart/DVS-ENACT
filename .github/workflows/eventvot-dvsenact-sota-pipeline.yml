@@ -130,26 +130,11 @@ on:
         required: true
         default: "1.50"
         type: string
-      min_raw_candidate_iou:
-        description: "Optional gate: minimum IoU between base and unblended DVS box"
+      extra_acceptance_args:
+        description: "Extra refinement CLI args, e.g. --min-raw-candidate-iou 0.50 or --disable-event-polarity"
         required: false
         default: ""
         type: string
-      min_active_fraction:
-        description: "Optional gate: active measurements divided by used events"
-        required: false
-        default: ""
-        type: string
-      min_polarity_consistency_fraction:
-        description: "Optional gate: minimum event polarity consistency fraction"
-        required: false
-        default: ""
-        type: string
-      disable_event_polarity:
-        description: "Ignore event polarity in refinement"
-        required: true
-        default: false
-        type: boolean
       update_config_tracker:
         description: "Register tracker_name in EventVOT_eval_toolkit/utils/config_tracker.m"
         required: true
@@ -624,6 +609,8 @@ jobs:
       - name: Run validation-only DVS-ENACT sweep
         if: ${{ inputs.mode == 'validation_sweep' || inputs.mode == 'full' }}
         shell: bash
+        env:
+          EXTRA_ACCEPTANCE_ARGS: ${{ inputs.extra_acceptance_args }}
         run: |
           set -euo pipefail
           SWEEP_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/validation"
@@ -647,20 +634,10 @@ jobs:
           if [[ "${{ inputs.max_configs }}" != "" && "${{ inputs.max_configs }}" != "0" ]]; then
             args+=(--max-configs "${{ inputs.max_configs }}")
           fi
-          append_optional_arg() {
-            local name="$1"
-            local value="$2"
-            if [[ -n "$value" ]]; then
-              args+=("$name" "$value")
-            fi
-          }
-          append_optional_arg --min-raw-candidate-iou "${{ inputs.min_raw_candidate_iou }}"
-          append_optional_arg --min-active-fraction "${{ inputs.min_active_fraction }}"
-          append_optional_arg --min-polarity-consistency-fraction "${{ inputs.min_polarity_consistency_fraction }}"
-          if [[ "${{ inputs.disable_event_polarity }}" == "true" ]]; then
-            args+=(--disable-event-polarity)
+          if [[ -n "$EXTRA_ACCEPTANCE_ARGS" ]]; then
+            read -r -a extra_acceptance_args <<< "$EXTRA_ACCEPTANCE_ARGS"
+            args+=("${extra_acceptance_args[@]}")
           fi
-
           python scripts/run_eventvot_validation_sweep.py "${args[@]}"
 
       - name: Select best validation config
@@ -761,6 +738,7 @@ jobs:
         shell: bash
         env:
           TRACKER_NAME: ${{ inputs.tracker_name }}
+          EXTRA_ACCEPTANCE_ARGS: ${{ inputs.extra_acceptance_args }}
         run: |
           set -euo pipefail
           TEST_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/test"
@@ -792,9 +770,7 @@ jobs:
               "min_accept_mean_activity": "${{ inputs.min_accept_mean_activity }}",
               "min_accept_candidate_iou": "${{ inputs.min_accept_candidate_iou }}",
               "max_accept_area_ratio": "${{ inputs.max_accept_area_ratio }}",
-              "min_raw_candidate_iou": "${{ inputs.min_raw_candidate_iou }}",
-              "min_active_fraction": "${{ inputs.min_active_fraction }}",
-              "min_polarity_consistency_fraction": "${{ inputs.min_polarity_consistency_fraction }}",
+              "extra_acceptance_args": os.environ.get("EXTRA_ACCEPTANCE_ARGS", ""),
           }
           out = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"] / "test" / "locked_test_config.json"
           out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -821,18 +797,9 @@ jobs:
             --min-accept-candidate-iou "${{ inputs.min_accept_candidate_iou }}"
             --max-accept-area-ratio "${{ inputs.max_accept_area_ratio }}"
           )
-          append_optional_arg() {
-            local name="$1"
-            local value="$2"
-            if [[ -n "$value" ]]; then
-              args+=("$name" "$value")
-            fi
-          }
-          append_optional_arg --min-raw-candidate-iou "${{ inputs.min_raw_candidate_iou }}"
-          append_optional_arg --min-active-fraction "${{ inputs.min_active_fraction }}"
-          append_optional_arg --min-polarity-consistency-fraction "${{ inputs.min_polarity_consistency_fraction }}"
-          if [[ "${{ inputs.disable_event_polarity }}" == "true" ]]; then
-            args+=(--disable-event-polarity)
+          if [[ -n "$EXTRA_ACCEPTANCE_ARGS" ]]; then
+            read -r -a extra_acceptance_args <<< "$EXTRA_ACCEPTANCE_ARGS"
+            args+=("${extra_acceptance_args[@]}")
           fi
           if [[ "${{ inputs.update_config_tracker }}" == "true" ]]; then
             args+=(--update-config-tracker)
