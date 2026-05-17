@@ -2,10 +2,10 @@
 
 This script is a small compatibility wrapper around ``run_eventvot_refinement``.
 It intentionally avoids duplicating EventVOT parsing/evaluation code.  The main
-use case is a conservative ``center-only`` mode: DVS-ENACT may correct the box
-center, while the external tracker's width and height are retained.  This is a
-low-risk refinement mode for strong trackers such as HDETrackV2, where noisy
-scale changes can hurt SR even when the event contour update is locally useful.
+use cases are conservative projection modes for strong trackers such as
+HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
+the external tracker's size, and ``size-only`` lets DVS-ENACT correct the box
+size while retaining the external tracker's center.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 
 import run_eventvot_refinement as base
 
-REFINEMENT_MODES = ("box", "center-only")
+REFINEMENT_MODES = ("box", "center-only", "size-only")
 
 
 class ProjectedOutputRefiner:
@@ -33,11 +33,37 @@ class ProjectedOutputRefiner:
     projected output rather than the raw full-box contour update.
     """
 
-    def __init__(self, refiner: DVSContourRefiner, *, refinement_mode: str):
+    def __init__(
+        self,
+        refiner: DVSContourRefiner,
+        *,
+        refinement_mode: str,
+        projection_width_blend: float | None = None,
+        projection_height_blend: float | None = None,
+        projection_no_clip: bool = False,
+        projection_min_raw_width_ratio: float | None = None,
+        projection_max_raw_width_ratio: float | None = None,
+        projection_min_raw_height_ratio: float | None = None,
+        projection_max_raw_height_ratio: float | None = None,
+    ):
         validate_refinement_mode(refinement_mode)
+        validate_projection_blends(projection_width_blend, projection_height_blend)
+        validate_projection_ratio_gates(
+            projection_min_raw_width_ratio,
+            projection_max_raw_width_ratio,
+            projection_min_raw_height_ratio,
+            projection_max_raw_height_ratio,
+        )
         self.refiner = refiner
         self.config = refiner.config
         self.refinement_mode = refinement_mode
+        self.projection_width_blend = projection_width_blend
+        self.projection_height_blend = projection_height_blend
+        self.projection_no_clip = projection_no_clip
+        self.projection_min_raw_width_ratio = projection_min_raw_width_ratio
+        self.projection_max_raw_width_ratio = projection_max_raw_width_ratio
+        self.projection_min_raw_height_ratio = projection_min_raw_height_ratio
+        self.projection_max_raw_height_ratio = projection_max_raw_height_ratio
 
     def refine(self, candidate_bbox: Any, events: Any, **kwargs: Any) -> DVSRefinementResult:
         result = self.refiner.refine(candidate_bbox, events, **kwargs)
@@ -46,12 +72,36 @@ class ProjectedOutputRefiner:
 
         candidate_xywh = bbox_dict_to_xywh(result.candidate_bbox)
         refiner_xywh = np.asarray(result.as_xywh(), dtype=float)
-        projected_xywh = project_refinement_output(
+        raw_refined_xywh = bbox_dict_to_xywh(result.refined_bbox)
+        unclipped_projected_xywh = project_refinement_output(
             candidate_xywh,
             refiner_xywh,
             refinement_mode=self.refinement_mode,
+            raw_refined_xywh=raw_refined_xywh,
+            projection_width_blend=self.projection_width_blend,
+            projection_height_blend=self.projection_height_blend,
+        )
+        projected_xywh = clip_xywh_box(
+            unclipped_projected_xywh,
             image_width=self.config.image_width,
             image_height=self.config.image_height,
+        )
+        projection_rejections = projection_rejection_reasons(
+            candidate_xywh,
+            raw_refined_xywh,
+            unclipped_projected_xywh,
+            image_width=self.config.image_width,
+            image_height=self.config.image_height,
+            projection_no_clip=self.projection_no_clip,
+            projection_min_raw_width_ratio=self.projection_min_raw_width_ratio,
+            projection_max_raw_width_ratio=self.projection_max_raw_width_ratio,
+            projection_min_raw_height_ratio=self.projection_min_raw_height_ratio,
+            projection_max_raw_height_ratio=self.projection_max_raw_height_ratio,
+        )
+        fallback_reason = (
+            None
+            if not projection_rejections
+            else f"projection:{','.join(projection_rejections)}"
         )
         return replace(
             result,
@@ -59,6 +109,7 @@ class ProjectedOutputRefiner:
                 projected_xywh,
                 bbox_format=self.config.output_bbox_format,
             ),
+            fallback_reason=fallback_reason,
         )
 
 
@@ -76,9 +127,38 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Output projection mode. 'box' preserves the current full-box "
             "DVS-ENACT update. 'center-only' keeps the base-track width/height "
-            "and transfers only the DVS-ENACT center correction."
+            "and transfers only the DVS-ENACT center correction. 'size-only' "
+            "keeps the base-track center and transfers only the DVS-ENACT "
+            "width/height correction."
         ),
     )
+    parser.add_argument(
+        "--projection-width-blend",
+        type=float,
+        help=(
+            "Optional width blend for size-only mode. When supplied together "
+            "with --projection-height-blend, size-only projection blends from "
+            "the raw DVS-ENACT refined width instead of the already blended "
+            "--refinement-blend output."
+        ),
+    )
+    parser.add_argument(
+        "--projection-height-blend",
+        type=float,
+        help=(
+            "Optional height blend for size-only mode. Must be supplied "
+            "together with --projection-width-blend."
+        ),
+    )
+    parser.add_argument(
+        "--projection-no-clip",
+        action="store_true",
+        help="Reject projected refinement outputs that would be clipped by image bounds.",
+    )
+    parser.add_argument("--projection-min-raw-width-ratio", type=float)
+    parser.add_argument("--projection-max-raw-width-ratio", type=float)
+    parser.add_argument("--projection-min-raw-height-ratio", type=float)
+    parser.add_argument("--projection-max-raw-height-ratio", type=float)
     return parser
 
 
@@ -95,6 +175,13 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
     refiner = ProjectedOutputRefiner(
         base._refiner_from_args(args),
         refinement_mode=args.refinement_mode,
+        projection_width_blend=args.projection_width_blend,
+        projection_height_blend=args.projection_height_blend,
+        projection_no_clip=args.projection_no_clip,
+        projection_min_raw_width_ratio=args.projection_min_raw_width_ratio,
+        projection_max_raw_width_ratio=args.projection_max_raw_width_ratio,
+        projection_min_raw_height_ratio=args.projection_min_raw_height_ratio,
+        projection_max_raw_height_ratio=args.projection_max_raw_height_ratio,
     )
     sequence_names = base.load_requested_sequence_names(
         args.sequence,
@@ -126,17 +213,21 @@ def project_refinement_output(
     refiner_output_xywh: np.ndarray,
     *,
     refinement_mode: str,
+    raw_refined_xywh: np.ndarray | None = None,
+    projection_width_blend: float | None = None,
+    projection_height_blend: float | None = None,
     image_width: float | None = None,
     image_height: float | None = None,
 ) -> np.ndarray:
     """Return the candidate replacement box for the selected refinement mode."""
     validate_refinement_mode(refinement_mode)
+    validate_projection_blends(projection_width_blend, projection_height_blend)
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
     refined = np.asarray(refiner_output_xywh, dtype=float).reshape(4)
 
     if refinement_mode == "box":
         output = np.array(refined, dtype=float, copy=True)
-    else:
+    elif refinement_mode == "center-only":
         refined_center = refined[:2] + 0.5 * refined[2:]
         output = np.array(
             [
@@ -144,6 +235,30 @@ def project_refinement_output(
                 refined_center[1] - 0.5 * candidate[3],
                 candidate[2],
                 candidate[3],
+            ],
+            dtype=float,
+        )
+    else:
+        candidate_center = candidate[:2] + 0.5 * candidate[2:]
+        if projection_width_blend is not None and projection_height_blend is not None:
+            if raw_refined_xywh is None:
+                raise ValueError(
+                    "raw_refined_xywh is required when projection blends are supplied"
+                )
+            raw_refined = np.asarray(raw_refined_xywh, dtype=float).reshape(4)
+            width = (1.0 - projection_width_blend) * candidate[2]
+            width += projection_width_blend * raw_refined[2]
+            height = (1.0 - projection_height_blend) * candidate[3]
+            height += projection_height_blend * raw_refined[3]
+            projected_size = np.array([width, height], dtype=float)
+        else:
+            projected_size = refined[2:]
+        output = np.array(
+            [
+                candidate_center[0] - 0.5 * projected_size[0],
+                candidate_center[1] - 0.5 * projected_size[1],
+                projected_size[0],
+                projected_size[1],
             ],
             dtype=float,
         )
@@ -181,6 +296,83 @@ def clip_xywh_box(
         ],
         dtype=float,
     )
+
+
+def projection_rejection_reasons(
+    candidate_xywh: np.ndarray,
+    raw_refined_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    image_width: float | None = None,
+    image_height: float | None = None,
+    projection_no_clip: bool = False,
+    projection_min_raw_width_ratio: float | None = None,
+    projection_max_raw_width_ratio: float | None = None,
+    projection_min_raw_height_ratio: float | None = None,
+    projection_max_raw_height_ratio: float | None = None,
+) -> tuple[str, ...]:
+    """Return projection-policy rejection reasons for a candidate output."""
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    raw_refined = np.asarray(raw_refined_xywh, dtype=float).reshape(4)
+    projected = np.asarray(projected_xywh, dtype=float).reshape(4)
+    reasons: list[str] = []
+
+    if projection_no_clip and image_width is not None and image_height is not None:
+        if (
+            projected[0] < 0.0
+            or projected[1] < 0.0
+            or projected[0] + projected[2] > float(image_width)
+            or projected[1] + projected[3] > float(image_height)
+        ):
+            reasons.append("projection_clip")
+
+    raw_width_ratio = raw_refined[2] / max(candidate[2], 1e-9)
+    raw_height_ratio = raw_refined[3] / max(candidate[3], 1e-9)
+    _append_projection_min_ratio(
+        reasons,
+        "projection_raw_width_ratio",
+        raw_width_ratio,
+        projection_min_raw_width_ratio,
+    )
+    _append_projection_max_ratio(
+        reasons,
+        "projection_raw_width_ratio",
+        raw_width_ratio,
+        projection_max_raw_width_ratio,
+    )
+    _append_projection_min_ratio(
+        reasons,
+        "projection_raw_height_ratio",
+        raw_height_ratio,
+        projection_min_raw_height_ratio,
+    )
+    _append_projection_max_ratio(
+        reasons,
+        "projection_raw_height_ratio",
+        raw_height_ratio,
+        projection_max_raw_height_ratio,
+    )
+    return tuple(reasons)
+
+
+def _append_projection_min_ratio(
+    reasons: list[str],
+    name: str,
+    value: float,
+    minimum: float | None,
+) -> None:
+    if minimum is not None and value < minimum:
+        reasons.append(name)
+
+
+def _append_projection_max_ratio(
+    reasons: list[str],
+    name: str,
+    value: float,
+    maximum: float | None,
+) -> None:
+    if maximum is not None and value > maximum:
+        reasons.append(name)
 
 
 def bbox_dict_to_xywh(bbox: dict[str, float]) -> np.ndarray:
@@ -222,6 +414,57 @@ def validate_refinement_mode(refinement_mode: str) -> None:
             f"Unsupported refinement mode {refinement_mode!r}; "
             f"expected one of {', '.join(REFINEMENT_MODES)}"
         )
+
+
+def validate_projection_blends(
+    projection_width_blend: float | None,
+    projection_height_blend: float | None,
+) -> None:
+    """Raise ValueError for unsupported independent size projection blends."""
+    if (projection_width_blend is None) != (projection_height_blend is None):
+        raise ValueError(
+            "--projection-width-blend and --projection-height-blend must be supplied together"
+        )
+    for name, value in (
+        ("projection_width_blend", projection_width_blend),
+        ("projection_height_blend", projection_height_blend),
+    ):
+        if value is None:
+            continue
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be between 0 and 1")
+
+
+def validate_projection_ratio_gates(
+    projection_min_raw_width_ratio: float | None,
+    projection_max_raw_width_ratio: float | None,
+    projection_min_raw_height_ratio: float | None,
+    projection_max_raw_height_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid raw-size projection ratio gates."""
+    pairs = (
+        (
+            "projection_min_raw_width_ratio",
+            projection_min_raw_width_ratio,
+            "projection_max_raw_width_ratio",
+            projection_max_raw_width_ratio,
+        ),
+        (
+            "projection_min_raw_height_ratio",
+            projection_min_raw_height_ratio,
+            "projection_max_raw_height_ratio",
+            projection_max_raw_height_ratio,
+        ),
+    )
+    for min_name, min_value, max_name, max_value in pairs:
+        for name, value in ((min_name, min_value), (max_name, max_value)):
+            if value is None:
+                continue
+            if float(value) < 0.0:
+                raise ValueError(f"{name} must be non-negative")
+        if min_value is not None and max_value is not None:
+            if float(min_value) > float(max_value):
+                raise ValueError(f"{min_name} must not exceed {max_name}")
 
 
 if __name__ == "__main__":
