@@ -49,6 +49,14 @@ ACCEPTANCE_GRID_KEYS = (
     "min_accept_area_ratio",
     "max_accept_area_ratio",
     "max_accept_center_shift_ratio",
+    "min_raw_candidate_iou",
+    "min_raw_candidate_area_ratio",
+    "max_raw_candidate_area_ratio",
+    "max_raw_center_shift_ratio",
+    "min_polarity_consistency_fraction",
+    "min_mean_event_polarity_weight",
+    "max_quadratic_form_per_active_measurement",
+    "min_active_fraction",
 )
 INT_GRID_KEYS = {
     "max_events",
@@ -189,6 +197,54 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
             "Acceptance sweep values for the maximum center shift normalized "
             "by the base-box diagonal."
         ),
+    )
+    parser.add_argument(
+        "--min-raw-candidate-iou",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum raw/base IoU.",
+    )
+    parser.add_argument(
+        "--min-raw-candidate-area-ratio",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum raw/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-raw-candidate-area-ratio",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for maximum raw/base area ratio.",
+    )
+    parser.add_argument(
+        "--max-raw-center-shift-ratio",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for maximum raw/base center shift ratio.",
+    )
+    parser.add_argument(
+        "--min-polarity-consistency-fraction",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum polarity consistency.",
+    )
+    parser.add_argument(
+        "--min-mean-event-polarity-weight",
+        nargs="+",
+        default=("-inf",),
+        help="Acceptance sweep values for minimum mean event polarity weight.",
+    )
+    parser.add_argument(
+        "--max-quadratic-form-per-active-measurement",
+        nargs="+",
+        default=("inf",),
+        help="Acceptance sweep values for max quadratic-form-per-active-measurement.",
+    )
+    parser.add_argument(
+        "--min-active-fraction",
+        nargs="+",
+        default=("0.0",),
+        help="Acceptance sweep values for minimum active fraction.",
     )
 
 
@@ -331,6 +387,46 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             cast=float,
             argument_name="--max-accept-center-shift-ratio",
         ),
+        "min_raw_candidate_iou": parse_sweep_values(
+            args.min_raw_candidate_iou,
+            cast=float,
+            argument_name="--min-raw-candidate-iou",
+        ),
+        "min_raw_candidate_area_ratio": parse_sweep_values(
+            args.min_raw_candidate_area_ratio,
+            cast=float,
+            argument_name="--min-raw-candidate-area-ratio",
+        ),
+        "max_raw_candidate_area_ratio": parse_sweep_values(
+            args.max_raw_candidate_area_ratio,
+            cast=float,
+            argument_name="--max-raw-candidate-area-ratio",
+        ),
+        "max_raw_center_shift_ratio": parse_sweep_values(
+            args.max_raw_center_shift_ratio,
+            cast=float,
+            argument_name="--max-raw-center-shift-ratio",
+        ),
+        "min_polarity_consistency_fraction": parse_sweep_values(
+            args.min_polarity_consistency_fraction,
+            cast=float,
+            argument_name="--min-polarity-consistency-fraction",
+        ),
+        "min_mean_event_polarity_weight": parse_sweep_values(
+            args.min_mean_event_polarity_weight,
+            cast=float,
+            argument_name="--min-mean-event-polarity-weight",
+        ),
+        "max_quadratic_form_per_active_measurement": parse_sweep_values(
+            args.max_quadratic_form_per_active_measurement,
+            cast=float,
+            argument_name="--max-quadratic-form-per-active-measurement",
+        ),
+        "min_active_fraction": parse_sweep_values(
+            args.min_active_fraction,
+            cast=float,
+            argument_name="--min-active-fraction",
+        ),
     }
 
 
@@ -396,6 +492,20 @@ def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcc
         min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
         max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
         max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
+        min_raw_candidate_iou=float(config.get("min_raw_candidate_iou", 0.0)),
+        min_raw_candidate_area_ratio=float(config.get("min_raw_candidate_area_ratio", 0.0)),
+        max_raw_candidate_area_ratio=float(config.get("max_raw_candidate_area_ratio", float("inf"))),
+        max_raw_center_shift_ratio=float(config.get("max_raw_center_shift_ratio", float("inf"))),
+        min_polarity_consistency_fraction=float(
+            config.get("min_polarity_consistency_fraction", 0.0)
+        ),
+        min_mean_event_polarity_weight=float(
+            config.get("min_mean_event_polarity_weight", float("-inf"))
+        ),
+        max_quadratic_form_per_active_measurement=float(
+            config.get("max_quadratic_form_per_active_measurement", float("inf"))
+        ),
+        min_active_fraction=float(config.get("min_active_fraction", 0.0)),
     )
 
 

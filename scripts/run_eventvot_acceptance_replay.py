@@ -17,8 +17,10 @@ import json
 import math
 import sys
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
+from functools import partial
+from operator import gt, lt
 from pathlib import Path
 from typing import Any
 
@@ -612,12 +614,13 @@ def _append_min_count_gate(
         reasons.append(reason)
 
 
-def _append_min_float_gate(
+def _append_float_gate(
     reasons: list[str],
     reason: str,
     value: Any,
     threshold: float | None,
     *,
+    is_rejected: Callable[[float, float], bool],
     missing_reason: str | None = None,
 ) -> None:
     if threshold is None:
@@ -625,25 +628,12 @@ def _append_min_float_gate(
     numeric = _optional_float(value)
     if numeric is None:
         reasons.append(missing_reason or reason)
-    elif numeric < float(threshold):
+    elif is_rejected(numeric, float(threshold)):
         reasons.append(reason)
 
 
-def _append_max_float_gate(
-    reasons: list[str],
-    reason: str,
-    value: Any,
-    threshold: float | None,
-    *,
-    missing_reason: str | None = None,
-) -> None:
-    if threshold is None:
-        return
-    numeric = _optional_float(value)
-    if numeric is None:
-        reasons.append(missing_reason or reason)
-    elif numeric > float(threshold):
-        reasons.append(reason)
+_append_min_float_gate = partial(_append_float_gate, is_rejected=lt)
+_append_max_float_gate = partial(_append_float_gate, is_rejected=gt)
 
 
 def _optional_int(value: Any) -> int | None:
