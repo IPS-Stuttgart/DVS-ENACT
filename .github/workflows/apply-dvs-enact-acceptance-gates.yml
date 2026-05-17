@@ -1,0 +1,57 @@
+name: Apply DVS-ENACT acceptance gate patch
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - patches/dvs_enact_acceptance_gates.patch
+      - .github/workflows/apply-dvs-enact-acceptance-gates.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    name: Apply acceptance gate patch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Apply patch and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_file="patches/dvs_enact_acceptance_gates.patch"
+          if [[ ! -f "$patch_file" ]]; then
+            echo "Patch file is absent; nothing to apply."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+
+          rm -f "$patch_file"
+          rmdir patches 2>/dev/null || true
+          rm -f .github/workflows/apply-dvs-enact-acceptance-gates.yml
+
+          python -m compileall \
+            scripts/run_eventvot_refinement.py \
+            scripts/run_eventvot_validation_sweep.py \
+            tests/test_eventvot_refinement.py
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Tune EventVOT refinement acceptance gates"
+          git push
