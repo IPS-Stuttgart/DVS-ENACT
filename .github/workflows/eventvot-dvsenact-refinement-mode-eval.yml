@@ -1,0 +1,372 @@
+name: EventVOT DVS-ENACT refinement-mode evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: "EventVOT split to refine"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - val
+          - test
+      eventvot_root:
+        description: "EventVOT dataset root on the self-hosted runner"
+        required: true
+        default: "$HOME/.cache/datasets/EventVOT"
+        type: string
+      base_results:
+        description: "Base tracker result directory or single result file"
+        required: true
+        default: "$HOME/.cache/datasets/HDETrackV2_raw_results/Ours_tracking_result"
+        type: string
+      eventvot_toolkit_root:
+        description: "EventVOT_eval_toolkit root. Used for test/report runs; ignored for val."
+        required: false
+        default: "$HOME/.cache/datasets/EventVOT_Benchmark/EventVOT_eval_toolkit"
+        type: string
+      base_tracker_name:
+        description: "Display name for the unrefined base tracker in reports"
+        required: true
+        default: "HDETrackV2"
+        type: string
+      tracker_name:
+        description: "Official tracker name for refined outputs"
+        required: true
+        default: "HDETrackV2_DVSENACT_CENTERONLY"
+        type: string
+      refinement_mode:
+        description: "Projected output mode"
+        required: true
+        default: "center-only"
+        type: choice
+        options:
+          - box
+          - center-only
+      event_column_order:
+        description: "Raw EventVOT event CSV column order"
+        required: true
+        default: "xypt"
+        type: choice
+        options:
+          - auto
+          - xypt
+          - txyp
+          - xytp
+          - yxpt
+          - yxpt5
+          - yxt
+      refiner_args:
+        description: "Refiner CLI args parsed with shlex"
+        required: false
+        default: "--refinement-blend 0.1 --search-expansion-factor 1.1 --max-events 64 --min-events 3 --event-activity-floor 0.0 --inactive-activity-threshold 0.1 --measurement-noise-variance 1.0"
+        type: string
+      extra_cli_args:
+        description: "Extra CLI args parsed with shlex, e.g. acceptance/raw gates or --disable-event-polarity"
+        required: false
+        default: "--no-skip-existing --min-accept-used-events 20 --min-accept-active-measurements 5 --min-accept-mean-activity 0.30 --min-accept-candidate-iou 0.85 --min-accept-area-ratio 0.50 --max-accept-area-ratio 1.25 --max-accept-center-shift-ratio 0.25"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eventvot-refinement-mode-${{ github.ref }}-${{ inputs.tracker_name }}-${{ inputs.refinement_mode }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONUNBUFFERED: "1"
+  OUTPUT_ROOT: eventvot-refinement-mode-output
+
+jobs:
+  eventvot-refinement-mode:
+    name: EventVOT refinement-mode evaluation
+    runs-on: [self-hosted, Linux, dvs-enact]
+    timeout-minutes: 1430
+
+    steps:
+      - name: Check out DVS-ENACT
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install --upgrade --force-reinstall --no-deps \
+            "pyrecest @ git+https://github.com/FlorianPfaff/PyRecEst.git@main"
+
+      - name: Resolve paths
+        shell: bash
+        env:
+          EVENTVOT_ROOT_INPUT: ${{ inputs.eventvot_root }}
+          BASE_RESULTS_INPUT: ${{ inputs.base_results }}
+          EVENTVOT_TOOLKIT_ROOT_INPUT: ${{ inputs.eventvot_toolkit_root }}
+        run: |
+          set -euo pipefail
+
+          resolve_path() {
+            local value="${1:-}"
+            local home_prefix=\$HOME/
+            local tilde_prefix=\~/
+
+            case "$value" in
+              "$home_prefix"*)
+                echo "${HOME}/${value#"${home_prefix}"}"
+                ;;
+              "$tilde_prefix"*)
+                echo "${HOME}/${value#"${tilde_prefix}"}"
+                ;;
+              /*)
+                echo "$value"
+                ;;
+              "")
+                echo ""
+                ;;
+              *)
+                echo "$GITHUB_WORKSPACE/$value"
+                ;;
+            esac
+          }
+
+          EVENTVOT_ROOT_RESOLVED="$(resolve_path "$EVENTVOT_ROOT_INPUT")"
+          BASE_RESULTS_RESOLVED="$(resolve_path "$BASE_RESULTS_INPUT")"
+          EVENTVOT_TOOLKIT_ROOT_RESOLVED="$(resolve_path "$EVENTVOT_TOOLKIT_ROOT_INPUT")"
+
+          {
+            echo "EVENTVOT_ROOT_RESOLVED=$EVENTVOT_ROOT_RESOLVED"
+            echo "BASE_RESULTS_RESOLVED=$BASE_RESULTS_RESOLVED"
+            echo "EVENTVOT_TOOLKIT_ROOT_RESOLVED=$EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+          } >> "$GITHUB_ENV"
+
+          echo "Resolved EventVOT root: $EVENTVOT_ROOT_RESOLVED"
+          echo "Resolved base results: $BASE_RESULTS_RESOLVED"
+          echo "Resolved EventVOT toolkit root: $EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -e "$EVENTVOT_ROOT_RESOLVED" ]]; then
+            echo "::error::eventvot_root does not exist on this runner: $EVENTVOT_ROOT_RESOLVED"
+            exit 1
+          fi
+          if [[ ! -e "$BASE_RESULTS_RESOLVED" ]]; then
+            echo "::error::base_results does not exist on this runner: $BASE_RESULTS_RESOLVED"
+            exit 1
+          fi
+          if [[ "${{ inputs.split }}" == "test" && -n "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" && ! -d "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+            echo "::error::eventvot_toolkit_root does not exist on this runner: $EVENTVOT_TOOLKIT_ROOT_RESOLVED"
+            exit 1
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/${OUTPUT_ROOT}"
+
+      - name: Run projected refinement
+        shell: bash
+        env:
+          SPLIT_INPUT: ${{ inputs.split }}
+          TRACKER_NAME: ${{ inputs.tracker_name }}
+          REFINEMENT_MODE: ${{ inputs.refinement_mode }}
+          EVENT_COLUMN_ORDER: ${{ inputs.event_column_order }}
+          REFINER_ARGS: ${{ inputs.refiner_args }}
+          EXTRA_CLI_ARGS: ${{ inputs.extra_cli_args }}
+        run: |
+          set -euo pipefail
+
+          RUN_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}"
+          DIAGNOSTICS_JSON="$RUN_OUT/${TRACKER_NAME}_diagnostics.json"
+          RESULT_PARENT="$RUN_OUT/results"
+          mkdir -p "$RESULT_PARENT"
+
+          append_shlex_args() {
+            local source="$1"
+            local -n destination="$2"
+            if [[ -z "$source" ]]; then
+              return 0
+            fi
+            while IFS= read -r token; do
+              destination+=("$token")
+            done < <(
+              python - "$source" <<'PY'
+          import shlex
+          import sys
+
+          for token in shlex.split(sys.argv[1]):
+              print(token)
+          PY
+            )
+          }
+
+          args=(
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED"
+            --base-results "$BASE_RESULTS_RESOLVED"
+            --tracker-name "$TRACKER_NAME"
+            --split "$SPLIT_INPUT"
+            --event-column-order "$EVENT_COLUMN_ORDER"
+            --refinement-mode "$REFINEMENT_MODE"
+            --diagnostics-json "$DIAGNOSTICS_JSON"
+          )
+
+          if [[ "$SPLIT_INPUT" == "test" && -n "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+            args+=(--eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT_RESOLVED")
+            REFINED_RESULT_DIR="${EVENTVOT_TOOLKIT_ROOT_RESOLVED}/eventvot_tracking_results/${TRACKER_NAME}_tracking_result"
+          else
+            args+=(--output-results "$RESULT_PARENT")
+            REFINED_RESULT_DIR="${RESULT_PARENT}/${TRACKER_NAME}_tracking_result"
+          fi
+
+          append_shlex_args "$REFINER_ARGS" args
+          append_shlex_args "$EXTRA_CLI_ARGS" args
+
+          printf 'Running projected EventVOT refinement with args:\n'
+          printf '  %q\n' python scripts/run_eventvot_refinement_modes.py "${args[@]}"
+
+          python scripts/run_eventvot_refinement_modes.py "${args[@]}"
+
+          if [[ ! -d "$REFINED_RESULT_DIR" ]]; then
+            echo "::error::Expected refined result directory was not created: $REFINED_RESULT_DIR"
+            exit 1
+          fi
+
+          echo "REFINED_RESULT_DIR=$REFINED_RESULT_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$RUN_OUT/refined-results"
+          cp -a "$REFINED_RESULT_DIR"/. "$RUN_OUT/refined-results/"
+
+      - name: Generate test comparison report
+        if: ${{ inputs.split == 'test' }}
+        shell: bash
+        env:
+          BASE_TRACKER_NAME: ${{ inputs.base_tracker_name }}
+          REFINEMENT_MODE: ${{ inputs.refinement_mode }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" ]]; then
+            echo "::notice::Skipping comparison report because eventvot_toolkit_root is empty."
+            exit 0
+          fi
+
+          REPORT_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/report"
+          mkdir -p "$REPORT_OUT"
+
+          REFINED_TRACKER_NAME="${BASE_TRACKER_NAME} + DVS-ENACT (${REFINEMENT_MODE})"
+
+          python scripts/report_eventvot_comparisons.py \
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED" \
+            --eventvot-toolkit-root "$EVENTVOT_TOOLKIT_ROOT_RESOLVED" \
+            --output-root "$REPORT_OUT" \
+            --split test \
+            --tracker "${BASE_TRACKER_NAME}=${BASE_RESULTS_RESOLVED}" \
+            --tracker "${REFINED_TRACKER_NAME}=${REFINED_RESULT_DIR}" \
+            --pair "${BASE_TRACKER_NAME}=${REFINED_TRACKER_NAME}"
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        env:
+          TRACKER_NAME: ${{ inputs.tracker_name }}
+          REFINEMENT_MODE: ${{ inputs.refinement_mode }}
+          REFINER_ARGS: ${{ inputs.refiner_args }}
+          EXTRA_CLI_ARGS: ${{ inputs.extra_cli_args }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"]
+          diagnostics_path = root / f"{os.environ['TRACKER_NAME']}_diagnostics.json"
+          report_path = root / "report" / "eventvot_comparison_report.json"
+
+          lines = [
+              "# EventVOT DVS-ENACT refinement-mode evaluation",
+              "",
+              f"Refinement mode: `{os.environ['REFINEMENT_MODE']}`",
+              f"Refiner args: `{os.environ.get('REFINER_ARGS', '')}`",
+              f"Extra CLI args: `{os.environ.get('EXTRA_CLI_ARGS', '')}`",
+              "",
+          ]
+
+          if diagnostics_path.exists():
+              diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+              summary = diagnostics.get("summary", {})
+              lines.extend(
+                  [
+                      "## Refinement diagnostics",
+                      f"Sequences: `{summary.get('sequence_count')}`",
+                      f"Frames: `{summary.get('frame_count')}`",
+                      f"Accepted refinements: `{summary.get('accepted_refinement_count')}`",
+                      f"Refiner success frames: `{summary.get('refiner_success_frame_count')}`",
+                      f"Skipped existing outputs: `{summary.get('skipped_existing_output_count')}`",
+                      "",
+                  ]
+              )
+          else:
+              lines.extend(["No diagnostics JSON was generated.", ""])
+
+          if report_path.exists():
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              table = report.get("table", [])
+              if table:
+                  lines.extend(
+                      [
+                          "## Main table",
+                          "| Tracker | SR | PR | NPR | FPS |",
+                          "|---|---:|---:|---:|---:|",
+                      ]
+                  )
+                  for row in table:
+                      fps = row.get("fps")
+                      fps_text = "n/a" if fps is None else f"{float(fps):.1f}"
+                      lines.append(
+                          f"| {row['tracker']} | {float(row['sr']):.6f} | "
+                          f"{float(row['pr']):.6f} | {float(row['npr']):.6f} | {fps_text} |"
+                      )
+                  lines.append("")
+
+              gains = report.get("pairwise_gains", [])
+              if gains:
+                  lines.extend(
+                      [
+                          "## Pairwise gains",
+                          "| Base | Refined | ΔSR | ΔPR | ΔNPR | FPS ratio |",
+                          "|---|---|---:|---:|---:|---:|",
+                      ]
+                  )
+                  for row in gains:
+                      ratio = row.get("fps_ratio")
+                      ratio_text = "n/a" if ratio is None else f"{float(ratio):.4f}"
+                      lines.append(
+                          f"| {row['base_tracker']} | {row['refined_tracker']} | "
+                          f"{float(row['sr_delta']):+.6f} | "
+                          f"{float(row['pr_delta']):+.6f} | "
+                          f"{float(row['npr_delta']):+.6f} | {ratio_text} |"
+                      )
+                  lines.append("")
+
+          markdown = "\n".join(lines) + "\n"
+          summary_path = root / "refinement-mode-summary.md"
+          summary_path.write_text(markdown, encoding="utf-8")
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as handle:
+                  handle.write(markdown)
+          PY
+
+      - name: Upload refinement-mode artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: eventvot-refinement-mode-output
+          path: |
+            eventvot-refinement-mode-output
+          if-no-files-found: warn
+          retention-days: 30
