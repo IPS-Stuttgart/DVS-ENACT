@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 from collections import Counter, defaultdict
@@ -13,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from report_utils import write_csv
 from run_eventvot_refinement import (
     resolve_base_result_file,
     resolve_eventvot_split_root,
@@ -230,22 +230,6 @@ def make_correlation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             r_value, n = pearson([row.get(diagnostic) for row in rows], [row.get(target) for row in rows])
             result.append({"diagnostic": diagnostic, "target": target, "pearson_r": r_value, "sample_count": n})
     return sorted(result, key=lambda row: (-1 if row["pearson_r"] is None else -abs(float(row["pearson_r"])), row["diagnostic"], row["target"]))
-
-
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def write_sequence_md(path: Path, rows: list[dict[str, Any]], title: str, top_k: int) -> None:
