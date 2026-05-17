@@ -19,6 +19,8 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
+from functools import partial
+from operator import gt, lt
 from pathlib import Path
 from typing import Any
 
@@ -630,40 +632,8 @@ def _append_float_gate(
         reasons.append(reason)
 
 
-def _append_min_float_gate(
-    reasons: list[str],
-    reason: str,
-    value: Any,
-    threshold: float | None,
-    *,
-    missing_reason: str | None = None,
-) -> None:
-    _append_float_gate(
-        reasons,
-        reason,
-        value,
-        threshold,
-        is_rejected=lambda numeric, floor: numeric < floor,
-        missing_reason=missing_reason,
-    )
-
-
-def _append_max_float_gate(
-    reasons: list[str],
-    reason: str,
-    value: Any,
-    threshold: float | None,
-    *,
-    missing_reason: str | None = None,
-) -> None:
-    _append_float_gate(
-        reasons,
-        reason,
-        value,
-        threshold,
-        is_rejected=lambda numeric, ceiling: numeric > ceiling,
-        missing_reason=missing_reason,
-    )
+_append_min_float_gate = partial(_append_float_gate, is_rejected=lt)
+_append_max_float_gate = partial(_append_float_gate, is_rejected=gt)
 
 
 def _optional_int(value: Any) -> int | None:
