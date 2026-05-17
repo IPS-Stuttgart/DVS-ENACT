@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from report_utils import write_csv
 from run_eventvot_refinement import resolve_eventvot_split_root, resolve_sequence_names
 from run_eventvot_validation_sweep import (
     evaluate_eventvot_sequence,
@@ -526,17 +526,6 @@ def optional_ratio(first: float | None, second: float | None) -> float | None:
     if first is None or second is None or second <= 0.0:
         return None
     return float(first / second)
-
-
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def write_markdown_table(path: Path, rows: list[dict[str, Any]]) -> None:
