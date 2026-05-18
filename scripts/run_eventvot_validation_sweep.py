@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import re
@@ -64,6 +65,7 @@ INT_GRID_KEYS = {
     "min_accept_used_events",
     "min_accept_active_measurements",
 }
+CONFIG_ID_KEYS = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
 
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
@@ -829,8 +831,16 @@ def load_numeric_matrix(path: Path, *, min_columns: int) -> np.ndarray:
 
 
 def make_config_id(index: int, config: dict[str, float | int]) -> str:
+    """Return a stable, cache-safe identifier for a complete sweep config.
+
+    The readable tags intentionally summarize only the historically most useful
+    parameters. The hash prefix is computed from every refiner and acceptance
+    grid key, including gates that are not printed below, so changing any tuned
+    parameter changes the output directory name and diagnostics filename.
+    """
+    config_hash = make_config_hash(config)
     return (
-        f"cfg{index:04d}"
+        f"cfg{index:04d}_h{config_hash}"
         f"_rb{tag_number(config['refinement_blend'])}"
         f"_se{tag_number(config['search_expansion_factor'])}"
         f"_mx{int(config['max_events'])}"
@@ -846,6 +856,34 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
         f"_ax{tag_number(config['max_accept_area_ratio'])}"
         f"_cs{tag_number(config['max_accept_center_shift_ratio'])}"
     )
+
+
+def make_config_hash(config: dict[str, float | int]) -> str:
+    """Hash all sweep parameters that affect refinement or acceptance."""
+    payload = {
+        key: canonical_config_value(key, config[key])
+        for key in CONFIG_ID_KEYS
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def canonical_config_value(key: str, value: float | int) -> float | int | str:
+    if key in INT_GRID_KEYS:
+        return int(value)
+    numeric_value = float(value)
+    if np.isposinf(numeric_value):
+        return "inf"
+    if np.isneginf(numeric_value):
+        return "-inf"
+    if np.isnan(numeric_value):
+        raise ValueError(f"{key} cannot be NaN in a validation-sweep config")
+    return numeric_value
 
 
 def tag_number(value: float | int) -> str:
