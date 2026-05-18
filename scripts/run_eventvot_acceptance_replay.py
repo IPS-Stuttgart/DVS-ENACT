@@ -38,6 +38,7 @@ from run_eventvot_refinement import (  # noqa: E402
     resolve_base_result_file,
     resolve_eventvot_split_root,
     save_xywh_result_file,
+    motion_prediction_error_ratio_xywh,
     size_change_ratio_xywh,
 )
 from run_eventvot_refinement_modes import (  # noqa: E402
@@ -79,6 +80,7 @@ class ReplayAcceptanceConfig:
     min_active_fraction: float | None = None
     max_temporal_center_shift_ratio: float | None = None
     max_temporal_size_change_ratio: float | None = None
+    max_motion_prediction_error_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,7 @@ class ReplayAcceptanceDecision:
     raw_center_shift_ratio: float
     temporal_center_shift_ratio: float | None
     temporal_size_change_ratio: float | None
+    motion_prediction_error_ratio: float | None
     active_fraction: float | None
     quadratic_form_per_active_measurement: float | None
 
@@ -308,6 +311,7 @@ def _add_policy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-active-fraction", type=float)
     parser.add_argument("--max-temporal-center-shift-ratio", type=float)
     parser.add_argument("--max-temporal-size-change-ratio", type=float)
+    parser.add_argument("--max-motion-prediction-error-ratio", type=float)
 
 
 def options_from_args(args: argparse.Namespace) -> EventVOTAcceptanceReplayOptions:
@@ -638,6 +642,7 @@ def replay_sequence_boxes(
             output_projection,
             previous_projected_center=previous_accepted_projected_center,
             previous_projected_size=previous_accepted_projected_size,
+            previous_candidate_xywh=base_boxes[frame_index - 1],
             previous_output_xywh=replayed_boxes[frame_index - 1],
         )
         reason_key = "accepted" if decision.accepted else decision.rejection_reasons[0]
@@ -683,6 +688,7 @@ def evaluate_frame_acceptance(
     *,
     previous_projected_center: np.ndarray | None = None,
     previous_projected_size: np.ndarray | None = None,
+    previous_candidate_xywh: np.ndarray | None = None,
     previous_output_xywh: np.ndarray | None = None,
 ) -> ReplayAcceptanceDecision:
     """Evaluate one stored DVS-ENACT refinement under a replay policy."""
@@ -712,6 +718,16 @@ def evaluate_frame_acceptance(
     temporal_size_change_ratio = (
         size_change_ratio_xywh(previous_output_xywh, proposed)
         if previous_output_xywh is not None
+        else None
+    )
+    motion_prediction_error_ratio = (
+        motion_prediction_error_ratio_xywh(
+            previous_candidate_xywh,
+            candidate,
+            previous_output_xywh,
+            proposed,
+        )
+        if previous_candidate_xywh is not None and previous_output_xywh is not None
         else None
     )
 
@@ -843,6 +859,13 @@ def evaluate_frame_acceptance(
             config.max_temporal_size_change_ratio,
             missing_reason="temporal_size_change_ratio_missing",
         )
+        _append_max_float_gate(
+            rejection_reasons,
+            "motion_prediction_error_ratio",
+            motion_prediction_error_ratio,
+            config.max_motion_prediction_error_ratio,
+            missing_reason="motion_prediction_error_ratio_missing",
+        )
 
     return ReplayAcceptanceDecision(
         accepted=not rejection_reasons,
@@ -855,6 +878,7 @@ def evaluate_frame_acceptance(
         raw_center_shift_ratio=float(raw_center_shift_ratio),
         temporal_center_shift_ratio=temporal_center_shift_ratio,
         temporal_size_change_ratio=temporal_size_change_ratio,
+        motion_prediction_error_ratio=motion_prediction_error_ratio,
         active_fraction=active_fraction,
         quadratic_form_per_active_measurement=quadratic_per_active,
     )

@@ -46,6 +46,7 @@ class EventVOTAcceptanceConfig:
     min_active_fraction: float | None = None
     max_temporal_center_shift_ratio: float | None = None
     max_temporal_size_change_ratio: float | None = None
+    max_motion_prediction_error_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class EventVOTAcceptanceDecision:
     raw_center_shift_ratio: float
     temporal_center_shift_ratio: float | None
     temporal_size_change_ratio: float | None
+    motion_prediction_error_ratio: float | None
     active_fraction: float | None
     quadratic_form_per_active_measurement: float | None
 
@@ -450,6 +452,7 @@ def refine_sequence(
             "raw_center_shift_ratio": 0.0,
             "temporal_center_shift_ratio": None,
             "temporal_size_change_ratio": None,
+            "motion_prediction_error_ratio": None,
             "active_fraction": None,
             "quadratic_form_per_active_measurement": None,
         }
@@ -472,6 +475,7 @@ def refine_sequence(
             base_boxes[frame_index],
             result,
             acceptance_config,
+            previous_candidate_xywh=base_boxes[frame_index - 1],
             previous_output_xywh=refined_boxes[frame_index - 1],
         )
         observe_refinement_decision = getattr(
@@ -501,6 +505,9 @@ def refine_sequence(
                 "raw_center_shift_ratio": float(decision.raw_center_shift_ratio),
                 "temporal_center_shift_ratio": decision.temporal_center_shift_ratio,
                 "temporal_size_change_ratio": decision.temporal_size_change_ratio,
+                "motion_prediction_error_ratio": (
+                    decision.motion_prediction_error_ratio
+                ),
                 "active_fraction": decision.active_fraction,
                 "quadratic_form_per_active_measurement": (
                     decision.quadratic_form_per_active_measurement
@@ -707,6 +714,7 @@ def evaluate_refinement_acceptance(
     result: Any,
     config: EventVOTAcceptanceConfig | None = None,
     *,
+    previous_candidate_xywh: np.ndarray | None = None,
     previous_output_xywh: np.ndarray | None = None,
 ) -> EventVOTAcceptanceDecision:
     """Return whether a DVS-ENACT refinement should replace the base box."""
@@ -727,6 +735,16 @@ def evaluate_refinement_acceptance(
     temporal_size_change_ratio = (
         size_change_ratio_xywh(previous_output_xywh, refined_xywh)
         if previous_output_xywh is not None
+        else None
+    )
+    motion_prediction_error_ratio = (
+        motion_prediction_error_ratio_xywh(
+            previous_candidate_xywh,
+            candidate_xywh,
+            previous_output_xywh,
+            refined_xywh,
+        )
+        if previous_candidate_xywh is not None and previous_output_xywh is not None
         else None
     )
     active_fraction = _active_fraction(
@@ -750,6 +768,7 @@ def evaluate_refinement_acceptance(
             raw_center_shift_ratio=raw_center_shift_ratio,
             temporal_center_shift_ratio=temporal_center_shift_ratio,
             temporal_size_change_ratio=temporal_size_change_ratio,
+            motion_prediction_error_ratio=motion_prediction_error_ratio,
             active_fraction=active_fraction,
             quadratic_form_per_active_measurement=quadratic_form_per_active,
         )
@@ -839,6 +858,13 @@ def evaluate_refinement_acceptance(
         config.max_temporal_size_change_ratio,
         missing_reason="temporal_size_change_ratio_missing",
     )
+    _append_max_float_gate(
+        rejection_reasons,
+        "motion_prediction_error_ratio",
+        motion_prediction_error_ratio,
+        config.max_motion_prediction_error_ratio,
+        missing_reason="motion_prediction_error_ratio_missing",
+    )
 
     return EventVOTAcceptanceDecision(
         accepted=not rejection_reasons,
@@ -851,6 +877,7 @@ def evaluate_refinement_acceptance(
         raw_center_shift_ratio=raw_center_shift_ratio,
         temporal_center_shift_ratio=temporal_center_shift_ratio,
         temporal_size_change_ratio=temporal_size_change_ratio,
+        motion_prediction_error_ratio=motion_prediction_error_ratio,
         active_fraction=active_fraction,
         quadratic_form_per_active_measurement=quadratic_form_per_active,
     )
@@ -904,6 +931,28 @@ def size_change_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarray
         return math.inf
     relative_change = np.abs(proposed[2:] - reference[2:]) / reference[2:]
     return float(np.max(relative_change))
+
+
+def motion_prediction_error_ratio_xywh(
+    previous_candidate_xywh: np.ndarray,
+    candidate_xywh: np.ndarray,
+    previous_output_xywh: np.ndarray,
+    proposed_xywh: np.ndarray,
+) -> float:
+    """Return refined-center error relative to base-track predicted motion."""
+    previous_candidate = np.asarray(previous_candidate_xywh, dtype=float)
+    candidate = np.asarray(candidate_xywh, dtype=float)
+    previous_output = np.asarray(previous_output_xywh, dtype=float)
+    proposed = np.asarray(proposed_xywh, dtype=float)
+    candidate_diagonal = float(math.hypot(candidate[2], candidate[3]))
+    if candidate_diagonal <= 0.0:
+        return math.inf
+    previous_candidate_center = previous_candidate[:2] + 0.5 * previous_candidate[2:]
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    previous_output_center = previous_output[:2] + 0.5 * previous_output[2:]
+    proposed_center = proposed[:2] + 0.5 * proposed[2:]
+    predicted_center = previous_output_center + candidate_center - previous_candidate_center
+    return float(np.linalg.norm(proposed_center - predicted_center) / candidate_diagonal)
 
 
 def bbox_dict_to_xywh(bbox: dict[str, Any]) -> np.ndarray:
@@ -1439,6 +1488,7 @@ def add_acceptance_arguments(
     parser.add_argument("--min-active-fraction", type=float)
     parser.add_argument("--max-temporal-center-shift-ratio", type=float)
     parser.add_argument("--max-temporal-size-change-ratio", type=float)
+    parser.add_argument("--max-motion-prediction-error-ratio", type=float)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1482,6 +1532,7 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
         min_active_fraction=args.min_active_fraction,
         max_temporal_center_shift_ratio=args.max_temporal_center_shift_ratio,
         max_temporal_size_change_ratio=args.max_temporal_size_change_ratio,
+        max_motion_prediction_error_ratio=args.max_motion_prediction_error_ratio,
     )
 
 

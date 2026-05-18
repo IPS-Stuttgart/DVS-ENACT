@@ -402,6 +402,26 @@ def test_eventvot_acceptance_rejects_temporal_output_shocks():
     assert size_decision.temporal_size_change_ratio == 1.0
 
 
+def test_eventvot_acceptance_rejects_base_motion_inconsistent_update():
+    module = _load_module()
+
+    decision = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([40.0, 10.0, 20.0, 20.0]),
+        module.EventVOTAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=10.0,
+            max_motion_prediction_error_ratio=0.50,
+        ),
+        previous_candidate_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reasons == ("motion_prediction_error_ratio",)
+    assert decision.motion_prediction_error_ratio > 0.50
+
+
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
@@ -491,6 +511,7 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--min-active-fraction" in help_text
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
+    assert "--max-motion-prediction-error-ratio" in help_text
 
 
 class _FakeRefiner:

@@ -437,6 +437,40 @@ def test_acceptance_replay_temporal_gates_reject_output_shocks():
     assert size_decision.temporal_size_change_ratio == 1.0
 
 
+def test_acceptance_replay_motion_prediction_gate_rejects_inconsistent_update():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [40.0, 10.0, 20.0, 20.0],
+        "refined_bbox": {
+            "x_min": 40.0,
+            "y_min": 10.0,
+            "x_max": 60.0,
+            "y_max": 30.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    decision = module.evaluate_frame_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        frame,
+        module.ReplayAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=None,
+            max_motion_prediction_error_ratio=0.50,
+        ),
+        previous_candidate_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reasons == ("motion_prediction_error_ratio",)
+    assert decision.motion_prediction_error_ratio > 0.50
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -649,6 +683,7 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--max-quadratic-form-per-active-measurement" in help_text
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
+    assert "--max-motion-prediction-error-ratio" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text

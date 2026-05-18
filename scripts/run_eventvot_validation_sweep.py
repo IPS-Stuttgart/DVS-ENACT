@@ -87,6 +87,7 @@ ACCEPTANCE_GRID_KEYS = (
     "min_active_fraction",
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
+    "max_motion_prediction_error_ratio",
 )
 OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_raw_candidate_iou",
@@ -99,6 +100,7 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_active_fraction",
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
+    "max_motion_prediction_error_ratio",
 }
 STRING_GRID_KEYS = {"refinement_mode", "projection_confidence_field"}
 BOOL_GRID_KEYS = {"projection_no_clip"}
@@ -448,6 +450,15 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Acceptance sweep values for max frame-to-frame size change ratio; "
             "use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-motion-prediction-error-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for max error from previous output plus "
+            "base-tracker motion; use 'none' to disable."
         ),
     )
 
@@ -801,6 +812,12 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--max-temporal-size-change-ratio",
             allow_none=True,
         ),
+        "max_motion_prediction_error_ratio": parse_sweep_values(
+            args.max_motion_prediction_error_ratio,
+            cast=float,
+            argument_name="--max-motion-prediction-error-ratio",
+            allow_none=True,
+        ),
     }
 
 
@@ -1019,6 +1036,10 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
         max_temporal_size_change_ratio=optional_float_config_value(
             config,
             "max_temporal_size_change_ratio",
+        ),
+        max_motion_prediction_error_ratio=optional_float_config_value(
+            config,
+            "max_motion_prediction_error_ratio",
         ),
     )
 
