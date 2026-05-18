@@ -91,6 +91,7 @@ class ReplayOutputProjectionConfig:
     mode: str = "diagnostic"
     blend: float | None = None
     size_smoothing: float | None = None
+    center_deadband_ratio: float | None = None
     size_deadband_ratio: float | None = None
     confidence_field: str | None = None
     confidence_floor: float | None = None
@@ -201,6 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional per-axis size deadband relative to the base width/height. "
             "Replayed size changes smaller than this ratio are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--replay-output-center-deadband-ratio",
+        type=float,
+        help=(
+            "Optional center-shift deadband relative to the base-box diagonal. "
+            "Replayed center shifts smaller than this ratio are ignored."
         ),
     )
     parser.add_argument(
@@ -410,6 +419,7 @@ def output_projection_config_from_args(
         mode=args.replay_output_mode,
         blend=args.replay_output_blend,
         size_smoothing=args.replay_output_size_smoothing,
+        center_deadband_ratio=args.replay_output_center_deadband_ratio,
         size_deadband_ratio=args.replay_output_size_deadband_ratio,
         confidence_field=args.replay_output_confidence_field,
         confidence_floor=args.replay_output_confidence_floor,
@@ -436,6 +446,7 @@ def output_projection_config_from_diagnostics(
         mode=config.mode,
         blend=config.blend,
         size_smoothing=config.size_smoothing,
+        center_deadband_ratio=config.center_deadband_ratio,
         size_deadband_ratio=config.size_deadband_ratio,
         confidence_field=config.confidence_field,
         confidence_floor=config.confidence_floor,
@@ -475,6 +486,15 @@ def validate_output_projection_config(config: ReplayOutputProjectionConfig) -> N
         if float(config.size_deadband_ratio) < 0.0:
             raise ValueError(
                 "--replay-output-size-deadband-ratio must be non-negative"
+            )
+    if config.center_deadband_ratio is not None:
+        if config.mode == "diagnostic":
+            raise ValueError(
+                "--replay-output-center-deadband-ratio requires a projected output mode"
+            )
+        if float(config.center_deadband_ratio) < 0.0:
+            raise ValueError(
+                "--replay-output-center-deadband-ratio must be non-negative"
             )
     validate_projection_confidence_weighting(
         config.confidence_field,
@@ -776,6 +796,7 @@ def frame_projected_output_xywh(
         raw_refined_xywh=raw_refined,
         previous_projected_size=previous_projected_size,
         projection_size_smoothing=output_projection.size_smoothing,
+        projection_center_deadband_ratio=output_projection.center_deadband_ratio,
         projection_size_deadband_ratio=output_projection.size_deadband_ratio,
         projection_confidence_value=frame_projection_confidence_value(
             frame,

@@ -56,6 +56,7 @@ PROJECTION_GRID_KEYS = (
     "projection_height_blend",
     "projection_no_clip",
     "projection_size_smoothing",
+    "projection_center_deadband_ratio",
     "projection_size_deadband_ratio",
     "projection_confidence_field",
     "projection_confidence_floor",
@@ -98,6 +99,7 @@ OPTIONAL_FLOAT_GRID_KEYS = {
     "projection_width_blend",
     "projection_height_blend",
     "projection_size_smoothing",
+    "projection_center_deadband_ratio",
     "projection_size_deadband_ratio",
     "projection_confidence_floor",
     "projection_confidence_ceiling",
@@ -246,6 +248,15 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         default=("none",),
         help=(
             "Optional per-axis size deadband values relative to base width/height. "
+            "Use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-deadband-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional center-shift deadband values relative to base-box diagonal. "
             "Use 'none' to disable."
         ),
     )
@@ -526,6 +537,12 @@ def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--projection-size-deadband-ratio",
             allow_none=True,
         ),
+        "projection_center_deadband_ratio": parse_sweep_values(
+            args.projection_center_deadband_ratio,
+            cast=float,
+            argument_name="--projection-center-deadband-ratio",
+            allow_none=True,
+        ),
         "projection_confidence_field": parse_projection_confidence_field_values(
             args.projection_confidence_field
         ),
@@ -764,6 +781,9 @@ def validate_projection_config(config: dict[str, Any]) -> None:
     deadband = config["projection_size_deadband_ratio"]
     if deadband is not None and float(deadband) < 0.0:
         raise ValueError("projection_size_deadband_ratio must be non-negative")
+    center_deadband = config["projection_center_deadband_ratio"]
+    if center_deadband is not None and float(center_deadband) < 0.0:
+        raise ValueError("projection_center_deadband_ratio must be non-negative")
     confidence_floor = config["projection_confidence_floor"]
     confidence_ceiling = config["projection_confidence_ceiling"]
     if confidence_floor is not None and confidence_ceiling is not None:
@@ -828,6 +848,7 @@ def make_refiner(
     if (
         config["refinement_mode"] == "box"
         and config["projection_size_smoothing"] is None
+        and config["projection_center_deadband_ratio"] is None
         and config["projection_size_deadband_ratio"] is None
         and config["projection_confidence_field"] is None
     ):
@@ -839,6 +860,7 @@ def make_refiner(
         projection_height_blend=config["projection_height_blend"],
         projection_no_clip=bool(config["projection_no_clip"]),
         projection_size_smoothing=config["projection_size_smoothing"],
+        projection_center_deadband_ratio=config["projection_center_deadband_ratio"],
         projection_size_deadband_ratio=config["projection_size_deadband_ratio"],
         projection_confidence_field=config["projection_confidence_field"],
         projection_confidence_floor=config["projection_confidence_floor"],

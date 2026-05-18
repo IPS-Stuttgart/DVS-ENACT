@@ -156,6 +156,32 @@ def test_box_size_deadband_preserves_projected_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([21.0, 30.5, 100.0, 50.0]))
 
 
+def test_center_deadband_ignores_tiny_center_shift(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([12.0, 21.0, 100.0, 50.0]),
+        refinement_mode="box",
+        projection_center_deadband_ratio=0.03,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 20.0, 100.0, 50.0]))
+
+
+def test_center_deadband_keeps_projected_size(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([2.0, 16.0, 120.0, 60.0]),
+        refinement_mode="box",
+        projection_center_deadband_ratio=0.03,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 15.0, 120.0, 60.0]))
+
+
 def test_box_projection_smooths_size_around_projected_center(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -293,6 +319,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
+    assert "--projection-center-deadband-ratio" in help_text
     assert "--projection-size-deadband-ratio" in help_text
     assert "--projection-confidence-field" in help_text
     assert "--projection-min-raw-height-ratio" in help_text
