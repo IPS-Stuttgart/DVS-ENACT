@@ -418,6 +418,9 @@ def refine_sequence(
             )
 
     event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    reset_refiner_state = getattr(refiner, "reset_state", None)
+    if reset_refiner_state is not None:
+        reset_refiner_state()
 
     refined_boxes = np.array(base_boxes, dtype=float, copy=True)
     timings = np.zeros(frame_count, dtype=float)
@@ -464,6 +467,13 @@ def refine_sequence(
             result,
             acceptance_config,
         )
+        observe_refinement_decision = getattr(
+            refiner,
+            "observe_refinement_decision",
+            None,
+        )
+        if observe_refinement_decision is not None:
+            observe_refinement_decision(base_boxes[frame_index], result, decision.accepted)
         refined_boxes[frame_index] = (
             refiner_output
             if decision.accepted
