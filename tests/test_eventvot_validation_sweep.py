@@ -61,6 +61,29 @@ def _parse_sweep_args(module, tmp_path: Path, result_root: Path, *extra: str):
     )
 
 
+def _single_refiner_grid_args(module, tmp_path: Path, result_root: Path, *extra: str):
+    return _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        "--refinement-blend",
+        "0.1",
+        "--search-expansion-factor",
+        "1.1",
+        "--max-events",
+        "64",
+        "--min-events",
+        "3",
+        "--event-activity-floor",
+        "0.0",
+        "--inactive-activity-threshold",
+        "0.1",
+        "--measurement-noise-variance",
+        "1.0",
+        *extra,
+    )
+
+
 def test_eventvot_validation_metrics_match_perfect_boxes(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     split_root, result_root = _write_validation_fixture(tmp_path)
@@ -111,24 +134,10 @@ def test_validation_sweep_dry_run_uses_requested_grid(tmp_path, monkeypatch):
 def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)
-    args = _parse_sweep_args(
+    args = _single_refiner_grid_args(
         module,
         tmp_path,
         result_root,
-        "--refinement-blend",
-        "0.1",
-        "--search-expansion-factor",
-        "1.1",
-        "--max-events",
-        "64",
-        "--min-events",
-        "3",
-        "--event-activity-floor",
-        "0.0",
-        "--inactive-activity-threshold",
-        "0.1",
-        "--measurement-noise-variance",
-        "1.0",
         "--min-accept-used-events",
         "10,20",
         "--min-accept-candidate-iou",
@@ -149,36 +158,79 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
     assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
 
 
-def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeypatch):
+def test_validation_sweep_optional_gates_default_to_none(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _single_refiner_grid_args(module, tmp_path, result_root, "--dry-run")
+
+    grid = module.iter_parameter_grid(args)
+    acceptance = module.acceptance_config_from_config(grid[0])
+
+    assert len(grid) == 1
+    for key in module.OPTIONAL_ACCEPTANCE_GRID_KEYS:
+        assert grid[0][key] is None
+    assert acceptance.min_raw_candidate_iou is None
+    assert acceptance.min_raw_candidate_area_ratio is None
+    assert acceptance.max_raw_candidate_area_ratio is None
+    assert acceptance.max_raw_center_shift_ratio is None
+    assert acceptance.min_polarity_consistency_fraction is None
+    assert acceptance.min_mean_event_polarity_weight is None
+    assert acceptance.max_quadratic_form_per_active_measurement is None
+    assert acceptance.min_active_fraction is None
+
+
+def test_validation_sweep_optional_gates_can_be_enabled(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _single_refiner_grid_args(
+        module,
+        tmp_path,
+        result_root,
+        "--min-raw-candidate-iou",
+        "0.50",
+        "--min-polarity-consistency-fraction",
+        "0.25",
+        "--dry-run",
+    )
+
+    config = module.iter_parameter_grid(args)[0]
+    acceptance = module.acceptance_config_from_config(config)
+
+    assert config["min_raw_candidate_iou"] == 0.50
+    assert config["min_polarity_consistency_fraction"] == 0.25
+    assert acceptance.min_raw_candidate_iou == 0.50
+    assert acceptance.min_polarity_consistency_fraction == 0.25
+
+
+def test_validation_sweep_required_gate_rejects_none_token(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)
     args = _parse_sweep_args(
         module,
         tmp_path,
         result_root,
-        "--refinement-blend",
-        "0.1",
-        "--search-expansion-factor",
-        "1.1",
-        "--max-events",
-        "64",
-        "--min-events",
-        "3",
-        "--event-activity-floor",
-        "0.0",
-        "--inactive-activity-threshold",
-        "0.1",
-        "--measurement-noise-variance",
-        "1.0",
+        "--min-accept-used-events",
+        "none",
         "--dry-run",
     )
+
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        module.iter_parameter_grid(args)
+
+
+def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _single_refiner_grid_args(module, tmp_path, result_root, "--dry-run")
     config = module.iter_parameter_grid(args)[0]
     config_id = module.make_config_id(1, config)
 
     assert "_h" in config_id
     for key in module.CONFIG_ID_KEYS:
         changed_config = dict(config)
-        if key in module.INT_GRID_KEYS:
+        if changed_config[key] is None:
+            changed_config[key] = 0.125
+        elif key in module.INT_GRID_KEYS:
             changed_config[key] = int(changed_config[key]) + 1
         else:
             value = float(changed_config[key])
@@ -197,6 +249,14 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         "min_accept_area_ratio": 0.80,
         "max_accept_area_ratio": 1.10,
         "max_accept_center_shift_ratio": 0.05,
+        "min_raw_candidate_iou": 0.50,
+        "min_raw_candidate_area_ratio": 0.25,
+        "max_raw_candidate_area_ratio": 2.00,
+        "max_raw_center_shift_ratio": 0.40,
+        "min_polarity_consistency_fraction": 0.60,
+        "min_mean_event_polarity_weight": -0.25,
+        "max_quadratic_form_per_active_measurement": 8.0,
+        "min_active_fraction": 0.10,
     }
 
     acceptance = module.acceptance_config_from_config(config)
@@ -208,3 +268,11 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.min_candidate_area_ratio == 0.80
     assert acceptance.max_candidate_area_ratio == 1.10
     assert acceptance.max_center_shift_ratio == 0.05
+    assert acceptance.min_raw_candidate_iou == 0.50
+    assert acceptance.min_raw_candidate_area_ratio == 0.25
+    assert acceptance.max_raw_candidate_area_ratio == 2.00
+    assert acceptance.max_raw_center_shift_ratio == 0.40
+    assert acceptance.min_polarity_consistency_fraction == 0.60
+    assert acceptance.min_mean_event_polarity_weight == -0.25
+    assert acceptance.max_quadratic_form_per_active_measurement == 8.0
+    assert acceptance.min_active_fraction == 0.10
