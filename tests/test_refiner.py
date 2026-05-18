@@ -71,6 +71,28 @@ class TestDVSContourRefiner(unittest.TestCase):
         np.testing.assert_array_equal(selected.ts, np.array([0, 2]))
         np.testing.assert_array_equal(selected.x, np.array([10, 30]))
 
+    def test_normal_flow_event_selection_prefers_motion_active_sides(self):
+        events = EventBatch(
+            ts=np.array([0, 1, 2, 3], dtype=np.int64),
+            x=np.array([20, 20, 10, 30], dtype=np.int32),
+            y=np.array([10, 30, 20, 20], dtype=np.int32),
+            p=np.array([1, 1, 1, 1], dtype=np.int8),
+        )
+
+        selected = refiner_select_refinement_events(
+            events,
+            (10.0, 10.0, 30.0, 30.0),
+            2,
+            mode="normal_flow",
+            angular_bins=1,
+            event_velocity=np.array([1.0, 0.0]),
+            use_event_polarity=False,
+        )
+
+        self.assertEqual(selected.count, 2)
+        np.testing.assert_array_equal(selected.ts, np.array([2, 3]))
+        np.testing.assert_array_equal(selected.x, np.array([10, 30]))
+
     def test_boundary_distance_handles_inside_and_outside_events(self):
         events = EventBatch(
             ts=np.array([0, 1, 2], dtype=np.int64),
