@@ -4,6 +4,7 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
@@ -155,6 +156,83 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
     assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
 
 
+def test_validation_sweep_optional_acceptance_defaults_disable_gates(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
+        "--dry-run",
+    )
+
+    config = module.iter_parameter_grid(args)[0]
+    acceptance = module.acceptance_config_from_config(config)
+
+    assert config["min_raw_candidate_iou"] is None
+    assert config["min_raw_candidate_area_ratio"] is None
+    assert config["max_raw_candidate_area_ratio"] is None
+    assert config["max_raw_center_shift_ratio"] is None
+    assert config["min_polarity_consistency_fraction"] is None
+    assert config["min_mean_event_polarity_weight"] is None
+    assert config["max_quadratic_form_per_active_measurement"] is None
+    assert config["min_active_fraction"] is None
+    assert acceptance.min_raw_candidate_iou is None
+    assert acceptance.min_raw_candidate_area_ratio is None
+    assert acceptance.max_raw_candidate_area_ratio is None
+    assert acceptance.max_raw_center_shift_ratio is None
+    assert acceptance.min_polarity_consistency_fraction is None
+    assert acceptance.min_mean_event_polarity_weight is None
+    assert acceptance.max_quadratic_form_per_active_measurement is None
+    assert acceptance.min_active_fraction is None
+
+
+def test_validation_sweep_optional_none_token_can_be_swept_with_values(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    values = module.parse_sweep_values(
+        ("none,0.25 off 0.5",),
+        cast=float,
+        argument_name="--min-active-fraction",
+        allow_none=True,
+    )
+
+    assert values == [None, 0.25, 0.5]
+
+
+def test_validation_sweep_default_gates_accept_missing_polarity_metrics(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
+        "--disable-event-polarity",
+        "--dry-run",
+    )
+    config = module.iter_parameter_grid(args)[0]
+    acceptance = module.acceptance_config_from_config(config)
+    refinement_module = sys.modules["run_eventvot_refinement"]
+
+    decision = refinement_module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([10.0, 10.0, 20.0, 20.0]),
+        acceptance,
+    )
+
+    assert decision.accepted
+    assert "polarity_consistency_fraction_missing" not in decision.rejection_reasons
+    assert "mean_event_polarity_weight_missing" not in decision.rejection_reasons
+
+
 def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)
@@ -171,11 +249,16 @@ def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeyp
     assert "_h" in config_id
     for key in module.CONFIG_ID_KEYS:
         changed_config = dict(config)
-        if key in module.INT_GRID_KEYS:
-            changed_config[key] = int(changed_config[key]) + 1
+        value = changed_config[key]
+        if value is None:
+            changed_config[key] = 0.125
+        elif key in module.INT_GRID_KEYS:
+            changed_config[key] = int(value) + 1
         else:
-            value = float(changed_config[key])
-            changed_config[key] = 42.0 if not math.isfinite(value) else value + 0.125
+            numeric_value = float(value)
+            changed_config[key] = (
+                42.0 if not math.isfinite(numeric_value) else numeric_value + 0.125
+            )
 
         assert module.make_config_id(1, changed_config) != config_id, key
 
@@ -190,6 +273,14 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         "min_accept_area_ratio": 0.80,
         "max_accept_area_ratio": 1.10,
         "max_accept_center_shift_ratio": 0.05,
+        "min_raw_candidate_iou": 0.40,
+        "min_raw_candidate_area_ratio": 0.60,
+        "max_raw_candidate_area_ratio": 1.40,
+        "max_raw_center_shift_ratio": 0.20,
+        "min_polarity_consistency_fraction": 0.75,
+        "min_mean_event_polarity_weight": 0.10,
+        "max_quadratic_form_per_active_measurement": 2.0,
+        "min_active_fraction": 0.50,
     }
 
     acceptance = module.acceptance_config_from_config(config)
@@ -201,3 +292,37 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.min_candidate_area_ratio == 0.80
     assert acceptance.max_candidate_area_ratio == 1.10
     assert acceptance.max_center_shift_ratio == 0.05
+    assert acceptance.min_raw_candidate_iou == 0.40
+    assert acceptance.min_raw_candidate_area_ratio == 0.60
+    assert acceptance.max_raw_candidate_area_ratio == 1.40
+    assert acceptance.max_raw_center_shift_ratio == 0.20
+    assert acceptance.min_polarity_consistency_fraction == 0.75
+    assert acceptance.min_mean_event_polarity_weight == 0.10
+    assert acceptance.max_quadratic_form_per_active_measurement == 2.0
+    assert acceptance.min_active_fraction == 0.50
+
+
+class _FakeResult:
+    fallback_reason = None
+    used_event_count = 12
+    active_measurement_count = 3
+    mean_event_activity = 0.20
+    mean_event_polarity_weight = None
+    polarity_consistency_fraction = None
+    quadratic_form = None
+
+    def __init__(self, xywh):
+        self._xywh = tuple(float(value) for value in xywh)
+
+    def as_xywh(self):
+        return self._xywh
+
+    @property
+    def refined_bbox(self):
+        x, y, width, height = self._xywh
+        return {
+            "x_min": x,
+            "y_min": y,
+            "width": width,
+            "height": height,
+        }
