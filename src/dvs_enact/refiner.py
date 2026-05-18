@@ -21,6 +21,31 @@ BBoxInput = BoundingBox | Mapping[str, float] | Sequence[float] | np.ndarray
 
 
 @dataclass(frozen=True)
+class _EventSelectionWeights:
+    boundary: float = 1.0
+    activity: float = 1.0
+    recency: float = 0.25
+    polarity: float = 0.5
+
+    def __post_init__(self) -> None:
+        values = tuple(float(value) for value in self.as_tuple())
+        if any(value < 0.0 for value in values):
+            raise ValueError("event selection weights must be non-negative")
+        if not any(value > 0.0 for value in values):
+            raise ValueError("at least one event selection weight must be positive")
+
+    def as_tuple(self) -> tuple[float, float, float, float]:
+        return (self.boundary, self.activity, self.recency, self.polarity)
+
+
+@dataclass(frozen=True)
+class _SelectionPolarityConfig:
+    use_event_polarity: bool = True
+    mismatch_weight: float = 0.25
+    contrast_sign: float | str | None = "infer"
+
+
+@dataclass(frozen=True)
 class DVSContourRefinerConfig:
     """Configuration for post-hoc contour refinement."""
 
@@ -45,8 +70,12 @@ class DVSContourRefinerConfig:
     kinematic_orientation_variance: float = 1e-4
     refinement_blend: float = 1.0
     bbox_grid_points: int = 128
-    event_selection_mode: str = "boundary"
+    event_selection_mode: str = "normal_flow"
     event_selection_angular_bins: int = 16
+    event_selection_boundary_weight: float = 1.0
+    event_selection_activity_weight: float = 1.0
+    event_selection_recency_weight: float = 0.25
+    event_selection_polarity_weight: float = 0.5
 
     def __post_init__(self) -> None:
         if self.n_base_points <= 0:
@@ -61,10 +90,23 @@ class DVSContourRefinerConfig:
             raise ValueError("min_event_velocity must be non-negative")
         if not 0.0 <= self.refinement_blend <= 1.0:
             raise ValueError("refinement_blend must be in [0, 1]")
-        if self.event_selection_mode not in {"chronological", "boundary"}:
-            raise ValueError("event_selection_mode must be 'chronological' or 'boundary'")
+        if self.event_selection_mode not in {
+            "chronological",
+            "boundary",
+            "normal_flow",
+        }:
+            raise ValueError(
+                "event_selection_mode must be 'chronological', 'boundary', "
+                "or 'normal_flow'"
+            )
         if self.event_selection_angular_bins <= 0:
             raise ValueError("event_selection_angular_bins must be positive")
+        _EventSelectionWeights(
+            boundary=float(self.event_selection_boundary_weight),
+            activity=float(self.event_selection_activity_weight),
+            recency=float(self.event_selection_recency_weight),
+            polarity=float(self.event_selection_polarity_weight),
+        )
 
 
 @dataclass(frozen=True)
@@ -149,17 +191,25 @@ class DVSContourRefiner:
             image_height=self.config.image_height,
         )
         cropped = crop_events_to_bbox(events, search_bbox)
+        velocity = self._event_velocity(
+            candidate,
+            previous_candidate_bbox,
+            event_velocity,
+        )
         sampled = select_refinement_events(
             cropped,
             candidate,
             self.config.max_events,
             mode=self.config.event_selection_mode,
             angular_bins=self.config.event_selection_angular_bins,
-        )
-        velocity = self._event_velocity(
-            candidate,
-            previous_candidate_bbox,
-            event_velocity,
+            event_velocity=velocity,
+            use_event_polarity=self.config.use_event_polarity,
+            polarity_mismatch_weight=self.config.polarity_mismatch_weight,
+            polarity_contrast_sign=self.config.polarity_contrast_sign,
+            boundary_weight=self.config.event_selection_boundary_weight,
+            activity_weight=self.config.event_selection_activity_weight,
+            recency_weight=self.config.event_selection_recency_weight,
+            polarity_weight=self.config.event_selection_polarity_weight,
         )
 
         if sampled.count < self.config.min_events:
@@ -429,14 +479,24 @@ def select_refinement_events(
     *,
     mode: str = "boundary",
     angular_bins: int = 16,
+    event_velocity: Sequence[float] | np.ndarray | None = None,
+    use_event_polarity: bool = True,
+    polarity_mismatch_weight: float = 0.25,
+    polarity_contrast_sign: float | str | None = "infer",
+    boundary_weight: float = 1.0,
+    activity_weight: float = 1.0,
+    recency_weight: float = 0.25,
+    polarity_weight: float = 0.5,
 ) -> EventBatch:
     """Select events for one post-hoc contour update.
 
     Chronological subsampling preserves temporal coverage. Boundary-aware
     selection is more conservative for strong base trackers: it prefers events
     close to the candidate contour, balances them by angular sector, and then
-    restores chronological order before the update. This reduces the chance that
-    background events inside the expanded search box dominate the SCGP update.
+    restores chronological order before the update. Normal-flow-aware selection
+    adds DVS physics before the SCGP update by preferring events whose candidate
+    side has high predicted normal-flow activity, recent timestamps, and
+    polarity consistency.
     """
     if mode == "chronological":
         return subsample_events_chronologically(events, max_events)
@@ -447,7 +507,28 @@ def select_refinement_events(
             max_events,
             angular_bins=angular_bins,
         )
-    raise ValueError("mode must be 'chronological' or 'boundary'")
+    if mode == "normal_flow":
+        polarity_config = _SelectionPolarityConfig(
+            use_event_polarity=use_event_polarity,
+            mismatch_weight=polarity_mismatch_weight,
+            contrast_sign=polarity_contrast_sign,
+        )
+        relevance_weights = _EventSelectionWeights(
+            boundary=boundary_weight,
+            activity=activity_weight,
+            recency=recency_weight,
+            polarity=polarity_weight,
+        )
+        return subsample_events_by_dvs_relevance(
+            events,
+            candidate_bbox,
+            max_events,
+            event_velocity=event_velocity,
+            angular_bins=angular_bins,
+            polarity_config=polarity_config,
+            weights=relevance_weights,
+        )
+    raise ValueError("mode must be 'chronological', 'boundary', or 'normal_flow'")
 
 
 def subsample_events_near_bbox_boundary(
@@ -458,45 +539,139 @@ def subsample_events_near_bbox_boundary(
     angular_bins: int = 16,
 ) -> EventBatch:
     """Deterministically subsample events close to a candidate-box contour."""
-    if max_events is not None and max_events <= 0:
-        raise ValueError("max_events must be positive when provided")
-    if angular_bins <= 0:
-        raise ValueError("angular_bins must be positive")
-    if events.count == 0 or max_events is None or events.count <= max_events:
+    _validate_event_selection_limits(max_events, angular_bins)
+    if _keeps_all_events(events, max_events):
         return events
 
-    normalized = bbox_to_dict(bbox)
-    distances = event_distance_to_bbox_boundary(events, normalized)
-    angles = np.arctan2(
-        events.y.astype(float) - normalized["center_y"],
-        events.x.astype(float) - normalized["center_x"],
+    selected = _balanced_boundary_selection(
+        events,
+        bbox,
+        max_events=max_events,
+        angular_bins=angular_bins,
     )
-    bins = np.floor((angles + np.pi) / (2.0 * np.pi) * angular_bins).astype(np.int64)
-    bins = np.clip(bins, 0, angular_bins - 1)
+    return _event_batch_subset(events, selected)
 
-    selected: list[int] = []
-    per_bin_quota = max(1, int(np.ceil(max_events / angular_bins)))
-    for bin_index in range(angular_bins):
-        candidates = np.flatnonzero(bins == bin_index)
-        if candidates.size == 0:
-            continue
-        local_order = np.lexsort((events.ts[candidates], distances[candidates]))
-        for index in candidates[local_order[:per_bin_quota]]:
-            selected.append(int(index))
 
-    if len(selected) < max_events:
-        already_selected = np.zeros(events.count, dtype=bool)
-        if selected:
-            already_selected[np.asarray(selected, dtype=np.int64)] = True
-        remaining = np.flatnonzero(~already_selected)
-        global_order = np.lexsort((events.ts[remaining], distances[remaining]))
-        fill_count = max_events - len(selected)
-        selected.extend(int(index) for index in remaining[global_order[:fill_count]])
+def subsample_events_by_dvs_relevance(
+    events: EventBatch,
+    bbox: BBoxInput,
+    max_events: int | None,
+    *,
+    event_velocity: Sequence[float] | np.ndarray | None,
+    angular_bins: int = 16,
+    polarity_config: _SelectionPolarityConfig | None = None,
+    weights: _EventSelectionWeights | None = None,
+) -> EventBatch:
+    """Subsample events by contour proximity, normal flow, polarity, and recency."""
+    _validate_event_selection_limits(max_events, angular_bins)
+    if _keeps_all_events(events, max_events):
+        return events
 
-    selected = _deduplicate_indices(selected)[:max_events]
-    selected_array = np.asarray(selected, dtype=np.int64)
-    selected_array = selected_array[np.argsort(events.ts[selected_array], kind="stable")]
-    return _event_batch_subset(events, selected_array)
+    velocity = _optional_event_velocity(event_velocity)
+    if float(np.linalg.norm(velocity)) <= 1e-12:
+        return subsample_events_near_bbox_boundary(
+            events,
+            bbox,
+            max_events,
+            angular_bins=angular_bins,
+        )
+
+    normalized = bbox_to_dict(bbox)
+    selection_weights = weights or _EventSelectionWeights()
+    selection_polarity = polarity_config or _SelectionPolarityConfig()
+    scores = event_dvs_relevance_scores(
+        events,
+        normalized,
+        velocity,
+        polarity_config=selection_polarity,
+        weights=selection_weights,
+    )
+    selected = _balanced_boundary_selection(
+        events,
+        normalized,
+        max_events=max_events,
+        angular_bins=angular_bins,
+        scores=scores,
+        trim_over_quota=True,
+    )
+    return _event_batch_subset(events, selected)
+
+
+def event_dvs_relevance_scores(
+    events: EventBatch,
+    bbox: BBoxInput,
+    event_velocity: Sequence[float] | np.ndarray,
+    *,
+    polarity_config: _SelectionPolarityConfig | None = None,
+    weights: _EventSelectionWeights | None = None,
+) -> np.ndarray:
+    """Return a deterministic pre-update relevance score for each event."""
+    if events.count == 0:
+        return np.array([], dtype=float)
+
+    normalized = bbox_to_dict(bbox)
+    velocity = _as_event_velocity(event_velocity)
+    distances = event_distance_to_bbox_boundary(events, normalized)
+    boundary_scale = _bbox_boundary_distance_scale(normalized)
+    boundary_score = 1.0 / (1.0 + distances / boundary_scale)
+
+    signed_flows = event_signed_normal_flow_to_bbox_boundary(
+        events,
+        normalized,
+        velocity,
+    )
+    activity_score = np.abs(signed_flows)
+    recency_score = _event_recency_score(events.ts)
+    selection_polarity = polarity_config or _SelectionPolarityConfig()
+    polarity_score = _event_polarity_score(
+        signed_flows,
+        events.p,
+        config=selection_polarity,
+    )
+    selection_weights = weights or _EventSelectionWeights()
+    return (
+        float(selection_weights.boundary) * boundary_score
+        + float(selection_weights.activity) * activity_score
+        + float(selection_weights.recency) * recency_score
+        + float(selection_weights.polarity) * polarity_score
+    )
+
+
+def event_signed_normal_flow_to_bbox_boundary(
+    events: EventBatch,
+    bbox: BBoxInput,
+    event_velocity: Sequence[float] | np.ndarray,
+) -> np.ndarray:
+    """Approximate signed normal flow for each event's nearest candidate-box side."""
+    if events.count == 0:
+        return np.array([], dtype=float)
+    normalized = bbox_to_dict(bbox)
+    velocity = _as_event_velocity(event_velocity)
+    velocity_norm = float(np.linalg.norm(velocity))
+    if velocity_norm <= 1e-12:
+        return np.zeros(events.count, dtype=float)
+
+    x = events.x.astype(float)
+    y = events.y.astype(float)
+    side_distances = np.vstack(
+        (
+            np.abs(x - normalized["x_min"]),
+            np.abs(x - normalized["x_max"]),
+            np.abs(y - normalized["y_min"]),
+            np.abs(y - normalized["y_max"]),
+        )
+    )
+    nearest_side = np.argmin(side_distances, axis=0)
+    normals = np.asarray(
+        (
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+        ),
+        dtype=float,
+    )
+    return (normals[nearest_side] @ velocity) / velocity_norm
 
 
 def event_distance_to_bbox_boundary(events: EventBatch, bbox: BBoxInput) -> np.ndarray:
@@ -529,9 +704,8 @@ def subsample_events_chronologically(
     max_events: int | None,
 ) -> EventBatch:
     """Deterministically subsample events while preserving temporal coverage."""
-    if max_events is not None and max_events <= 0:
-        raise ValueError("max_events must be positive when provided")
-    if events.count == 0 or max_events is None or events.count <= max_events:
+    _validate_event_selection_limits(max_events)
+    if _keeps_all_events(events, max_events):
         return events
     order = np.argsort(events.ts, kind="stable")
     positions = np.linspace(0, events.count - 1, max_events, dtype=np.int64)
@@ -594,6 +768,137 @@ def tracker_bbox_to_dict(tracker: DVSFullSCGPTracker, n: int) -> dict[str, float
     )
 
 
+def _validate_event_selection_limits(
+    max_events: int | None,
+    angular_bins: int | None = None,
+) -> None:
+    if max_events is not None and max_events <= 0:
+        raise ValueError("max_events must be positive when provided")
+    if angular_bins is not None and angular_bins <= 0:
+        raise ValueError("angular_bins must be positive")
+
+
+def _keeps_all_events(events: EventBatch, max_events: int | None) -> bool:
+    return events.count == 0 or max_events is None or events.count <= max_events
+
+
+def _optional_event_velocity(
+    event_velocity: Sequence[float] | np.ndarray | None,
+) -> np.ndarray:
+    if event_velocity is None:
+        return np.zeros(2, dtype=float)
+    return _as_event_velocity(event_velocity)
+
+
+def _as_event_velocity(event_velocity: Sequence[float] | np.ndarray) -> np.ndarray:
+    velocity = np.asarray(event_velocity, dtype=float)
+    if velocity.shape != (2,):
+        raise ValueError("event_velocity must have shape (2,)")
+    return velocity
+
+
+def _balanced_boundary_selection(
+    events: EventBatch,
+    bbox: BBoxInput,
+    *,
+    max_events: int | None,
+    angular_bins: int,
+    scores: np.ndarray | None = None,
+    trim_over_quota: bool = False,
+) -> np.ndarray:
+    if max_events is None:
+        return np.arange(events.count, dtype=np.int64)
+
+    normalized = bbox_to_dict(bbox)
+    distances = event_distance_to_bbox_boundary(events, normalized)
+    bins = _event_angular_bins(events, normalized, angular_bins)
+
+    selected: list[int] = []
+    per_bin_quota = max(1, int(np.ceil(max_events / angular_bins)))
+    for bin_index in range(angular_bins):
+        candidates = np.flatnonzero(bins == bin_index)
+        if candidates.size == 0:
+            continue
+        ranked = _rank_event_candidates(events, distances, candidates, scores=scores)
+        selected.extend(int(index) for index in ranked[:per_bin_quota])
+
+    selected = _deduplicate_indices(selected)
+    if trim_over_quota and len(selected) > max_events:
+        ranked = _rank_event_candidates(
+            events,
+            distances,
+            np.asarray(selected, dtype=np.int64),
+            scores=scores,
+        )
+        selected = [int(index) for index in ranked[:max_events]]
+
+    if len(selected) < max_events:
+        selected.extend(
+            _best_remaining_events(
+                events,
+                distances,
+                selected,
+                max_events - len(selected),
+                scores=scores,
+            )
+        )
+
+    selected_array = np.asarray(
+        _deduplicate_indices(selected)[:max_events],
+        dtype=np.int64,
+    )
+    return selected_array[np.argsort(events.ts[selected_array], kind="stable")]
+
+
+def _event_angular_bins(
+    events: EventBatch,
+    bbox: dict[str, float],
+    angular_bins: int,
+) -> np.ndarray:
+    angles = np.arctan2(
+        events.y.astype(float) - bbox["center_y"],
+        events.x.astype(float) - bbox["center_x"],
+    )
+    bins = np.floor((angles + np.pi) / (2.0 * np.pi) * angular_bins).astype(np.int64)
+    return np.clip(bins, 0, angular_bins - 1)
+
+
+def _rank_event_candidates(
+    events: EventBatch,
+    distances: np.ndarray,
+    candidates: np.ndarray,
+    *,
+    scores: np.ndarray | None,
+) -> np.ndarray:
+    if scores is None:
+        order = np.lexsort((events.ts[candidates], distances[candidates]))
+    else:
+        order = np.lexsort(
+            (
+                events.ts[candidates],
+                distances[candidates],
+                -scores[candidates],
+            )
+        )
+    return candidates[order]
+
+
+def _best_remaining_events(
+    events: EventBatch,
+    distances: np.ndarray,
+    selected: list[int],
+    count: int,
+    *,
+    scores: np.ndarray | None,
+) -> list[int]:
+    already_selected = np.zeros(events.count, dtype=bool)
+    if selected:
+        already_selected[np.asarray(selected, dtype=np.int64)] = True
+    remaining = np.flatnonzero(~already_selected)
+    ranked = _rank_event_candidates(events, distances, remaining, scores=scores)
+    return [int(index) for index in ranked[:count]]
+
+
 def _event_batch_subset(events: EventBatch, indices: np.ndarray) -> EventBatch:
     return EventBatch(
         ts=events.ts[indices],
@@ -612,6 +917,69 @@ def _deduplicate_indices(indices: Iterable[int]) -> list[int]:
         selected.append(index)
         seen.add(index)
     return selected
+
+
+def _bbox_boundary_distance_scale(bbox: dict[str, float]) -> float:
+    return max(1.0, 0.05 * min(float(bbox["width"]), float(bbox["height"])))
+
+
+def _event_recency_score(timestamps: np.ndarray) -> np.ndarray:
+    timestamps = np.asarray(timestamps, dtype=float)
+    if timestamps.size == 0:
+        return np.array([], dtype=float)
+    span = float(np.max(timestamps) - np.min(timestamps))
+    if span <= 0.0:
+        return np.ones(timestamps.shape, dtype=float)
+    return (timestamps - float(np.min(timestamps))) / span
+
+
+def _event_polarity_score(
+    signed_flows: np.ndarray,
+    event_polarities: np.ndarray,
+    *,
+    config: _SelectionPolarityConfig,
+) -> np.ndarray:
+    if not config.use_event_polarity or config.contrast_sign is None:
+        return np.ones(signed_flows.shape, dtype=float)
+    mismatch_weight = float(config.mismatch_weight)
+    if mismatch_weight < 0.0 or mismatch_weight > 1.0:
+        raise ValueError("polarity_mismatch_weight must be in [0, 1]")
+
+    contrast_sign = _resolve_selection_polarity_contrast_sign(
+        signed_flows,
+        event_polarities,
+        config.contrast_sign,
+    )
+    if contrast_sign is None:
+        return np.ones(signed_flows.shape, dtype=float)
+
+    flow_signs = np.sign(signed_flows)
+    event_signs = np.where(np.asarray(event_polarities, dtype=float) > 0.0, 1.0, -1.0)
+    informative = flow_signs != 0.0
+    consistent = event_signs == contrast_sign * flow_signs
+    return np.where(informative & ~consistent, mismatch_weight, 1.0)
+
+
+def _resolve_selection_polarity_contrast_sign(
+    signed_flows: np.ndarray,
+    event_polarities: np.ndarray,
+    polarity_contrast_sign: float | str | None,
+) -> float | None:
+    if polarity_contrast_sign is None:
+        return None
+    if isinstance(polarity_contrast_sign, str):
+        if polarity_contrast_sign.lower() != "infer":
+            raise ValueError("polarity_contrast_sign must be 'infer', None, or non-zero")
+        event_signs = np.where(np.asarray(event_polarities, dtype=float) > 0.0, 1.0, -1.0)
+        informative = np.sign(signed_flows) != 0.0
+        score = float(np.sum(event_signs[informative] * signed_flows[informative]))
+        if abs(score) <= 1e-12:
+            return 1.0
+        return 1.0 if score > 0.0 else -1.0
+    contrast_sign = float(polarity_contrast_sign)
+    if contrast_sign == 0.0:
+        raise ValueError("polarity_contrast_sign must be 'infer', None, or non-zero")
+    return 1.0 if contrast_sign > 0.0 else -1.0
 
 
 def _bbox_from_center_extent(

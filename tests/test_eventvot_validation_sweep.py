@@ -61,11 +61,8 @@ def _parse_sweep_args(module, tmp_path: Path, result_root: Path, *extra: str):
     )
 
 
-def _single_refiner_grid_args(module, tmp_path: Path, result_root: Path, *extra: str):
-    return _parse_sweep_args(
-        module,
-        tmp_path,
-        result_root,
+def _single_config_grid_args() -> tuple[str, ...]:
+    return (
         "--refinement-blend",
         "0.1",
         "--search-expansion-factor",
@@ -80,6 +77,15 @@ def _single_refiner_grid_args(module, tmp_path: Path, result_root: Path, *extra:
         "0.1",
         "--measurement-noise-variance",
         "1.0",
+    )
+
+
+def _single_refiner_grid_args(module, tmp_path: Path, result_root: Path, *extra: str):
+    return _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
         *extra,
     )
 
@@ -209,6 +215,7 @@ def test_validation_sweep_required_gate_rejects_none_token(tmp_path, monkeypatch
         module,
         tmp_path,
         result_root,
+        *_single_config_grid_args(),
         "--min-accept-used-events",
         "none",
         "--dry-run",
