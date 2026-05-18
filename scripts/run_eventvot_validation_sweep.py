@@ -202,7 +202,7 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Output projection modes to evaluate. 'box' keeps the full "
             "DVS-ENACT box update, 'center-only' keeps the base size, and "
-            "'size-only' keeps the base center."
+            "'size-only', 'width-only', and 'height-only' keep the base center."
         ),
     )
     parser.add_argument(

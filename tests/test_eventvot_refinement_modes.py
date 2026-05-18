@@ -53,6 +53,34 @@ def test_size_only_projection_keeps_candidate_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
 
 
+def test_width_only_projection_keeps_candidate_center_and_height(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="width-only",
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 20.0, 50.0, 40.0]))
+
+
+def test_height_only_projection_keeps_candidate_center_and_width(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="height-only",
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 10.0, 30.0, 60.0]))
+
+
 def test_size_only_projection_supports_independent_size_blends(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -78,6 +106,22 @@ def test_size_only_projection_smooths_previous_accepted_size(monkeypatch):
         np.array([0.0, 10.0, 50.0, 60.0]),
         refinement_mode="size-only",
         previous_projected_size=np.array([20.0, 20.0]),
+        projection_size_smoothing=0.5,
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([7.5, 20.0, 35.0, 40.0]))
+
+
+def test_width_only_projection_smooths_only_width(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="width-only",
+        previous_projected_size=np.array([20.0, 80.0]),
         projection_size_smoothing=0.5,
         image_width=200.0,
         image_height=200.0,
@@ -217,6 +261,8 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
     assert "size-only" in help_text
+    assert "width-only" in help_text
+    assert "height-only" in help_text
     assert "--projection-width-blend" in help_text
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text

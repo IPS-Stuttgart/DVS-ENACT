@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --refinement-mode size-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-confidence-field mean_event_activity --projection-confidence-floor 0.10 --projection-confidence-ceiling 0.50"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only width-only height-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-confidence-field mean_event_activity --projection-confidence-floor 0.10 --projection-confidence-ceiling 0.50"
         required: false
         default: ""
         type: string

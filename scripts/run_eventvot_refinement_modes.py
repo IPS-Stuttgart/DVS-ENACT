@@ -4,8 +4,9 @@ This script is a small compatibility wrapper around ``run_eventvot_refinement``.
 It intentionally avoids duplicating EventVOT parsing/evaluation code.  The main
 use cases are conservative projection modes for strong trackers such as
 HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
-the external tracker's size, and ``size-only`` lets DVS-ENACT correct the box
-size while retaining the external tracker's center.
+the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
+while retaining the external tracker's center, and ``width-only``/``height-only``
+let validation sweeps keep just the useful size axis.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 
 import run_eventvot_refinement as base
 
-REFINEMENT_MODES = ("box", "center-only", "size-only")
+REFINEMENT_MODES = ("box", "center-only", "size-only", "width-only", "height-only")
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
     "active_fraction",
@@ -185,15 +186,16 @@ def build_parser() -> argparse.ArgumentParser:
             "DVS-ENACT update. 'center-only' keeps the base-track width/height "
             "and transfers only the DVS-ENACT center correction. 'size-only' "
             "keeps the base-track center and transfers only the DVS-ENACT "
-            "width/height correction."
+            "width/height correction. 'width-only' and 'height-only' transfer "
+            "only one DVS-ENACT size axis."
         ),
     )
     parser.add_argument(
         "--projection-width-blend",
         type=float,
         help=(
-            "Optional width blend for size-only mode. When supplied together "
-            "with --projection-height-blend, size-only projection blends from "
+            "Optional width blend for size projection modes. When supplied "
+            "together with --projection-height-blend, projection blends from "
             "the raw DVS-ENACT refined width instead of the already blended "
             "--refinement-blend output."
         ),
@@ -202,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--projection-height-blend",
         type=float,
         help=(
-            "Optional height blend for size-only mode. Must be supplied "
+            "Optional height blend for size projection modes. Must be supplied "
             "together with --projection-width-blend."
         ),
     )
@@ -335,7 +337,7 @@ def project_refinement_output(
             ],
             dtype=float,
         )
-    else:
+    elif refinement_mode in {"size-only", "width-only", "height-only"}:
         candidate_center = candidate[:2] + 0.5 * candidate[2:]
         if projection_width_blend is not None and projection_height_blend is not None:
             if raw_refined_xywh is None:
@@ -350,6 +352,11 @@ def project_refinement_output(
             projected_size = np.array([width, height], dtype=float)
         else:
             projected_size = refined[2:]
+        projected_size = project_size_axes(
+            candidate[2:],
+            projected_size,
+            refinement_mode=refinement_mode,
+        )
         output = np.array(
             [
                 candidate_center[0] - 0.5 * projected_size[0],
@@ -359,6 +366,8 @@ def project_refinement_output(
             ],
             dtype=float,
         )
+    else:
+        raise AssertionError(f"Unhandled refinement mode: {refinement_mode}")
 
     output = smooth_projected_size(
         candidate,
@@ -462,9 +471,14 @@ def smooth_projected_size(
 
     previous_size = np.asarray(previous_projected_size, dtype=float).reshape(2)
     smoothing = float(projection_size_smoothing)
-    smoothed_size = (1.0 - smoothing) * output[2:] + smoothing * previous_size
+    smoothed_size = np.array(output[2:], dtype=float, copy=True)
+    size_axes = projected_size_axes(refinement_mode)
+    smoothed_size[size_axes] = (
+        (1.0 - smoothing) * output[2:][size_axes]
+        + smoothing * previous_size[size_axes]
+    )
     smoothed_size = np.maximum(smoothed_size, 0.0)
-    if refinement_mode == "size-only":
+    if refinement_mode in {"size-only", "width-only", "height-only"}:
         candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
         center = candidate[:2] + 0.5 * candidate[2:]
     else:
@@ -472,6 +486,37 @@ def smooth_projected_size(
     output[:2] = center - 0.5 * smoothed_size
     output[2:] = smoothed_size
     return output
+
+
+def project_size_axes(
+    candidate_size: np.ndarray,
+    projected_size: np.ndarray,
+    *,
+    refinement_mode: str,
+) -> np.ndarray:
+    """Return size with only the axes selected by refinement mode updated."""
+    validate_refinement_mode(refinement_mode)
+    candidate = np.asarray(candidate_size, dtype=float).reshape(2)
+    projected = np.asarray(projected_size, dtype=float).reshape(2)
+    if refinement_mode == "size-only":
+        return np.array(projected, dtype=float, copy=True)
+    if refinement_mode == "width-only":
+        return np.array([projected[0], candidate[1]], dtype=float)
+    if refinement_mode == "height-only":
+        return np.array([candidate[0], projected[1]], dtype=float)
+    raise ValueError(f"{refinement_mode!r} is not a size projection mode")
+
+
+def projected_size_axes(refinement_mode: str) -> np.ndarray:
+    """Return width/height indices modified by a projection mode."""
+    validate_refinement_mode(refinement_mode)
+    if refinement_mode in {"box", "size-only"}:
+        return np.array([0, 1], dtype=int)
+    if refinement_mode == "width-only":
+        return np.array([0], dtype=int)
+    if refinement_mode == "height-only":
+        return np.array([1], dtype=int)
+    return np.array([], dtype=int)
 
 
 def clip_xywh_box(
