@@ -70,6 +70,36 @@ def test_size_only_projection_supports_independent_size_blends(monkeypatch):
     np.testing.assert_allclose(projected, np.array([7.5, 15.0, 35.0, 50.0]))
 
 
+def test_size_only_projection_smooths_previous_accepted_size(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        previous_projected_size=np.array([20.0, 20.0]),
+        projection_size_smoothing=0.5,
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([7.5, 20.0, 35.0, 40.0]))
+
+
+def test_box_projection_smooths_size_around_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="box",
+        previous_projected_size=np.array([30.0, 40.0]),
+        projection_size_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([25.0, 15.0, 40.0, 50.0]))
+
+
 def test_box_projection_preserves_refiner_output(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -160,4 +190,5 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-width-blend" in help_text
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
+    assert "--projection-size-smoothing" in help_text
     assert "--projection-min-raw-height-ratio" in help_text

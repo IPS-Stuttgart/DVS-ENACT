@@ -88,6 +88,7 @@ class ReplayOutputProjectionConfig:
 
     mode: str = "diagnostic"
     blend: float | None = None
+    size_smoothing: float | None = None
     image_width: float | None = None
     image_height: float | None = None
 
@@ -178,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional blend from the base tracker box toward the stored raw "
             "DVS refinement before applying --replay-output-mode. Requires "
             "--replay-output-mode other than 'diagnostic'."
+        ),
+    )
+    parser.add_argument(
+        "--replay-output-size-smoothing",
+        type=float,
+        help=(
+            "Optional temporal size smoothing for replayed projected outputs. "
+            "The value is the weight of the previous accepted replay width/height."
         ),
     )
     _add_policy_arguments(parser)
@@ -368,6 +377,7 @@ def output_projection_config_from_args(
     config = ReplayOutputProjectionConfig(
         mode=args.replay_output_mode,
         blend=args.replay_output_blend,
+        size_smoothing=args.replay_output_size_smoothing,
     )
     validate_output_projection_config(config)
     return config
@@ -389,6 +399,7 @@ def output_projection_config_from_diagnostics(
     resolved = ReplayOutputProjectionConfig(
         mode=config.mode,
         blend=config.blend,
+        size_smoothing=config.size_smoothing,
         image_width=image_width,
         image_height=image_height,
     )
@@ -409,6 +420,13 @@ def validate_output_projection_config(config: ReplayOutputProjectionConfig) -> N
             raise ValueError("--replay-output-blend requires a projected output mode")
         if not 0.0 <= float(config.blend) <= 1.0:
             raise ValueError("--replay-output-blend must be between 0 and 1")
+    if config.size_smoothing is not None:
+        if config.mode == "diagnostic":
+            raise ValueError(
+                "--replay-output-size-smoothing requires a projected output mode"
+            )
+        if not 0.0 <= float(config.size_smoothing) <= 1.0:
+            raise ValueError("--replay-output-size-smoothing must be between 0 and 1")
 
 
 def select_sequence_summaries(
@@ -461,6 +479,7 @@ def replay_sequence_boxes(
     counts: Counter[str] = Counter()
     decision_records: list[dict[str, Any]] = []
     output_projection = output_projection or ReplayOutputProjectionConfig()
+    previous_accepted_projected_size: np.ndarray | None = None
 
     if not frames:
         counts["missing_frame_diagnostics"] += int(base_boxes.shape[0])
@@ -479,15 +498,20 @@ def replay_sequence_boxes(
             frame,
             config,
             output_projection,
+            previous_projected_size=previous_accepted_projected_size,
         )
         reason_key = "accepted" if decision.accepted else decision.rejection_reasons[0]
         counts[reason_key] += 1
         if decision.accepted:
-            replayed_boxes[frame_index] = frame_projected_output_xywh(
+            replayed_output = frame_projected_output_xywh(
                 base_boxes[frame_index],
                 frame,
                 output_projection,
+                previous_projected_size=previous_accepted_projected_size,
             )
+            replayed_boxes[frame_index] = replayed_output
+            if output_projection.mode != "diagnostic":
+                previous_accepted_projected_size = replayed_output[2:].copy()
         decision_records.append(
             {
                 "sequence": sequence_name,
@@ -504,12 +528,19 @@ def evaluate_frame_acceptance(
     frame: dict[str, Any],
     config: ReplayAcceptanceConfig,
     output_projection: ReplayOutputProjectionConfig | None = None,
+    *,
+    previous_projected_size: np.ndarray | None = None,
 ) -> ReplayAcceptanceDecision:
     """Evaluate one stored DVS-ENACT refinement under a replay policy."""
 
     candidate = np.asarray(candidate_xywh, dtype=float)
     output_projection = output_projection or ReplayOutputProjectionConfig()
-    proposed = frame_projected_output_xywh(candidate, frame, output_projection)
+    proposed = frame_projected_output_xywh(
+        candidate,
+        frame,
+        output_projection,
+        previous_projected_size=previous_projected_size,
+    )
     raw_proposed = frame_raw_refined_xywh(frame, fallback=proposed)
 
     candidate_iou = box_iou_xywh(candidate, proposed)
@@ -668,6 +699,8 @@ def frame_projected_output_xywh(
     candidate_xywh: np.ndarray,
     frame: dict[str, Any],
     output_projection: ReplayOutputProjectionConfig,
+    *,
+    previous_projected_size: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return the accepted replay box under the selected output projection."""
 
@@ -685,6 +718,8 @@ def frame_projected_output_xywh(
         source_output,
         refinement_mode=output_projection.mode,
         raw_refined_xywh=raw_refined,
+        previous_projected_size=previous_projected_size,
+        projection_size_smoothing=output_projection.size_smoothing,
         image_width=output_projection.image_width,
         image_height=output_projection.image_height,
     )

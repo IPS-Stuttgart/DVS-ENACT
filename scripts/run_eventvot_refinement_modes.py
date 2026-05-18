@@ -41,6 +41,7 @@ class ProjectedOutputRefiner:
         projection_width_blend: float | None = None,
         projection_height_blend: float | None = None,
         projection_no_clip: bool = False,
+        projection_size_smoothing: float | None = None,
         projection_min_raw_width_ratio: float | None = None,
         projection_max_raw_width_ratio: float | None = None,
         projection_min_raw_height_ratio: float | None = None,
@@ -48,6 +49,7 @@ class ProjectedOutputRefiner:
     ):
         validate_refinement_mode(refinement_mode)
         validate_projection_blends(projection_width_blend, projection_height_blend)
+        validate_projection_size_smoothing(projection_size_smoothing)
         validate_projection_ratio_gates(
             projection_min_raw_width_ratio,
             projection_max_raw_width_ratio,
@@ -60,14 +62,23 @@ class ProjectedOutputRefiner:
         self.projection_width_blend = projection_width_blend
         self.projection_height_blend = projection_height_blend
         self.projection_no_clip = projection_no_clip
+        self.projection_size_smoothing = projection_size_smoothing
         self.projection_min_raw_width_ratio = projection_min_raw_width_ratio
         self.projection_max_raw_width_ratio = projection_max_raw_width_ratio
         self.projection_min_raw_height_ratio = projection_min_raw_height_ratio
         self.projection_max_raw_height_ratio = projection_max_raw_height_ratio
+        self._previous_accepted_projected_size: np.ndarray | None = None
+
+    def reset_state(self) -> None:
+        """Reset temporal projection state at sequence boundaries."""
+        self._previous_accepted_projected_size = None
 
     def refine(self, candidate_bbox: Any, events: Any, **kwargs: Any) -> DVSRefinementResult:
         result = self.refiner.refine(candidate_bbox, events, **kwargs)
-        if self.refinement_mode == "box" or result.fallback_reason is not None:
+        if (
+            self.refinement_mode == "box"
+            and self.projection_size_smoothing is None
+        ) or result.fallback_reason is not None:
             return result
 
         candidate_xywh = bbox_dict_to_xywh(result.candidate_bbox)
@@ -80,6 +91,8 @@ class ProjectedOutputRefiner:
             raw_refined_xywh=raw_refined_xywh,
             projection_width_blend=self.projection_width_blend,
             projection_height_blend=self.projection_height_blend,
+            previous_projected_size=self._previous_accepted_projected_size,
+            projection_size_smoothing=self.projection_size_smoothing,
         )
         projected_xywh = clip_xywh_box(
             unclipped_projected_xywh,
@@ -111,6 +124,25 @@ class ProjectedOutputRefiner:
             ),
             fallback_reason=fallback_reason,
         )
+
+    def observe_refinement_decision(
+        self,
+        _candidate_bbox: Any,
+        result: DVSRefinementResult,
+        accepted: bool,
+    ) -> None:
+        """Record accepted projected size for the next frame."""
+        if (
+            not accepted
+            or self.projection_size_smoothing is None
+            or self.refinement_mode == "center-only"
+            or result.fallback_reason is not None
+        ):
+            return
+        self._previous_accepted_projected_size = np.asarray(
+            result.as_xywh(),
+            dtype=float,
+        )[2:].copy()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,6 +187,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reject projected refinement outputs that would be clipped by image bounds.",
     )
+    parser.add_argument(
+        "--projection-size-smoothing",
+        type=float,
+        help=(
+            "Optional temporal size smoothing for projected outputs. The value "
+            "is the weight of the previous accepted projected width/height; "
+            "0 uses the current projection and 1 holds the previous size."
+        ),
+    )
     parser.add_argument("--projection-min-raw-width-ratio", type=float)
     parser.add_argument("--projection-max-raw-width-ratio", type=float)
     parser.add_argument("--projection-min-raw-height-ratio", type=float)
@@ -178,6 +219,7 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_width_blend=args.projection_width_blend,
         projection_height_blend=args.projection_height_blend,
         projection_no_clip=args.projection_no_clip,
+        projection_size_smoothing=args.projection_size_smoothing,
         projection_min_raw_width_ratio=args.projection_min_raw_width_ratio,
         projection_max_raw_width_ratio=args.projection_max_raw_width_ratio,
         projection_min_raw_height_ratio=args.projection_min_raw_height_ratio,
@@ -216,12 +258,15 @@ def project_refinement_output(
     raw_refined_xywh: np.ndarray | None = None,
     projection_width_blend: float | None = None,
     projection_height_blend: float | None = None,
+    previous_projected_size: np.ndarray | None = None,
+    projection_size_smoothing: float | None = None,
     image_width: float | None = None,
     image_height: float | None = None,
 ) -> np.ndarray:
     """Return the candidate replacement box for the selected refinement mode."""
     validate_refinement_mode(refinement_mode)
     validate_projection_blends(projection_width_blend, projection_height_blend)
+    validate_projection_size_smoothing(projection_size_smoothing)
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
     refined = np.asarray(refiner_output_xywh, dtype=float).reshape(4)
 
@@ -263,7 +308,47 @@ def project_refinement_output(
             dtype=float,
         )
 
+    output = smooth_projected_size(
+        candidate,
+        output,
+        refinement_mode=refinement_mode,
+        previous_projected_size=previous_projected_size,
+        projection_size_smoothing=projection_size_smoothing,
+    )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def smooth_projected_size(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    previous_projected_size: np.ndarray | None,
+    projection_size_smoothing: float | None,
+) -> np.ndarray:
+    """Blend projected width/height toward the previous accepted projected size."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_size_smoothing(projection_size_smoothing)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if (
+        projection_size_smoothing is None
+        or previous_projected_size is None
+        or refinement_mode == "center-only"
+    ):
+        return output
+
+    previous_size = np.asarray(previous_projected_size, dtype=float).reshape(2)
+    smoothing = float(projection_size_smoothing)
+    smoothed_size = (1.0 - smoothing) * output[2:] + smoothing * previous_size
+    smoothed_size = np.maximum(smoothed_size, 0.0)
+    if refinement_mode == "size-only":
+        candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+        center = candidate[:2] + 0.5 * candidate[2:]
+    else:
+        center = output[:2] + 0.5 * output[2:]
+    output[:2] = center - 0.5 * smoothed_size
+    output[2:] = smoothed_size
+    return output
 
 
 def clip_xywh_box(
@@ -433,6 +518,14 @@ def validate_projection_blends(
             continue
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{name} must be between 0 and 1")
+
+
+def validate_projection_size_smoothing(projection_size_smoothing: float | None) -> None:
+    """Raise ValueError for invalid temporal size smoothing factors."""
+    if projection_size_smoothing is None:
+        return
+    if not 0.0 <= float(projection_size_smoothing) <= 1.0:
+        raise ValueError("projection_size_smoothing must be between 0 and 1")
 
 
 def validate_projection_ratio_gates(

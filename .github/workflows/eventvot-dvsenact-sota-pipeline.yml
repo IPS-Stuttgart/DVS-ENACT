@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --refinement-mode size-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-no-clip"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-size-smoothing none 0.25 --projection-no-clip"
         required: false
         default: ""
         type: string
@@ -696,6 +696,9 @@ jobs:
               "LOCKED_PROJECTION_WIDTH_BLEND": best.get("projection_width_blend"),
               "LOCKED_PROJECTION_HEIGHT_BLEND": best.get("projection_height_blend"),
               "LOCKED_PROJECTION_NO_CLIP": best.get("projection_no_clip", False),
+              "LOCKED_PROJECTION_SIZE_SMOOTHING": best.get(
+                  "projection_size_smoothing"
+              ),
               "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO": best.get(
                   "projection_min_raw_width_ratio"
               ),
@@ -763,6 +766,7 @@ jobs:
             echo "LOCKED_PROJECTION_WIDTH_BLEND="
             echo "LOCKED_PROJECTION_HEIGHT_BLEND="
             echo "LOCKED_PROJECTION_NO_CLIP=false"
+            echo "LOCKED_PROJECTION_SIZE_SMOOTHING="
             echo "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO="
             echo "LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO="
             echo "LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO="
@@ -857,6 +861,9 @@ jobs:
               "projection_width_blend": os.environ.get("LOCKED_PROJECTION_WIDTH_BLEND", ""),
               "projection_height_blend": os.environ.get("LOCKED_PROJECTION_HEIGHT_BLEND", ""),
               "projection_no_clip": os.environ.get("LOCKED_PROJECTION_NO_CLIP", "false"),
+              "projection_size_smoothing": os.environ.get(
+                  "LOCKED_PROJECTION_SIZE_SMOOTHING", ""
+              ),
               "projection_min_raw_width_ratio": os.environ.get(
                   "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO", ""
               ),
@@ -940,6 +947,9 @@ jobs:
           fi
           if [[ "${LOCKED_PROJECTION_NO_CLIP:-false}" == "true" ]]; then
             args+=(--projection-no-clip)
+          fi
+          if [[ -n "${LOCKED_PROJECTION_SIZE_SMOOTHING:-}" ]]; then
+            args+=(--projection-size-smoothing "$LOCKED_PROJECTION_SIZE_SMOOTHING")
           fi
           if [[ -n "${LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO:-}" ]]; then
             args+=(--projection-min-raw-width-ratio "$LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO")

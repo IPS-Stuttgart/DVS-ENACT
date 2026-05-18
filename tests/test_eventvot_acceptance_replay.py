@@ -129,6 +129,37 @@ def test_acceptance_replay_can_project_reblended_output_center_only():
     np.testing.assert_allclose(projected, np.array([20.0, 10.0, 20.0, 20.0]))
 
 
+def test_acceptance_replay_smooths_replayed_projected_size():
+    module = _load_module()
+    frame = {
+        "frame_index": 2,
+        "fallback_reason": None,
+        "refiner_output_xywh": [0.0, 0.0, 40.0, 40.0],
+        "refined_bbox": {
+            "x_min": 0.0,
+            "y_min": 0.0,
+            "x_max": 40.0,
+            "y_max": 40.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(
+            mode="size-only",
+            blend=1.0,
+            size_smoothing=0.5,
+        ),
+        previous_projected_size=np.array([20.0, 20.0]),
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 5.0, 30.0, 30.0]))
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -312,6 +343,7 @@ def test_acceptance_replay_run_uses_output_projection_config(tmp_path):
     assert payload["output_projection_config"] == {
         "mode": "center-only",
         "blend": 0.5,
+        "size_smoothing": None,
         "image_width": 100.0,
         "image_height": 100.0,
     }
@@ -332,3 +364,4 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--max-quadratic-form-per-active-measurement" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
+    assert "--replay-output-size-smoothing" in help_text

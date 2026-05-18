@@ -51,6 +51,7 @@ PROJECTION_GRID_KEYS = (
     "projection_width_blend",
     "projection_height_blend",
     "projection_no_clip",
+    "projection_size_smoothing",
     "projection_min_raw_width_ratio",
     "projection_max_raw_width_ratio",
     "projection_min_raw_height_ratio",
@@ -88,6 +89,7 @@ BOOL_GRID_KEYS = {"projection_no_clip"}
 OPTIONAL_FLOAT_GRID_KEYS = {
     "projection_width_blend",
     "projection_height_blend",
+    "projection_size_smoothing",
     "projection_min_raw_width_ratio",
     "projection_max_raw_width_ratio",
     "projection_min_raw_height_ratio",
@@ -216,6 +218,16 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         "--projection-no-clip",
         action="store_true",
         help="Reject projected outputs that would be clipped by image bounds.",
+    )
+    parser.add_argument(
+        "--projection-size-smoothing",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional temporal size-smoothing values. Use 'none' to disable. "
+            "A value of 0 uses the current projection; 1 holds the previous "
+            "accepted projected size."
+        ),
     )
     parser.add_argument("--projection-min-raw-width-ratio", nargs="+", default=("none",))
     parser.add_argument("--projection-max-raw-width-ratio", nargs="+", default=("none",))
@@ -459,6 +471,12 @@ def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             allow_none=True,
         ),
         "projection_no_clip": [bool(args.projection_no_clip)],
+        "projection_size_smoothing": parse_sweep_values(
+            args.projection_size_smoothing,
+            cast=float,
+            argument_name="--projection-size-smoothing",
+            allow_none=True,
+        ),
         "projection_min_raw_width_ratio": parse_sweep_values(
             args.projection_min_raw_width_ratio,
             cast=float,
@@ -647,6 +665,9 @@ def validate_projection_config(config: dict[str, Any]) -> None:
         value = config[name]
         if value is not None and float(value) < 0.0:
             raise ValueError(f"{name} must be non-negative")
+    smoothing = config["projection_size_smoothing"]
+    if smoothing is not None and float(smoothing) > 1.0:
+        raise ValueError("projection_size_smoothing must be between 0 and 1")
     _validate_min_max_pair(
         config,
         "projection_min_raw_width_ratio",
@@ -692,7 +713,10 @@ def make_refiner(
             refinement_blend=float(config["refinement_blend"]),
         )
     )
-    if config["refinement_mode"] == "box":
+    if (
+        config["refinement_mode"] == "box"
+        and config["projection_size_smoothing"] is None
+    ):
         return refiner
     return ProjectedOutputRefiner(
         refiner,
@@ -700,6 +724,7 @@ def make_refiner(
         projection_width_blend=config["projection_width_blend"],
         projection_height_blend=config["projection_height_blend"],
         projection_no_clip=bool(config["projection_no_clip"]),
+        projection_size_smoothing=config["projection_size_smoothing"],
         projection_min_raw_width_ratio=config["projection_min_raw_width_ratio"],
         projection_max_raw_width_ratio=config["projection_max_raw_width_ratio"],
         projection_min_raw_height_ratio=config["projection_min_raw_height_ratio"],
