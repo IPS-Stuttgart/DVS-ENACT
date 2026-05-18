@@ -98,6 +98,26 @@ least 3 active measurements, mean activity of at least 0.10, IoU of at least
 0.60 with the base box, and refined/base area ratio of at most 1.50. Rejected
 frames keep the base tracker box and are recorded in the diagnostics JSON.
 
+To test DVS-ENACT as a confidence and short-term memory signal rather than only
+a one-frame refiner, replay an existing diagnostics JSON with confidence-memory
+gating:
+
+```powershell
+python scripts/run_eventvot_confidence_memory.py `
+  --diagnostics-json path\to\eventvot_refinement_summary.json `
+  --output-results path\to\EventVOT_eval_toolkit\eventvot_tracking_results\HDETrackV2_DVSENACT_MEMORY_tracking_result `
+  --eventvot-root D:\Uni-Data\EventVOT `
+  --split val `
+  --decisions-csv outputs\eventvot-memory-decisions.csv
+```
+
+Confident DVS updates are trusted directly and stored as a correction memory.
+Weak or event-silent frames may reuse the last trusted correction for a few
+compatible base-tracker frames with exponential decay; incompatible jumps and
+stale memories fall back to the base tracker. Tune `--direct-confidence-threshold`,
+`--max-memory-age`, `--memory-decay`, and `--memory-alpha` on validation only
+before running held-out test results.
+
 Tune EventVOT refinement parameters on the validation subset only:
 
 ```powershell
