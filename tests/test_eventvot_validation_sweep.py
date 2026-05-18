@@ -61,6 +61,25 @@ def _parse_sweep_args(module, tmp_path: Path, result_root: Path, *extra: str):
     )
 
 
+def _single_config_grid_args() -> tuple[str, ...]:
+    return (
+        "--refinement-blend",
+        "0.1",
+        "--search-expansion-factor",
+        "1.1",
+        "--max-events",
+        "64",
+        "--min-events",
+        "3",
+        "--event-activity-floor",
+        "0.0",
+        "--inactive-activity-threshold",
+        "0.1",
+        "--measurement-noise-variance",
+        "1.0",
+    )
+
+
 def test_eventvot_validation_metrics_match_perfect_boxes(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     split_root, result_root = _write_validation_fixture(tmp_path)
@@ -115,20 +134,7 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         module,
         tmp_path,
         result_root,
-        "--refinement-blend",
-        "0.1",
-        "--search-expansion-factor",
-        "1.1",
-        "--max-events",
-        "64",
-        "--min-events",
-        "3",
-        "--event-activity-floor",
-        "0.0",
-        "--inactive-activity-threshold",
-        "0.1",
-        "--measurement-noise-variance",
-        "1.0",
+        *_single_config_grid_args(),
         "--min-accept-used-events",
         "10,20",
         "--min-accept-candidate-iou",
@@ -156,20 +162,7 @@ def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeyp
         module,
         tmp_path,
         result_root,
-        "--refinement-blend",
-        "0.1",
-        "--search-expansion-factor",
-        "1.1",
-        "--max-events",
-        "64",
-        "--min-events",
-        "3",
-        "--event-activity-floor",
-        "0.0",
-        "--inactive-activity-threshold",
-        "0.1",
-        "--measurement-noise-variance",
-        "1.0",
+        *_single_config_grid_args(),
         "--dry-run",
     )
     config = module.iter_parameter_grid(args)[0]
