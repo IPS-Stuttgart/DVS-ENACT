@@ -173,8 +173,12 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
         "none,0.10",
         "--projection-size-smoothing",
         "none,0.50",
+        "--projection-center-clamp-ratio",
+        "none,0.04",
         "--projection-center-deadband-ratio",
         "none,0.02",
+        "--projection-size-clamp-ratio",
+        "none,0.20",
         "--projection-size-deadband-ratio",
         "none,0.05",
         "--projection-confidence-field",
@@ -190,8 +194,8 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 128
-    assert payload["summary"]["config_count"] == 128
+    assert len(grid) == 512
+    assert payload["summary"]["config_count"] == 512
     assert sorted({config["refinement_mode"] for config in grid}) == [
         "box",
         "height-only",
@@ -221,11 +225,25 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     ) == [0.05]
     assert sorted(
         {
+            config["projection_size_clamp_ratio"]
+            for config in grid
+            if config["projection_size_clamp_ratio"] is not None
+        }
+    ) == [0.20]
+    assert sorted(
+        {
             config["projection_center_deadband_ratio"]
             for config in grid
             if config["projection_center_deadband_ratio"] is not None
         }
     ) == [0.02]
+    assert sorted(
+        {
+            config["projection_center_clamp_ratio"]
+            for config in grid
+            if config["projection_center_clamp_ratio"] is not None
+        }
+    ) == [0.04]
     assert sorted(
         {
             config["projection_confidence_field"]
@@ -407,8 +425,12 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
         "0.10",
         "--projection-size-smoothing",
         "0.50",
+        "--projection-center-clamp-ratio",
+        "0.04",
         "--projection-center-deadband-ratio",
         "0.02",
+        "--projection-size-clamp-ratio",
+        "0.20",
         "--projection-size-deadband-ratio",
         "0.05",
         "--projection-confidence-field",
@@ -426,7 +448,9 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
     assert refiner.projection_width_blend == 0.10
     assert refiner.projection_height_blend == 0.10
     assert refiner.projection_size_smoothing == 0.50
+    assert refiner.projection_center_clamp_ratio == 0.04
     assert refiner.projection_center_deadband_ratio == 0.02
+    assert refiner.projection_size_clamp_ratio == 0.20
     assert refiner.projection_size_deadband_ratio == 0.05
     assert refiner.projection_confidence_field == "mean_event_activity"
     assert refiner.projection_confidence_floor == 0.10

@@ -275,6 +275,64 @@ def test_acceptance_replay_center_deadband_filters_small_center_shifts():
     np.testing.assert_allclose(projected, np.array([10.0, 20.0, 100.0, 50.0]))
 
 
+def test_acceptance_replay_center_clamp_caps_center_shift():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [10.0, 0.0, 3.0, 4.0],
+        "refined_bbox": {
+            "x_min": 10.0,
+            "y_min": 0.0,
+            "x_max": 13.0,
+            "y_max": 4.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([0.0, 0.0, 3.0, 4.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(
+            mode="box",
+            center_clamp_ratio=1.0,
+        ),
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 0.0, 3.0, 4.0]))
+
+
+def test_acceptance_replay_size_clamp_caps_size_change():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [0.0, 5.0, 140.0, 80.0],
+        "refined_bbox": {
+            "x_min": 0.0,
+            "y_min": 5.0,
+            "x_max": 140.0,
+            "y_max": 85.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(
+            mode="size-only",
+            size_clamp_ratio=0.20,
+        ),
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 15.0, 120.0, 60.0]))
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -459,7 +517,9 @@ def test_acceptance_replay_run_uses_output_projection_config(tmp_path):
         "mode": "center-only",
         "blend": 0.5,
         "size_smoothing": None,
+        "center_clamp_ratio": None,
         "center_deadband_ratio": None,
+        "size_clamp_ratio": None,
         "size_deadband_ratio": None,
         "confidence_field": None,
         "confidence_floor": None,
@@ -485,6 +545,8 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text
+    assert "--replay-output-center-clamp-ratio" in help_text
     assert "--replay-output-center-deadband-ratio" in help_text
+    assert "--replay-output-size-clamp-ratio" in help_text
     assert "--replay-output-size-deadband-ratio" in help_text
     assert "--replay-output-confidence-field" in help_text

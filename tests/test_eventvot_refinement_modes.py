@@ -182,6 +182,45 @@ def test_center_deadband_keeps_projected_size(monkeypatch):
     np.testing.assert_allclose(projected, np.array([0.0, 15.0, 120.0, 60.0]))
 
 
+def test_center_clamp_caps_projected_center_shift(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([0.0, 0.0, 3.0, 4.0]),
+        np.array([10.0, 0.0, 3.0, 4.0]),
+        refinement_mode="box",
+        projection_center_clamp_ratio=1.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 0.0, 3.0, 4.0]))
+
+
+def test_size_clamp_caps_size_only_axes(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([0.0, 5.0, 140.0, 80.0]),
+        refinement_mode="size-only",
+        projection_size_clamp_ratio=0.20,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 15.0, 120.0, 60.0]))
+
+
+def test_box_size_clamp_preserves_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([20.0, 30.0, 150.0, 100.0]),
+        refinement_mode="box",
+        projection_size_clamp_ratio=0.20,
+    )
+
+    np.testing.assert_allclose(projected, np.array([35.0, 50.0, 120.0, 60.0]))
+
+
 def test_box_projection_smooths_size_around_projected_center(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -319,7 +358,9 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
+    assert "--projection-center-clamp-ratio" in help_text
     assert "--projection-center-deadband-ratio" in help_text
+    assert "--projection-size-clamp-ratio" in help_text
     assert "--projection-size-deadband-ratio" in help_text
     assert "--projection-confidence-field" in help_text
     assert "--projection-min-raw-height-ratio" in help_text

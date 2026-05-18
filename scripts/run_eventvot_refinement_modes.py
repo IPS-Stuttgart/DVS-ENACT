@@ -49,7 +49,9 @@ class ProjectedOutputRefiner:
         projection_height_blend: float | None = None,
         projection_no_clip: bool = False,
         projection_size_smoothing: float | None = None,
+        projection_center_clamp_ratio: float | None = None,
         projection_center_deadband_ratio: float | None = None,
+        projection_size_clamp_ratio: float | None = None,
         projection_size_deadband_ratio: float | None = None,
         projection_confidence_field: str | None = None,
         projection_confidence_floor: float | None = None,
@@ -62,7 +64,9 @@ class ProjectedOutputRefiner:
         validate_refinement_mode(refinement_mode)
         validate_projection_blends(projection_width_blend, projection_height_blend)
         validate_projection_size_smoothing(projection_size_smoothing)
+        validate_projection_center_clamp(projection_center_clamp_ratio)
         validate_projection_center_deadband(projection_center_deadband_ratio)
+        validate_projection_size_clamp(projection_size_clamp_ratio)
         validate_projection_size_deadband(projection_size_deadband_ratio)
         validate_projection_confidence_weighting(
             projection_confidence_field,
@@ -82,7 +86,9 @@ class ProjectedOutputRefiner:
         self.projection_height_blend = projection_height_blend
         self.projection_no_clip = projection_no_clip
         self.projection_size_smoothing = projection_size_smoothing
+        self.projection_center_clamp_ratio = projection_center_clamp_ratio
         self.projection_center_deadband_ratio = projection_center_deadband_ratio
+        self.projection_size_clamp_ratio = projection_size_clamp_ratio
         self.projection_size_deadband_ratio = projection_size_deadband_ratio
         self.projection_confidence_field = projection_confidence_field
         self.projection_confidence_floor = projection_confidence_floor
@@ -102,7 +108,9 @@ class ProjectedOutputRefiner:
         if (
             self.refinement_mode == "box"
             and self.projection_size_smoothing is None
+            and self.projection_center_clamp_ratio is None
             and self.projection_center_deadband_ratio is None
+            and self.projection_size_clamp_ratio is None
             and self.projection_size_deadband_ratio is None
             and self.projection_confidence_field is None
         ) or result.fallback_reason is not None:
@@ -120,7 +128,9 @@ class ProjectedOutputRefiner:
             projection_height_blend=self.projection_height_blend,
             previous_projected_size=self._previous_accepted_projected_size,
             projection_size_smoothing=self.projection_size_smoothing,
+            projection_center_clamp_ratio=self.projection_center_clamp_ratio,
             projection_center_deadband_ratio=self.projection_center_deadband_ratio,
+            projection_size_clamp_ratio=self.projection_size_clamp_ratio,
             projection_size_deadband_ratio=self.projection_size_deadband_ratio,
             projection_confidence_value=projection_confidence_value(
                 result,
@@ -241,11 +251,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--projection-center-clamp-ratio",
+        type=float,
+        help=(
+            "Optional center-shift clamp relative to the base-box diagonal. "
+            "Projected center shifts larger than this ratio are capped."
+        ),
+    )
+    parser.add_argument(
         "--projection-size-deadband-ratio",
         type=float,
         help=(
             "Optional per-axis size deadband relative to the base width/height. "
             "Projected size changes smaller than this ratio are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--projection-size-clamp-ratio",
+        type=float,
+        help=(
+            "Optional per-axis size clamp relative to the base width/height. "
+            "Projected size changes larger than this ratio are capped."
         ),
     )
     parser.add_argument(
@@ -290,7 +316,9 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_height_blend=args.projection_height_blend,
         projection_no_clip=args.projection_no_clip,
         projection_size_smoothing=args.projection_size_smoothing,
+        projection_center_clamp_ratio=args.projection_center_clamp_ratio,
         projection_center_deadband_ratio=args.projection_center_deadband_ratio,
+        projection_size_clamp_ratio=args.projection_size_clamp_ratio,
         projection_size_deadband_ratio=args.projection_size_deadband_ratio,
         projection_confidence_field=args.projection_confidence_field,
         projection_confidence_floor=args.projection_confidence_floor,
@@ -335,7 +363,9 @@ def project_refinement_output(
     projection_height_blend: float | None = None,
     previous_projected_size: np.ndarray | None = None,
     projection_size_smoothing: float | None = None,
+    projection_center_clamp_ratio: float | None = None,
     projection_center_deadband_ratio: float | None = None,
+    projection_size_clamp_ratio: float | None = None,
     projection_size_deadband_ratio: float | None = None,
     projection_confidence_value: float | None = None,
     projection_confidence_floor: float | None = None,
@@ -347,7 +377,9 @@ def project_refinement_output(
     validate_refinement_mode(refinement_mode)
     validate_projection_blends(projection_width_blend, projection_height_blend)
     validate_projection_size_smoothing(projection_size_smoothing)
+    validate_projection_center_clamp(projection_center_clamp_ratio)
     validate_projection_center_deadband(projection_center_deadband_ratio)
+    validate_projection_size_clamp(projection_size_clamp_ratio)
     validate_projection_size_deadband(projection_size_deadband_ratio)
     validate_projection_confidence_bounds(
         projection_confidence_floor,
@@ -415,6 +447,17 @@ def project_refinement_output(
         confidence_floor=projection_confidence_floor,
         confidence_ceiling=projection_confidence_ceiling,
     )
+    output = apply_projection_center_clamp(
+        candidate,
+        output,
+        projection_center_clamp_ratio=projection_center_clamp_ratio,
+    )
+    output = apply_projection_size_clamp(
+        candidate,
+        output,
+        refinement_mode=refinement_mode,
+        projection_size_clamp_ratio=projection_size_clamp_ratio,
+    )
     output = apply_projection_center_deadband(
         candidate,
         output,
@@ -427,6 +470,71 @@ def project_refinement_output(
         projection_size_deadband_ratio=projection_size_deadband_ratio,
     )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def apply_projection_center_clamp(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    projection_center_clamp_ratio: float | None,
+) -> np.ndarray:
+    """Cap projected center shifts relative to the base-box diagonal."""
+    validate_projection_center_clamp(projection_center_clamp_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_center_clamp_ratio is None:
+        return output
+
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    output_center = output[:2] + 0.5 * output[2:]
+    diagonal = float(np.linalg.norm(candidate[2:]))
+    if diagonal <= 1e-9:
+        return output
+    shift = output_center - candidate_center
+    shift_norm = float(np.linalg.norm(shift))
+    max_shift = float(projection_center_clamp_ratio) * diagonal
+    if shift_norm <= max_shift or shift_norm <= 1e-9:
+        return output
+    clamped_center = candidate_center + shift * (max_shift / shift_norm)
+    output[:2] = clamped_center - 0.5 * output[2:]
+    return output
+
+
+def apply_projection_size_clamp(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    projection_size_clamp_ratio: float | None,
+) -> np.ndarray:
+    """Cap projected size changes relative to base width/height."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_size_clamp(projection_size_clamp_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_size_clamp_ratio is None:
+        return output
+
+    axes = projected_size_axes(refinement_mode)
+    if axes.size == 0:
+        return output
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_size = np.maximum(candidate[2:], 1e-9)
+    size_delta = output[2:] - candidate[2:]
+    max_delta = float(projection_size_clamp_ratio) * candidate_size
+    clamped_size = np.array(output[2:], dtype=float, copy=True)
+    clamped_size[axes] = candidate[2:][axes] + np.clip(
+        size_delta[axes],
+        -max_delta[axes],
+        max_delta[axes],
+    )
+    clamped_size = np.maximum(clamped_size, 0.0)
+    if refinement_mode in {"size-only", "width-only", "height-only"}:
+        center = candidate[:2] + 0.5 * candidate[2:]
+    else:
+        center = output[:2] + 0.5 * output[2:]
+    output[:2] = center - 0.5 * clamped_size
+    output[2:] = clamped_size
+    return output
 
 
 def apply_projection_center_deadband(
@@ -802,6 +910,16 @@ def validate_projection_size_smoothing(projection_size_smoothing: float | None) 
         raise ValueError("projection_size_smoothing must be between 0 and 1")
 
 
+def validate_projection_center_clamp(
+    projection_center_clamp_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection center clamp ratios."""
+    if projection_center_clamp_ratio is None:
+        return
+    if float(projection_center_clamp_ratio) < 0.0:
+        raise ValueError("projection_center_clamp_ratio must be non-negative")
+
+
 def validate_projection_center_deadband(
     projection_center_deadband_ratio: float | None,
 ) -> None:
@@ -810,6 +928,16 @@ def validate_projection_center_deadband(
         return
     if float(projection_center_deadband_ratio) < 0.0:
         raise ValueError("projection_center_deadband_ratio must be non-negative")
+
+
+def validate_projection_size_clamp(
+    projection_size_clamp_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection size clamp ratios."""
+    if projection_size_clamp_ratio is None:
+        return
+    if float(projection_size_clamp_ratio) < 0.0:
+        raise ValueError("projection_size_clamp_ratio must be non-negative")
 
 
 def validate_projection_size_deadband(

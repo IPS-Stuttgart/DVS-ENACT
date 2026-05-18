@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --refinement-mode size-only width-only height-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-center-deadband-ratio none 0.02 --projection-size-deadband-ratio none 0.03"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only width-only height-only --projection-center-clamp-ratio none 0.05 --projection-size-clamp-ratio none 0.15"
         required: false
         default: ""
         type: string
@@ -702,8 +702,14 @@ jobs:
               "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO": best.get(
                   "projection_size_deadband_ratio"
               ),
+              "LOCKED_PROJECTION_SIZE_CLAMP_RATIO": best.get(
+                  "projection_size_clamp_ratio"
+              ),
               "LOCKED_PROJECTION_CENTER_DEADBAND_RATIO": best.get(
                   "projection_center_deadband_ratio"
+              ),
+              "LOCKED_PROJECTION_CENTER_CLAMP_RATIO": best.get(
+                  "projection_center_clamp_ratio"
               ),
               "LOCKED_PROJECTION_CONFIDENCE_FIELD": best.get(
                   "projection_confidence_field"
@@ -783,7 +789,9 @@ jobs:
             echo "LOCKED_PROJECTION_NO_CLIP=false"
             echo "LOCKED_PROJECTION_SIZE_SMOOTHING="
             echo "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO="
+            echo "LOCKED_PROJECTION_SIZE_CLAMP_RATIO="
             echo "LOCKED_PROJECTION_CENTER_DEADBAND_RATIO="
+            echo "LOCKED_PROJECTION_CENTER_CLAMP_RATIO="
             echo "LOCKED_PROJECTION_CONFIDENCE_FIELD="
             echo "LOCKED_PROJECTION_CONFIDENCE_FLOOR="
             echo "LOCKED_PROJECTION_CONFIDENCE_CEILING="
@@ -887,8 +895,14 @@ jobs:
               "projection_size_deadband_ratio": os.environ.get(
                   "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO", ""
               ),
+              "projection_size_clamp_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_SIZE_CLAMP_RATIO", ""
+              ),
               "projection_center_deadband_ratio": os.environ.get(
                   "LOCKED_PROJECTION_CENTER_DEADBAND_RATIO", ""
+              ),
+              "projection_center_clamp_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_CENTER_CLAMP_RATIO", ""
               ),
               "projection_confidence_field": os.environ.get(
                   "LOCKED_PROJECTION_CONFIDENCE_FIELD", ""
@@ -989,8 +1003,14 @@ jobs:
           if [[ -n "${LOCKED_PROJECTION_SIZE_DEADBAND_RATIO:-}" ]]; then
             args+=(--projection-size-deadband-ratio "$LOCKED_PROJECTION_SIZE_DEADBAND_RATIO")
           fi
+          if [[ -n "${LOCKED_PROJECTION_SIZE_CLAMP_RATIO:-}" ]]; then
+            args+=(--projection-size-clamp-ratio "$LOCKED_PROJECTION_SIZE_CLAMP_RATIO")
+          fi
           if [[ -n "${LOCKED_PROJECTION_CENTER_DEADBAND_RATIO:-}" ]]; then
             args+=(--projection-center-deadband-ratio "$LOCKED_PROJECTION_CENTER_DEADBAND_RATIO")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_CENTER_CLAMP_RATIO:-}" ]]; then
+            args+=(--projection-center-clamp-ratio "$LOCKED_PROJECTION_CENTER_CLAMP_RATIO")
           fi
           if [[ -n "${LOCKED_PROJECTION_CONFIDENCE_FIELD:-}" || -n "${LOCKED_PROJECTION_CONFIDENCE_FLOOR:-}" || -n "${LOCKED_PROJECTION_CONFIDENCE_CEILING:-}" ]]; then
             if [[ -z "${LOCKED_PROJECTION_CONFIDENCE_FIELD:-}" || -z "${LOCKED_PROJECTION_CONFIDENCE_FLOOR:-}" || -z "${LOCKED_PROJECTION_CONFIDENCE_CEILING:-}" ]]; then
