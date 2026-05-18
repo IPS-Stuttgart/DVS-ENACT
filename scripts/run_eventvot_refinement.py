@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -22,6 +23,9 @@ from dvs_enact import (
     EventBatch,
     empty_event_batch,
 )
+
+
+REFINEMENT_REUSE_METADATA_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -121,11 +125,109 @@ def save_xywh_result_file(path: Path, boxes: np.ndarray) -> None:
     np.savetxt(path, np.asarray(boxes, dtype=float), delimiter="\t", fmt="%.6f")
 
 
+def refinement_reuse_metadata_path(output_result_file: Path) -> Path:
+    """Return the sidecar path used to validate resumable EventVOT outputs."""
+    return output_result_file.with_name(f"{output_result_file.stem}_metadata.json")
+
+
+def file_sha256(path: Path) -> str:
+    """Return a streaming SHA-256 digest for a file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _json_stable(value: Any) -> Any:
+    """Return a JSON-normalized value for stable equality comparisons."""
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def build_refinement_reuse_signature(
+    *,
+    sequence_name: str,
+    sequence_dir: Path,
+    base_result_file: Path,
+    event_csv: Path,
+    base_boxes: np.ndarray,
+    refiner: DVSContourRefiner,
+    event_column_order: str,
+    acceptance_config: EventVOTAcceptanceConfig,
+) -> dict[str, Any]:
+    """Return the exact input/config signature required to reuse an output file."""
+    return _json_stable(
+        {
+            "schema_version": REFINEMENT_REUSE_METADATA_SCHEMA_VERSION,
+            "sequence": sequence_name,
+            "sequence_dir": str(sequence_dir.resolve()),
+            "base_result_file": str(base_result_file.resolve()),
+            "base_result_sha256": file_sha256(base_result_file),
+            "base_result_frame_count": int(base_boxes.shape[0]),
+            "event_csv": str(event_csv.resolve()),
+            "event_csv_sha256": file_sha256(event_csv),
+            "event_column_order": event_column_order,
+            "refiner_config": asdict(refiner.config),
+            "acceptance_config": asdict(acceptance_config),
+        }
+    )
+
+
+def load_refinement_reuse_metadata(output_result_file: Path) -> dict[str, Any] | None:
+    """Load validated reuse metadata for an EventVOT output file, if present."""
+    metadata_file = refinement_reuse_metadata_path(output_result_file)
+    if not metadata_file.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("schema_version") != REFINEMENT_REUSE_METADATA_SCHEMA_VERSION:
+        return None
+    return metadata
+
+
+def write_refinement_reuse_metadata(
+    output_result_file: Path,
+    reuse_signature: dict[str, Any],
+    sequence_summary: dict[str, Any],
+) -> Path:
+    """Write metadata proving that an EventVOT output matches current inputs."""
+    timing_file = output_result_file.with_name(f"{output_result_file.stem}_time.txt")
+    summary_without_frames = {
+        key: value for key, value in sequence_summary.items() if key != "frames"
+    }
+    metadata = {
+        "schema_version": REFINEMENT_REUSE_METADATA_SCHEMA_VERSION,
+        "reuse_signature": _json_stable(reuse_signature),
+        "output_result_sha256": file_sha256(output_result_file),
+        "timing_sha256": file_sha256(timing_file) if timing_file.exists() else None,
+        "sequence_summary": _json_stable(summary_without_frames),
+    }
+    metadata_file = refinement_reuse_metadata_path(output_result_file)
+    metadata_file.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metadata_file
+
+
 def existing_output_result_is_complete(
     output_result_file: Path,
     base_boxes: np.ndarray,
+    *,
+    expected_reuse_signature: dict[str, Any] | None = None,
 ) -> tuple[bool, np.ndarray | None]:
-    """Return whether an existing result file is complete enough to resume."""
+    """Return whether an existing result file can be safely reused.
+
+    Shape/finite-value checks alone are not sufficient for result-critical
+    resume behavior: a complete-looking file may have been produced with a
+    different base tracker, raw-event parser, refiner configuration, or
+    acceptance gate. When a signature is supplied, reuse is allowed only when
+    the sidecar metadata proves that all result-changing inputs match.
+    """
     if not output_result_file.exists():
         return False, None
     try:
@@ -140,6 +242,21 @@ def existing_output_result_is_complete(
         return False, None
     if np.any(output_boxes[:, 2:] <= 0.0):
         return False, None
+    if expected_reuse_signature is None:
+        return True, output_boxes
+
+    metadata = load_refinement_reuse_metadata(output_result_file)
+    if metadata is None:
+        return False, None
+    if metadata.get("reuse_signature") != _json_stable(expected_reuse_signature):
+        return False, None
+    if metadata.get("output_result_sha256") != file_sha256(output_result_file):
+        return False, None
+    timing_hash = metadata.get("timing_sha256")
+    if timing_hash is not None:
+        timing_file = output_result_file.with_name(f"{output_result_file.stem}_time.txt")
+        if not timing_file.exists() or file_sha256(timing_file) != timing_hash:
+            return False, None
     return True, output_boxes
 
 
@@ -402,10 +519,22 @@ def refine_sequence(
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
+    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    reuse_signature = build_refinement_reuse_signature(
+        sequence_name=sequence_name,
+        sequence_dir=sequence_dir,
+        base_result_file=base_result_file,
+        event_csv=event_csv,
+        base_boxes=base_boxes,
+        refiner=refiner,
+        event_column_order=event_column_order,
+        acceptance_config=acceptance_config,
+    )
     if skip_existing:
         complete, output_boxes = existing_output_result_is_complete(
             output_result_file,
             base_boxes,
+            expected_reuse_signature=reuse_signature,
         )
         if complete and output_boxes is not None:
             return summarize_skipped_sequence(
@@ -416,8 +545,6 @@ def refine_sequence(
                 base_boxes,
                 output_boxes,
             )
-
-    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
 
     refined_boxes = np.array(base_boxes, dtype=float, copy=True)
     timings = np.zeros(frame_count, dtype=float)
@@ -510,7 +637,7 @@ def refine_sequence(
     )
     accepted_refinement_count = sum(1 for frame in frames if frame["accept_refinement"])
     used_event_counts = [int(frame["used_event_count"]) for frame in frames[1:]]
-    return {
+    summary = {
         "sequence": sequence_name,
         "sequence_dir": str(sequence_dir),
         "event_csv": str(event_csv),
@@ -528,6 +655,13 @@ def refine_sequence(
         "total_refinement_seconds": float(np.sum(timings)),
         "frames": frames,
     }
+    metadata_file = write_refinement_reuse_metadata(
+        output_result_file,
+        reuse_signature,
+        summary,
+    )
+    summary["reuse_metadata_file"] = str(metadata_file)
+    return summary
 
 
 def summarize_skipped_sequence(
@@ -540,13 +674,34 @@ def summarize_skipped_sequence(
 ) -> dict[str, Any]:
     """Build a diagnostics summary for a complete result reused during resume."""
     frame_count = int(output_boxes.shape[0])
-    changed_frame_count = int(
-        np.any(~np.isclose(output_boxes, base_boxes, rtol=1e-6, atol=1e-6), axis=1).sum()
-    )
     timings = load_timing_file(output_result_file, frame_count)
     if timings is None:
         timings = np.zeros(frame_count, dtype=float)
         _save_timing_file(output_result_file, timings)
+
+    metadata = load_refinement_reuse_metadata(output_result_file)
+    metadata_summary = metadata.get("sequence_summary") if metadata is not None else None
+    if isinstance(metadata_summary, dict):
+        summary = dict(metadata_summary)
+        signature = metadata.get("reuse_signature", {})
+        summary.update(
+            {
+                "sequence": sequence_name,
+                "sequence_dir": str(sequence_dir),
+                "event_csv": signature.get("event_csv"),
+                "base_result_file": str(base_result_file),
+                "output_result_file": str(output_result_file),
+                "total_refinement_seconds": float(np.sum(timings)),
+                "skipped_existing_output": True,
+                "reuse_metadata_file": str(refinement_reuse_metadata_path(output_result_file)),
+                "frames": [],
+            }
+        )
+        return summary
+
+    changed_frame_count = int(
+        np.any(~np.isclose(output_boxes, base_boxes, rtol=1e-6, atol=1e-6), axis=1).sum()
+    )
     return {
         "sequence": sequence_name,
         "sequence_dir": str(sequence_dir),
