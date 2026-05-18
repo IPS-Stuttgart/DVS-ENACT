@@ -33,6 +33,9 @@ DEFAULT_EVENT_ACTIVITY_FLOOR = (0.00, 0.02, 0.05)
 DEFAULT_INACTIVE_ACTIVITY_THRESHOLD = (0.02, 0.05, 0.10)
 DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
 
+SweepValue = float | int | None
+NONE_SWEEP_TOKENS = {"none", "null", "off", "disabled", "disable"}
+
 REFINER_GRID_KEYS = (
     "refinement_blend",
     "search_expansion_factor",
@@ -59,7 +62,7 @@ ACCEPTANCE_GRID_KEYS = (
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
 )
-OPTIONAL_ACCEPTANCE_GRID_KEYS = (
+OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_raw_candidate_iou",
     "min_raw_candidate_area_ratio",
     "max_raw_candidate_area_ratio",
@@ -68,7 +71,7 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = (
     "min_mean_event_polarity_weight",
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
-)
+}
 INT_GRID_KEYS = {
     "max_events",
     "min_events",
@@ -76,8 +79,6 @@ INT_GRID_KEYS = {
     "min_accept_active_measurements",
 }
 CONFIG_ID_KEYS = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
-NONE_SWEEP_TOKENS = {"none", "null", "off", "disable", "disabled"}
-SweepValue = float | int | None
 
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
@@ -164,10 +165,10 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
 
     Each value accepts either repeated shell tokens (``--arg 0.1 0.2``) or a
     single comma/whitespace-separated workflow-dispatch string
-    (``--arg "0.1,0.2"``). Optional diagnostic gates also accept ``none`` or
-    ``off`` to disable the gate. Optional defaults are disabled so that missing
-    diagnostics, e.g. polarity fields when polarity is disabled, do not reject
-    otherwise valid refinements.
+    (``--arg "0.1,0.2"``). Optional acceptance gates also accept ``none``,
+    ``null``, or ``off`` to leave the corresponding guard disabled. Defaults are
+    singletons so the historical refiner grid size is unchanged unless the
+    caller explicitly sweeps gates.
     """
     parser.add_argument(
         "--min-accept-used-events",
@@ -218,52 +219,37 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         "--min-raw-candidate-iou",
         nargs="+",
         default=("none",),
-        help="Acceptance sweep values for minimum raw/base IoU; use none/off to disable.",
+        help="Acceptance sweep values for minimum raw/base IoU; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-raw-candidate-area-ratio",
         nargs="+",
         default=("none",),
-        help=(
-            "Acceptance sweep values for minimum raw/base area ratio; "
-            "use none/off to disable."
-        ),
+        help="Acceptance sweep values for minimum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-candidate-area-ratio",
         nargs="+",
         default=("none",),
-        help=(
-            "Acceptance sweep values for maximum raw/base area ratio; "
-            "use none/off to disable."
-        ),
+        help="Acceptance sweep values for maximum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-center-shift-ratio",
         nargs="+",
         default=("none",),
-        help=(
-            "Acceptance sweep values for maximum raw/base center shift ratio; "
-            "use none/off to disable."
-        ),
+        help="Acceptance sweep values for maximum raw/base center shift ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-polarity-consistency-fraction",
         nargs="+",
         default=("none",),
-        help=(
-            "Acceptance sweep values for minimum polarity consistency; "
-            "use none/off to disable."
-        ),
+        help="Acceptance sweep values for minimum polarity consistency; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-mean-event-polarity-weight",
         nargs="+",
         default=("none",),
-        help=(
-            "Acceptance sweep values for minimum mean event polarity weight; "
-            "use none/off to disable."
-        ),
+        help="Acceptance sweep values for minimum mean event polarity weight; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-quadratic-form-per-active-measurement",
@@ -271,14 +257,14 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         default=("none",),
         help=(
             "Acceptance sweep values for max quadratic-form-per-active-measurement; "
-            "use none/off to disable."
+            "use 'none' to disable."
         ),
     )
     parser.add_argument(
         "--min-active-fraction",
         nargs="+",
         default=("none",),
-        help="Acceptance sweep values for minimum active fraction; use none/off to disable.",
+        help="Acceptance sweep values for minimum active fraction; use 'none' to disable.",
     )
 
 
@@ -381,10 +367,8 @@ def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, SweepValue]]
         for key, value in zip(keys, combination, strict=True):
             if value is None:
                 config[key] = None
-            elif key in INT_GRID_KEYS:
-                config[key] = int(value)
             else:
-                config[key] = float(value)
+                config[key] = int(value) if key in INT_GRID_KEYS else float(value)
         configs.append(config)
     return configs
 
@@ -490,14 +474,9 @@ def parse_sweep_values(
         for token in re.split(r"[\s,]+", str(raw_value).strip()):
             if not token:
                 continue
-            if token.lower() in NONE_SWEEP_TOKENS:
-                if allow_none:
-                    values.append(None)
-                    continue
-                raise ValueError(
-                    f"{argument_name} cannot be disabled with {token!r}; "
-                    "only optional acceptance gates accept none/off"
-                )
+            if allow_none and token.strip().lower() in NONE_SWEEP_TOKENS:
+                values.append(None)
+                continue
             try:
                 values.append(cast(token))
             except ValueError as error:
@@ -548,7 +527,10 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
         min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
         max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
         max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
-        min_raw_candidate_iou=optional_float_config_value(config, "min_raw_candidate_iou"),
+        min_raw_candidate_iou=optional_float_config_value(
+            config,
+            "min_raw_candidate_iou",
+        ),
         min_raw_candidate_area_ratio=optional_float_config_value(
             config,
             "min_raw_candidate_area_ratio",
@@ -581,9 +563,11 @@ def optional_float_config_value(
     config: dict[str, SweepValue],
     key: str,
 ) -> float | None:
-    """Return an optional float gate threshold from a sweep config."""
+    """Return an optional float gate value, preserving disabled ``None``."""
     value = config.get(key)
-    return None if value is None else float(value)
+    if value is None:
+        return None
+    return float(value)
 
 
 def make_result_row(
