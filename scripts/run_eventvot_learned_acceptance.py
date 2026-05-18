@@ -10,13 +10,12 @@ and the learned policy is replayed to write ordinary EventVOT result files.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import sys
 import tempfile
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from run_eventvot_acceptance_replay import (  # noqa: E402
     ReplayAcceptanceConfig,
+    _finite_xywh as finite_xywh,
     evaluate_frame_acceptance,
     frame_refiner_output_xywh,
     resolve_replay_base_result_file,
@@ -229,11 +229,12 @@ def run(options: LearnedAcceptanceOptions) -> dict[str, Any]:
         output_results=options.output_results,
     )
 
-    metrics = None
-    if not options.skip_evaluation:
-        if split_root is None:
-            raise ValueError("--eventvot-root is required unless --skip-evaluation is used")
-        metrics = evaluate_eventvot_results(split_root, options.output_results, sequence_names)
+    metrics = evaluate_optional_results(
+        split_root,
+        options.output_results,
+        sequence_names,
+        skip_evaluation=options.skip_evaluation,
+    )
 
     if options.decisions_csv is not None:
         write_decisions_csv(options.decisions_csv, decisions)
@@ -340,6 +341,20 @@ def collect_training_examples(
         "skipped_counts": dict(sorted(skipped.items())),
     }
     return examples, summary
+
+
+def evaluate_optional_results(
+    split_root: Path | None,
+    output_results: Path,
+    sequence_names: list[str],
+    *,
+    skip_evaluation: bool,
+) -> dict[str, float] | None:
+    if skip_evaluation:
+        return None
+    if split_root is None:
+        raise ValueError("--eventvot-root is required unless --skip-evaluation is used")
+    return evaluate_eventvot_results(split_root, output_results, sequence_names)
 
 
 def load_sequence_supervision(
@@ -729,7 +744,7 @@ def score_raw_features(policy: dict[str, Any], features: list[float]) -> float:
     }
     design, _normalizer = make_design_matrix(raw, normalizer)
     weights = np.asarray(policy["weights"], dtype=float)
-    score = float(design @ weights + float(policy["bias"]))
+    score = float((design @ weights + float(policy["bias"]))[0])
     return float(sigmoid(score))
 
 
@@ -757,11 +772,6 @@ def load_policy(path: Path) -> dict[str, Any]:
     if tuple(policy.get("raw_feature_names", ())) != RAW_FEATURE_NAMES:
         raise ValueError(f"Learned policy features do not match this script: {path}")
     return policy
-
-
-def finite_xywh(box: np.ndarray) -> bool:
-    values = np.asarray(box, dtype=float)
-    return values.shape == (4,) and np.all(np.isfinite(values)) and bool(np.all(values[2:] > 0.0))
 
 
 def safe_log1p(value: Any) -> float:

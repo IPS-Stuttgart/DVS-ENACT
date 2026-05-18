@@ -49,62 +49,69 @@ def _write_toy_validation_split(tmp_path):
     return eventvot_root, base_results
 
 
+def _refinement_frame(frame_index, output_xywh, *, fallback=None, diagnostics=None):
+    frame = {
+        "frame_index": frame_index,
+        "fallback_reason": fallback,
+        "refiner_output_xywh": output_xywh,
+    }
+    if diagnostics:
+        frame.update(diagnostics)
+    if fallback is None:
+        x, y, width, height = output_xywh
+        frame["refined_bbox"] = {
+            "x_min": x,
+            "y_min": y,
+            "x_max": x + width,
+            "y_max": y + height,
+        }
+    return frame
+
+
 def _write_toy_diagnostics(tmp_path, base_result_file):
     diagnostics_json = tmp_path / "diagnostics.json"
+    confident_update = {
+        "event_count": 500,
+        "used_event_count": 128,
+        "active_measurement_count": 96,
+        "mean_event_activity": 0.85,
+        "polarity_consistency_fraction": 0.95,
+        "mean_event_polarity_weight": 0.90,
+        "quadratic_form": 8.0,
+    }
+    weak_update = {
+        "event_count": 20,
+        "used_event_count": 8,
+        "active_measurement_count": 1,
+        "mean_event_activity": 0.05,
+        "polarity_consistency_fraction": 0.10,
+        "mean_event_polarity_weight": -0.50,
+        "quadratic_form": 60.0,
+    }
+    sequence = {
+        "sequence": "recording_0001",
+        "base_result_file": str(base_result_file),
+        "frames": [
+            _refinement_frame(
+                0,
+                [10.0, 10.0, 20.0, 20.0],
+                fallback="initial_frame",
+            ),
+            _refinement_frame(
+                1,
+                [12.0, 10.0, 20.0, 20.0],
+                diagnostics=confident_update,
+            ),
+            _refinement_frame(
+                2,
+                [80.0, 80.0, 20.0, 20.0],
+                diagnostics=weak_update,
+            ),
+        ],
+    }
     diagnostics_json.write_text(
         json.dumps(
-            {
-                "options": {"split": "val"},
-                "sequences": [
-                    {
-                        "sequence": "recording_0001",
-                        "base_result_file": str(base_result_file),
-                        "frames": [
-                            {
-                                "frame_index": 0,
-                                "fallback_reason": "initial_frame",
-                                "refiner_output_xywh": [10.0, 10.0, 20.0, 20.0],
-                            },
-                            {
-                                "frame_index": 1,
-                                "fallback_reason": None,
-                                "event_count": 500,
-                                "used_event_count": 128,
-                                "active_measurement_count": 96,
-                                "mean_event_activity": 0.85,
-                                "polarity_consistency_fraction": 0.95,
-                                "mean_event_polarity_weight": 0.90,
-                                "quadratic_form": 8.0,
-                                "refiner_output_xywh": [12.0, 10.0, 20.0, 20.0],
-                                "refined_bbox": {
-                                    "x_min": 12.0,
-                                    "y_min": 10.0,
-                                    "x_max": 32.0,
-                                    "y_max": 30.0,
-                                },
-                            },
-                            {
-                                "frame_index": 2,
-                                "fallback_reason": None,
-                                "event_count": 20,
-                                "used_event_count": 8,
-                                "active_measurement_count": 1,
-                                "mean_event_activity": 0.05,
-                                "polarity_consistency_fraction": 0.10,
-                                "mean_event_polarity_weight": -0.50,
-                                "quadratic_form": 60.0,
-                                "refiner_output_xywh": [80.0, 80.0, 20.0, 20.0],
-                                "refined_bbox": {
-                                    "x_min": 80.0,
-                                    "y_min": 80.0,
-                                    "x_max": 100.0,
-                                    "y_max": 100.0,
-                                },
-                            },
-                        ],
-                    }
-                ],
-            },
+            {"options": {"split": "val"}, "sequences": [sequence]},
             indent=2,
         ),
         encoding="utf-8",
