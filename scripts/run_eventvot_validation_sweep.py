@@ -33,6 +33,9 @@ DEFAULT_EVENT_ACTIVITY_FLOOR = (0.00, 0.02, 0.05)
 DEFAULT_INACTIVE_ACTIVITY_THRESHOLD = (0.02, 0.05, 0.10)
 DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
 
+SweepValue = float | int | None
+NONE_SWEEP_TOKENS = {"none", "null", "off", "disabled", "disable"}
+
 REFINER_GRID_KEYS = (
     "refinement_blend",
     "search_expansion_factor",
@@ -59,6 +62,16 @@ ACCEPTANCE_GRID_KEYS = (
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
 )
+OPTIONAL_ACCEPTANCE_GRID_KEYS = {
+    "min_raw_candidate_iou",
+    "min_raw_candidate_area_ratio",
+    "max_raw_candidate_area_ratio",
+    "max_raw_center_shift_ratio",
+    "min_polarity_consistency_fraction",
+    "min_mean_event_polarity_weight",
+    "max_quadratic_form_per_active_measurement",
+    "min_active_fraction",
+}
 INT_GRID_KEYS = {
     "max_events",
     "min_events",
@@ -152,8 +165,10 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
 
     Each value accepts either repeated shell tokens (``--arg 0.1 0.2``) or a
     single comma/whitespace-separated workflow-dispatch string
-    (``--arg "0.1,0.2"``). Defaults are singletons so the historical refiner
-    grid size is unchanged unless the caller explicitly sweeps gates.
+    (``--arg "0.1,0.2"``). Optional acceptance gates also accept ``none``,
+    ``null``, or ``off`` to leave the corresponding guard disabled. Defaults are
+    singletons so the historical refiner grid size is unchanged unless the
+    caller explicitly sweeps gates.
     """
     parser.add_argument(
         "--min-accept-used-events",
@@ -203,50 +218,53 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--min-raw-candidate-iou",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum raw/base IoU.",
+        default=("none",),
+        help="Acceptance sweep values for minimum raw/base IoU; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-raw-candidate-area-ratio",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum raw/base area ratio.",
+        default=("none",),
+        help="Acceptance sweep values for minimum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-candidate-area-ratio",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for maximum raw/base area ratio.",
+        default=("none",),
+        help="Acceptance sweep values for maximum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-center-shift-ratio",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for maximum raw/base center shift ratio.",
+        default=("none",),
+        help="Acceptance sweep values for maximum raw/base center shift ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-polarity-consistency-fraction",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum polarity consistency.",
+        default=("none",),
+        help="Acceptance sweep values for minimum polarity consistency; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-mean-event-polarity-weight",
         nargs="+",
-        default=("-inf",),
-        help="Acceptance sweep values for minimum mean event polarity weight.",
+        default=("none",),
+        help="Acceptance sweep values for minimum mean event polarity weight; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-quadratic-form-per-active-measurement",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for max quadratic-form-per-active-measurement.",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for max quadratic-form-per-active-measurement; "
+            "use 'none' to disable."
+        ),
     )
     parser.add_argument(
         "--min-active-fraction",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum active fraction.",
+        default=("none",),
+        help="Acceptance sweep values for minimum active fraction; use 'none' to disable.",
     )
 
 
@@ -336,23 +354,26 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]]:
+def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, SweepValue]]:
     keys = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
     acceptance_values = acceptance_value_lists_from_args(args)
     values = tuple(
         getattr(args, key) if key in REFINER_GRID_KEYS else acceptance_values[key]
         for key in keys
     )
-    configs: list[dict[str, float | int]] = []
+    configs: list[dict[str, SweepValue]] = []
     for combination in itertools.product(*values):
-        config: dict[str, float | int] = {}
+        config: dict[str, SweepValue] = {}
         for key, value in zip(keys, combination, strict=True):
-            config[key] = int(value) if key in INT_GRID_KEYS else float(value)
+            if value is None:
+                config[key] = None
+            else:
+                config[key] = int(value) if key in INT_GRID_KEYS else float(value)
         configs.append(config)
     return configs
 
 
-def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[float | int]]:
+def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[SweepValue]]:
     return {
         "min_accept_used_events": parse_sweep_values(
             args.min_accept_used_events,
@@ -393,41 +414,49 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             args.min_raw_candidate_iou,
             cast=float,
             argument_name="--min-raw-candidate-iou",
+            allow_none=True,
         ),
         "min_raw_candidate_area_ratio": parse_sweep_values(
             args.min_raw_candidate_area_ratio,
             cast=float,
             argument_name="--min-raw-candidate-area-ratio",
+            allow_none=True,
         ),
         "max_raw_candidate_area_ratio": parse_sweep_values(
             args.max_raw_candidate_area_ratio,
             cast=float,
             argument_name="--max-raw-candidate-area-ratio",
+            allow_none=True,
         ),
         "max_raw_center_shift_ratio": parse_sweep_values(
             args.max_raw_center_shift_ratio,
             cast=float,
             argument_name="--max-raw-center-shift-ratio",
+            allow_none=True,
         ),
         "min_polarity_consistency_fraction": parse_sweep_values(
             args.min_polarity_consistency_fraction,
             cast=float,
             argument_name="--min-polarity-consistency-fraction",
+            allow_none=True,
         ),
         "min_mean_event_polarity_weight": parse_sweep_values(
             args.min_mean_event_polarity_weight,
             cast=float,
             argument_name="--min-mean-event-polarity-weight",
+            allow_none=True,
         ),
         "max_quadratic_form_per_active_measurement": parse_sweep_values(
             args.max_quadratic_form_per_active_measurement,
             cast=float,
             argument_name="--max-quadratic-form-per-active-measurement",
+            allow_none=True,
         ),
         "min_active_fraction": parse_sweep_values(
             args.min_active_fraction,
             cast=float,
             argument_name="--min-active-fraction",
+            allow_none=True,
         ),
     }
 
@@ -437,12 +466,16 @@ def parse_sweep_values(
     *,
     cast,
     argument_name: str,
-) -> list[float | int]:
+    allow_none: bool = False,
+) -> list[SweepValue]:
     """Parse repeated or comma/whitespace-separated sweep values."""
-    values: list[float | int] = []
+    values: list[SweepValue] = []
     for raw_value in raw_values:
         for token in re.split(r"[\s,]+", str(raw_value).strip()):
             if not token:
+                continue
+            if allow_none and token.strip().lower() in NONE_SWEEP_TOKENS:
+                values.append(None)
                 continue
             try:
                 values.append(cast(token))
@@ -453,8 +486,8 @@ def parse_sweep_values(
     if not values:
         raise ValueError(f"{argument_name} must contain at least one value")
 
-    unique: list[float | int] = []
-    seen: set[float | int] = set()
+    unique: list[SweepValue] = []
+    seen: set[SweepValue] = set()
     for value in values:
         if value in seen:
             continue
@@ -464,7 +497,7 @@ def parse_sweep_values(
 
 
 def make_refiner(
-    config: dict[str, float | int],
+    config: dict[str, SweepValue],
     args: argparse.Namespace,
 ) -> DVSContourRefiner:
     return DVSContourRefiner(
@@ -485,7 +518,7 @@ def make_refiner(
     )
 
 
-def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcceptanceConfig:
+def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcceptanceConfig:
     return EventVOTAcceptanceConfig(
         min_used_event_count=int(config["min_accept_used_events"]),
         min_active_measurement_count=int(config["min_accept_active_measurements"]),
@@ -494,27 +527,53 @@ def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcc
         min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
         max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
         max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
-        min_raw_candidate_iou=float(config.get("min_raw_candidate_iou", 0.0)),
-        min_raw_candidate_area_ratio=float(config.get("min_raw_candidate_area_ratio", 0.0)),
-        max_raw_candidate_area_ratio=float(config.get("max_raw_candidate_area_ratio", float("inf"))),
-        max_raw_center_shift_ratio=float(config.get("max_raw_center_shift_ratio", float("inf"))),
-        min_polarity_consistency_fraction=float(
-            config.get("min_polarity_consistency_fraction", 0.0)
+        min_raw_candidate_iou=optional_float_config_value(
+            config,
+            "min_raw_candidate_iou",
         ),
-        min_mean_event_polarity_weight=float(
-            config.get("min_mean_event_polarity_weight", float("-inf"))
+        min_raw_candidate_area_ratio=optional_float_config_value(
+            config,
+            "min_raw_candidate_area_ratio",
         ),
-        max_quadratic_form_per_active_measurement=float(
-            config.get("max_quadratic_form_per_active_measurement", float("inf"))
+        max_raw_candidate_area_ratio=optional_float_config_value(
+            config,
+            "max_raw_candidate_area_ratio",
         ),
-        min_active_fraction=float(config.get("min_active_fraction", 0.0)),
+        max_raw_center_shift_ratio=optional_float_config_value(
+            config,
+            "max_raw_center_shift_ratio",
+        ),
+        min_polarity_consistency_fraction=optional_float_config_value(
+            config,
+            "min_polarity_consistency_fraction",
+        ),
+        min_mean_event_polarity_weight=optional_float_config_value(
+            config,
+            "min_mean_event_polarity_weight",
+        ),
+        max_quadratic_form_per_active_measurement=optional_float_config_value(
+            config,
+            "max_quadratic_form_per_active_measurement",
+        ),
+        min_active_fraction=optional_float_config_value(config, "min_active_fraction"),
     )
+
+
+def optional_float_config_value(
+    config: dict[str, SweepValue],
+    key: str,
+) -> float | None:
+    """Return an optional float gate value, preserving disabled ``None``."""
+    value = config.get(key)
+    if value is None:
+        return None
+    return float(value)
 
 
 def make_result_row(
     config_id: str,
     tracker_name: str,
-    config: dict[str, float | int],
+    config: dict[str, SweepValue],
     metrics: dict[str, Any],
     refiner_summary: dict[str, Any],
 ) -> dict[str, Any]:
@@ -546,7 +605,7 @@ def make_result_row(
 
 def write_sweep_outputs(
     rows: list[dict[str, Any]],
-    configs: list[dict[str, float | int]],
+    configs: list[dict[str, SweepValue]],
     base_metrics: dict[str, Any],
     metrics_csv: Path,
     summary_json: Path,
@@ -830,7 +889,7 @@ def load_numeric_matrix(path: Path, *, min_columns: int) -> np.ndarray:
     return np.asarray(rows, dtype=float)
 
 
-def make_config_id(index: int, config: dict[str, float | int]) -> str:
+def make_config_id(index: int, config: dict[str, SweepValue]) -> str:
     """Return a stable, cache-safe identifier for a complete sweep config.
 
     The readable tags intentionally summarize only the historically most useful
@@ -858,7 +917,7 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
     )
 
 
-def make_config_hash(config: dict[str, float | int]) -> str:
+def make_config_hash(config: dict[str, SweepValue]) -> str:
     """Hash all sweep parameters that affect refinement or acceptance."""
     payload = {
         key: canonical_config_value(key, config[key])
@@ -873,7 +932,9 @@ def make_config_hash(config: dict[str, float | int]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:12]
 
 
-def canonical_config_value(key: str, value: float | int) -> float | int | str:
+def canonical_config_value(key: str, value: SweepValue) -> float | int | str | None:
+    if value is None:
+        return None
     if key in INT_GRID_KEYS:
         return int(value)
     numeric_value = float(value)
