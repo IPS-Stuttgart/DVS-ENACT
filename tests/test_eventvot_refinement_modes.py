@@ -39,6 +39,37 @@ def test_center_only_projection_keeps_candidate_size(monkeypatch):
     np.testing.assert_allclose(projected, np.array([30.0, 20.0, 30.0, 40.0]))
 
 
+def test_size_only_projection_keeps_candidate_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
+
+
+def test_size_only_projection_supports_independent_size_blends(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([12.0, 22.0, 31.0, 41.0]),
+        refinement_mode="size-only",
+        raw_refined_xywh=np.array([20.0, 10.0, 50.0, 60.0]),
+        projection_width_blend=0.25,
+        projection_height_blend=0.50,
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([7.5, 15.0, 35.0, 50.0]))
+
+
 def test_box_projection_preserves_refiner_output(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -74,8 +105,48 @@ def test_refinement_mode_validation_rejects_unknown_mode(monkeypatch):
         module.project_refinement_output(
             np.array([0.0, 0.0, 10.0, 10.0]),
             np.array([0.0, 0.0, 10.0, 10.0]),
-            refinement_mode="size-only",
+            refinement_mode="diagonal-only",
         )
+
+
+def test_projection_blends_must_be_supplied_together(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    with pytest.raises(ValueError, match="supplied together"):
+        module.project_refinement_output(
+            np.array([0.0, 0.0, 10.0, 10.0]),
+            np.array([0.0, 0.0, 10.0, 10.0]),
+            refinement_mode="size-only",
+            projection_width_blend=0.25,
+        )
+
+
+def test_projection_policy_rejects_clipped_outputs(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    reasons = module.projection_rejection_reasons(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([-1.0, 10.0, 20.0, 20.0]),
+        image_width=100.0,
+        image_height=100.0,
+        projection_no_clip=True,
+    )
+
+    assert reasons == ("projection_clip",)
+
+
+def test_projection_policy_rejects_raw_height_shrink(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    reasons = module.projection_rejection_reasons(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([10.0, 10.0, 20.0, 18.0]),
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        projection_min_raw_height_ratio=1.0,
+    )
+
+    assert reasons == ("projection_raw_height_ratio",)
 
 
 def test_help_exposes_refinement_mode(monkeypatch):
@@ -85,3 +156,8 @@ def test_help_exposes_refinement_mode(monkeypatch):
 
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
+    assert "size-only" in help_text
+    assert "--projection-width-blend" in help_text
+    assert "--projection-height-blend" in help_text
+    assert "--projection-no-clip" in help_text
+    assert "--projection-min-raw-height-ratio" in help_text

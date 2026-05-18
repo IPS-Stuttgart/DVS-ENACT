@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --min-raw-candidate-iou 0.50 or --disable-event-polarity"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-no-clip"
         required: false
         default: ""
         type: string
@@ -804,7 +804,7 @@ jobs:
             args+=(--update-config-tracker)
           fi
 
-          python scripts/run_eventvot_refinement.py "${args[@]}"
+          python scripts/run_eventvot_refinement_modes.py "${args[@]}"
 
           REFINED_RESULT_DIR="${EVENTVOT_TOOLKIT_ROOT_RESOLVED}/eventvot_tracking_results/${TRACKER_NAME}_tracking_result"
           if [[ ! -d "$REFINED_RESULT_DIR" ]]; then
