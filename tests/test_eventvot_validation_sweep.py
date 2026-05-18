@@ -153,6 +153,41 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         0.95,
     ]
     assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
+    assert all(config["refinement_mode"] == "box" for config in grid)
+
+
+def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
+        "--refinement-mode",
+        "box size-only",
+        "--projection-width-blend",
+        "none,0.10",
+        "--projection-height-blend",
+        "none,0.10",
+        "--projection-no-clip",
+        "--dry-run",
+    )
+
+    grid = module.iter_parameter_grid(args)
+    payload = module.run_sweep(args)
+
+    assert len(grid) == 4
+    assert payload["summary"]["config_count"] == 4
+    assert sorted({config["refinement_mode"] for config in grid}) == ["box", "size-only"]
+    assert sorted(
+        {
+            config["projection_width_blend"]
+            for config in grid
+            if config["projection_width_blend"] is not None
+        }
+    ) == [0.10]
+    assert all(config["projection_no_clip"] for config in grid)
 
 
 def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeypatch):
@@ -173,6 +208,14 @@ def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeyp
         changed_config = dict(config)
         if key in module.INT_GRID_KEYS:
             changed_config[key] = int(changed_config[key]) + 1
+        elif key in module.STRING_GRID_KEYS:
+            changed_config[key] = (
+                "size-only" if changed_config[key] != "size-only" else "box"
+            )
+        elif key in module.BOOL_GRID_KEYS:
+            changed_config[key] = not changed_config[key]
+        elif key in module.OPTIONAL_FLOAT_GRID_KEYS and changed_config[key] is None:
+            changed_config[key] = 0.125
         else:
             value = float(changed_config[key])
             changed_config[key] = 42.0 if not math.isfinite(value) else value + 0.125
@@ -201,3 +244,27 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.min_candidate_area_ratio == 0.80
     assert acceptance.max_candidate_area_ratio == 1.10
     assert acceptance.max_center_shift_ratio == 0.05
+
+
+def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
+        "--refinement-mode",
+        "size-only",
+        "--projection-width-blend",
+        "0.10",
+        "--projection-height-blend",
+        "0.10",
+    )
+    config = module.iter_parameter_grid(args)[0]
+
+    refiner = module.make_refiner(config, args)
+
+    assert refiner.refinement_mode == "size-only"
+    assert refiner.projection_width_blend == 0.10
+    assert refiner.projection_height_blend == 0.10
