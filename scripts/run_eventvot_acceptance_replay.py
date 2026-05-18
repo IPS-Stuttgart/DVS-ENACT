@@ -39,7 +39,13 @@ from run_eventvot_refinement import (  # noqa: E402
     resolve_eventvot_split_root,
     save_xywh_result_file,
 )
+from run_eventvot_refinement_modes import (  # noqa: E402
+    REFINEMENT_MODES,
+    project_refinement_output,
+)
 from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
+
+REPLAY_OUTPUT_MODES = ("diagnostic", *REFINEMENT_MODES)
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,22 @@ class ReplayAcceptanceConfig:
     min_mean_event_polarity_weight: float | None = None
     max_quadratic_form_per_active_measurement: float | None = None
     min_active_fraction: float | None = None
+
+
+@dataclass(frozen=True)
+class ReplayOutputProjectionConfig:
+    """How replay should turn stored diagnostics into output boxes.
+
+    ``diagnostic`` preserves the previously emitted ``refiner_output_xywh``.
+    Other modes rebuild the output from the stored raw DVS refinement, which is
+    useful for cheap validation sweeps over smaller blends or projection modes
+    without recomputing the expensive EventVOT refinements.
+    """
+
+    mode: str = "diagnostic"
+    blend: float | None = None
+    image_width: float | None = None
+    image_height: float | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,9 @@ class EventVOTAcceptanceReplayOptions:
     decisions_csv: Path | None = None
     skip_evaluation: bool = False
     acceptance_config: ReplayAcceptanceConfig | None = None
+    output_projection_config: ReplayOutputProjectionConfig = field(
+        default_factory=ReplayOutputProjectionConfig
+    )
     config_overrides: dict[str, Any] = field(default_factory=dict)
 
 
@@ -134,6 +159,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-conservative-gates",
         action="store_true",
         help="Accept every non-fallback refinement during replay.",
+    )
+    parser.add_argument(
+        "--replay-output-mode",
+        choices=REPLAY_OUTPUT_MODES,
+        default="diagnostic",
+        help=(
+            "How to rebuild accepted output boxes from diagnostics. "
+            "'diagnostic' preserves refiner_output_xywh. 'box', "
+            "'center-only', and 'size-only' re-project from the stored raw "
+            "DVS refinement, optionally using --replay-output-blend."
+        ),
+    )
+    parser.add_argument(
+        "--replay-output-blend",
+        type=float,
+        help=(
+            "Optional blend from the base tracker box toward the stored raw "
+            "DVS refinement before applying --replay-output-mode. Requires "
+            "--replay-output-mode other than 'diagnostic'."
+        ),
     )
     _add_policy_arguments(parser)
     return parser
@@ -200,6 +245,7 @@ def options_from_args(args: argparse.Namespace) -> EventVOTAcceptanceReplayOptio
         summary_json=args.summary_json,
         decisions_csv=args.decisions_csv,
         skip_evaluation=args.skip_evaluation,
+        output_projection_config=output_projection_config_from_args(args),
         config_overrides=overrides,
     )
 
@@ -211,6 +257,10 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
     config = options.acceptance_config or acceptance_config_from_diagnostics(
         diagnostics,
         options.config_overrides,
+    )
+    output_projection = output_projection_config_from_diagnostics(
+        options.output_projection_config,
+        diagnostics,
     )
     selected_summaries = select_sequence_summaries(
         diagnostics.get("sequences", []),
@@ -238,6 +288,7 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
             base_boxes,
             sequence_summary.get("frames", []),
             config,
+            output_projection,
         )
         save_xywh_result_file(options.output_results / f"{sequence_name}.txt", replayed_boxes)
         aggregate_counts.update(sequence_counts)
@@ -281,6 +332,7 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
         "split": split,
         "diagnostics_json": str(options.diagnostics_json),
         "acceptance_config": asdict(config),
+        "output_projection_config": asdict(output_projection),
         "summary": summary,
         "sequences": sequence_outputs,
     }
@@ -306,6 +358,57 @@ def acceptance_config_from_diagnostics(
             raise ValueError(f"Unknown acceptance-policy field: {key}")
         values[key] = value
     return ReplayAcceptanceConfig(**values)
+
+
+def output_projection_config_from_args(
+    args: argparse.Namespace,
+) -> ReplayOutputProjectionConfig:
+    """Return replay-output projection options from CLI arguments."""
+
+    config = ReplayOutputProjectionConfig(
+        mode=args.replay_output_mode,
+        blend=args.replay_output_blend,
+    )
+    validate_output_projection_config(config)
+    return config
+
+
+def output_projection_config_from_diagnostics(
+    config: ReplayOutputProjectionConfig,
+    diagnostics: dict[str, Any],
+) -> ReplayOutputProjectionConfig:
+    """Fill replay-output image bounds from diagnostics when available."""
+
+    refiner_config = diagnostics.get("refiner_config", {})
+    image_width = config.image_width
+    if image_width is None:
+        image_width = _optional_float(refiner_config.get("image_width"))
+    image_height = config.image_height
+    if image_height is None:
+        image_height = _optional_float(refiner_config.get("image_height"))
+    resolved = ReplayOutputProjectionConfig(
+        mode=config.mode,
+        blend=config.blend,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    validate_output_projection_config(resolved)
+    return resolved
+
+
+def validate_output_projection_config(config: ReplayOutputProjectionConfig) -> None:
+    """Raise ``ValueError`` for invalid replay-output projection settings."""
+
+    if config.mode not in REPLAY_OUTPUT_MODES:
+        raise ValueError(
+            f"Unsupported replay output mode {config.mode!r}; "
+            f"expected one of {', '.join(REPLAY_OUTPUT_MODES)}"
+        )
+    if config.blend is not None:
+        if config.mode == "diagnostic":
+            raise ValueError("--replay-output-blend requires a projected output mode")
+        if not 0.0 <= float(config.blend) <= 1.0:
+            raise ValueError("--replay-output-blend must be between 0 and 1")
 
 
 def select_sequence_summaries(
@@ -350,12 +453,14 @@ def replay_sequence_boxes(
     base_boxes: np.ndarray,
     frames: list[dict[str, Any]],
     config: ReplayAcceptanceConfig,
+    output_projection: ReplayOutputProjectionConfig | None = None,
 ) -> tuple[np.ndarray, Counter[str], list[dict[str, Any]]]:
     """Return replayed boxes, aggregate counts, and per-frame decision records."""
 
     replayed_boxes = np.array(base_boxes, dtype=float, copy=True)
     counts: Counter[str] = Counter()
     decision_records: list[dict[str, Any]] = []
+    output_projection = output_projection or ReplayOutputProjectionConfig()
 
     if not frames:
         counts["missing_frame_diagnostics"] += int(base_boxes.shape[0])
@@ -369,11 +474,20 @@ def replay_sequence_boxes(
             counts["initial_frame"] += 1
             continue
 
-        decision = evaluate_frame_acceptance(base_boxes[frame_index], frame, config)
+        decision = evaluate_frame_acceptance(
+            base_boxes[frame_index],
+            frame,
+            config,
+            output_projection,
+        )
         reason_key = "accepted" if decision.accepted else decision.rejection_reasons[0]
         counts[reason_key] += 1
         if decision.accepted:
-            replayed_boxes[frame_index] = frame_refiner_output_xywh(frame)
+            replayed_boxes[frame_index] = frame_projected_output_xywh(
+                base_boxes[frame_index],
+                frame,
+                output_projection,
+            )
         decision_records.append(
             {
                 "sequence": sequence_name,
@@ -389,11 +503,13 @@ def evaluate_frame_acceptance(
     candidate_xywh: np.ndarray,
     frame: dict[str, Any],
     config: ReplayAcceptanceConfig,
+    output_projection: ReplayOutputProjectionConfig | None = None,
 ) -> ReplayAcceptanceDecision:
     """Evaluate one stored DVS-ENACT refinement under a replay policy."""
 
     candidate = np.asarray(candidate_xywh, dtype=float)
-    proposed = frame_refiner_output_xywh(frame)
+    output_projection = output_projection or ReplayOutputProjectionConfig()
+    proposed = frame_projected_output_xywh(candidate, frame, output_projection)
     raw_proposed = frame_raw_refined_xywh(frame, fallback=proposed)
 
     candidate_iou = box_iou_xywh(candidate, proposed)
@@ -546,6 +662,40 @@ def frame_refiner_output_xywh(frame: dict[str, Any]) -> np.ndarray:
     if "output_bbox" in frame:
         return bbox_dict_to_xywh(frame["output_bbox"])
     raise ValueError(f"Frame {frame.get('frame_index')} lacks refiner output diagnostics")
+
+
+def frame_projected_output_xywh(
+    candidate_xywh: np.ndarray,
+    frame: dict[str, Any],
+    output_projection: ReplayOutputProjectionConfig,
+) -> np.ndarray:
+    """Return the accepted replay box under the selected output projection."""
+
+    diagnostic_output = frame_refiner_output_xywh(frame)
+    if output_projection.mode == "diagnostic":
+        return diagnostic_output
+
+    candidate = np.asarray(candidate_xywh, dtype=float)
+    raw_refined = frame_raw_refined_xywh(frame, fallback=diagnostic_output)
+    source_output = diagnostic_output
+    if output_projection.blend is not None:
+        source_output = blend_xywh(candidate, raw_refined, float(output_projection.blend))
+    return project_refinement_output(
+        candidate,
+        source_output,
+        refinement_mode=output_projection.mode,
+        raw_refined_xywh=raw_refined,
+        image_width=output_projection.image_width,
+        image_height=output_projection.image_height,
+    )
+
+
+def blend_xywh(candidate_xywh: np.ndarray, raw_refined_xywh: np.ndarray, blend: float) -> np.ndarray:
+    """Blend linearly from the base tracker box toward the raw DVS refinement."""
+
+    candidate = np.asarray(candidate_xywh, dtype=float)
+    raw_refined = np.asarray(raw_refined_xywh, dtype=float)
+    return (1.0 - blend) * candidate + blend * raw_refined
 
 
 def frame_raw_refined_xywh(
