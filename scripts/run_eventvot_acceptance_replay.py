@@ -40,8 +40,10 @@ from run_eventvot_refinement import (  # noqa: E402
     save_xywh_result_file,
 )
 from run_eventvot_refinement_modes import (  # noqa: E402
+    PROJECTION_CONFIDENCE_FIELDS,
     REFINEMENT_MODES,
     project_refinement_output,
+    validate_projection_confidence_weighting,
 )
 from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
 
@@ -89,6 +91,9 @@ class ReplayOutputProjectionConfig:
     mode: str = "diagnostic"
     blend: float | None = None
     size_smoothing: float | None = None
+    confidence_field: str | None = None
+    confidence_floor: float | None = None
+    confidence_ceiling: float | None = None
     image_width: float | None = None
     image_height: float | None = None
 
@@ -188,6 +193,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional temporal size smoothing for replayed projected outputs. "
             "The value is the weight of the previous accepted replay width/height."
         ),
+    )
+    parser.add_argument(
+        "--replay-output-confidence-field",
+        choices=PROJECTION_CONFIDENCE_FIELDS,
+        help=(
+            "Optional frame diagnostic used to shrink replayed corrections "
+            "toward the base tracker when confidence is weak."
+        ),
+    )
+    parser.add_argument(
+        "--replay-output-confidence-floor",
+        type=float,
+        help="Confidence value that maps replay correction strength to zero.",
+    )
+    parser.add_argument(
+        "--replay-output-confidence-ceiling",
+        type=float,
+        help="Confidence value that maps replay correction strength to one.",
     )
     _add_policy_arguments(parser)
     return parser
@@ -378,6 +401,9 @@ def output_projection_config_from_args(
         mode=args.replay_output_mode,
         blend=args.replay_output_blend,
         size_smoothing=args.replay_output_size_smoothing,
+        confidence_field=args.replay_output_confidence_field,
+        confidence_floor=args.replay_output_confidence_floor,
+        confidence_ceiling=args.replay_output_confidence_ceiling,
     )
     validate_output_projection_config(config)
     return config
@@ -400,6 +426,9 @@ def output_projection_config_from_diagnostics(
         mode=config.mode,
         blend=config.blend,
         size_smoothing=config.size_smoothing,
+        confidence_field=config.confidence_field,
+        confidence_floor=config.confidence_floor,
+        confidence_ceiling=config.confidence_ceiling,
         image_width=image_width,
         image_height=image_height,
     )
@@ -427,6 +456,13 @@ def validate_output_projection_config(config: ReplayOutputProjectionConfig) -> N
             )
         if not 0.0 <= float(config.size_smoothing) <= 1.0:
             raise ValueError("--replay-output-size-smoothing must be between 0 and 1")
+    validate_projection_confidence_weighting(
+        config.confidence_field,
+        config.confidence_floor,
+        config.confidence_ceiling,
+    )
+    if config.confidence_field is not None and config.mode == "diagnostic":
+        raise ValueError("--replay-output-confidence-field requires a projected mode")
 
 
 def select_sequence_summaries(
@@ -720,9 +756,29 @@ def frame_projected_output_xywh(
         raw_refined_xywh=raw_refined,
         previous_projected_size=previous_projected_size,
         projection_size_smoothing=output_projection.size_smoothing,
+        projection_confidence_value=frame_projection_confidence_value(
+            frame,
+            output_projection.confidence_field,
+        ),
+        projection_confidence_floor=output_projection.confidence_floor,
+        projection_confidence_ceiling=output_projection.confidence_ceiling,
         image_width=output_projection.image_width,
         image_height=output_projection.image_height,
     )
+
+
+def frame_projection_confidence_value(
+    frame: dict[str, Any],
+    field: str | None,
+) -> float | None:
+    """Read a scalar projection-confidence diagnostic from replay frame data."""
+    if field is None:
+        return None
+    if field == "active_fraction":
+        active_count = _optional_int(frame.get("active_measurement_count"))
+        used_count = _optional_int(frame.get("used_event_count"))
+        return _active_fraction(active_count, used_count)
+    return _optional_float(frame.get(field))
 
 
 def blend_xywh(candidate_xywh: np.ndarray, raw_refined_xywh: np.ndarray, blend: float) -> np.ndarray:

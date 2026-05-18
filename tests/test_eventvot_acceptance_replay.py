@@ -160,6 +160,37 @@ def test_acceptance_replay_smooths_replayed_projected_size():
     np.testing.assert_allclose(projected, np.array([5.0, 5.0, 30.0, 30.0]))
 
 
+def test_acceptance_replay_confidence_weights_replayed_projection():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [20.0, 10.0, 20.0, 20.0],
+        "refined_bbox": {
+            "x_min": 20.0,
+            "y_min": 10.0,
+            "x_max": 40.0,
+            "y_max": 30.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.25,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(
+            mode="box",
+            confidence_field="mean_event_activity",
+            confidence_floor=0.0,
+            confidence_ceiling=0.5,
+        ),
+    )
+
+    np.testing.assert_allclose(projected, np.array([15.0, 10.0, 20.0, 20.0]))
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -344,6 +375,9 @@ def test_acceptance_replay_run_uses_output_projection_config(tmp_path):
         "mode": "center-only",
         "blend": 0.5,
         "size_smoothing": None,
+        "confidence_field": None,
+        "confidence_floor": None,
+        "confidence_ceiling": None,
         "image_width": 100.0,
         "image_height": 100.0,
     }
@@ -365,3 +399,4 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text
+    assert "--replay-output-confidence-field" in help_text

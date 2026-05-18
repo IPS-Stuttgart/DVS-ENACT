@@ -22,6 +22,12 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 import run_eventvot_refinement as base
 
 REFINEMENT_MODES = ("box", "center-only", "size-only")
+PROJECTION_CONFIDENCE_FIELDS = (
+    "mean_event_activity",
+    "active_fraction",
+    "polarity_consistency_fraction",
+    "mean_event_polarity_weight",
+)
 
 
 class ProjectedOutputRefiner:
@@ -42,6 +48,9 @@ class ProjectedOutputRefiner:
         projection_height_blend: float | None = None,
         projection_no_clip: bool = False,
         projection_size_smoothing: float | None = None,
+        projection_confidence_field: str | None = None,
+        projection_confidence_floor: float | None = None,
+        projection_confidence_ceiling: float | None = None,
         projection_min_raw_width_ratio: float | None = None,
         projection_max_raw_width_ratio: float | None = None,
         projection_min_raw_height_ratio: float | None = None,
@@ -50,6 +59,11 @@ class ProjectedOutputRefiner:
         validate_refinement_mode(refinement_mode)
         validate_projection_blends(projection_width_blend, projection_height_blend)
         validate_projection_size_smoothing(projection_size_smoothing)
+        validate_projection_confidence_weighting(
+            projection_confidence_field,
+            projection_confidence_floor,
+            projection_confidence_ceiling,
+        )
         validate_projection_ratio_gates(
             projection_min_raw_width_ratio,
             projection_max_raw_width_ratio,
@@ -63,6 +77,9 @@ class ProjectedOutputRefiner:
         self.projection_height_blend = projection_height_blend
         self.projection_no_clip = projection_no_clip
         self.projection_size_smoothing = projection_size_smoothing
+        self.projection_confidence_field = projection_confidence_field
+        self.projection_confidence_floor = projection_confidence_floor
+        self.projection_confidence_ceiling = projection_confidence_ceiling
         self.projection_min_raw_width_ratio = projection_min_raw_width_ratio
         self.projection_max_raw_width_ratio = projection_max_raw_width_ratio
         self.projection_min_raw_height_ratio = projection_min_raw_height_ratio
@@ -78,6 +95,7 @@ class ProjectedOutputRefiner:
         if (
             self.refinement_mode == "box"
             and self.projection_size_smoothing is None
+            and self.projection_confidence_field is None
         ) or result.fallback_reason is not None:
             return result
 
@@ -93,6 +111,12 @@ class ProjectedOutputRefiner:
             projection_height_blend=self.projection_height_blend,
             previous_projected_size=self._previous_accepted_projected_size,
             projection_size_smoothing=self.projection_size_smoothing,
+            projection_confidence_value=projection_confidence_value(
+                result,
+                self.projection_confidence_field,
+            ),
+            projection_confidence_floor=self.projection_confidence_floor,
+            projection_confidence_ceiling=self.projection_confidence_ceiling,
         )
         projected_xywh = clip_xywh_box(
             unclipped_projected_xywh,
@@ -196,6 +220,24 @@ def build_parser() -> argparse.ArgumentParser:
             "0 uses the current projection and 1 holds the previous size."
         ),
     )
+    parser.add_argument(
+        "--projection-confidence-field",
+        choices=PROJECTION_CONFIDENCE_FIELDS,
+        help=(
+            "Optional diagnostic field used to shrink projected corrections "
+            "toward the base tracker when DVS confidence is weak."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-floor",
+        type=float,
+        help="Confidence value that maps projected correction strength to zero.",
+    )
+    parser.add_argument(
+        "--projection-confidence-ceiling",
+        type=float,
+        help="Confidence value that maps projected correction strength to one.",
+    )
     parser.add_argument("--projection-min-raw-width-ratio", type=float)
     parser.add_argument("--projection-max-raw-width-ratio", type=float)
     parser.add_argument("--projection-min-raw-height-ratio", type=float)
@@ -220,6 +262,9 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_height_blend=args.projection_height_blend,
         projection_no_clip=args.projection_no_clip,
         projection_size_smoothing=args.projection_size_smoothing,
+        projection_confidence_field=args.projection_confidence_field,
+        projection_confidence_floor=args.projection_confidence_floor,
+        projection_confidence_ceiling=args.projection_confidence_ceiling,
         projection_min_raw_width_ratio=args.projection_min_raw_width_ratio,
         projection_max_raw_width_ratio=args.projection_max_raw_width_ratio,
         projection_min_raw_height_ratio=args.projection_min_raw_height_ratio,
@@ -260,6 +305,9 @@ def project_refinement_output(
     projection_height_blend: float | None = None,
     previous_projected_size: np.ndarray | None = None,
     projection_size_smoothing: float | None = None,
+    projection_confidence_value: float | None = None,
+    projection_confidence_floor: float | None = None,
+    projection_confidence_ceiling: float | None = None,
     image_width: float | None = None,
     image_height: float | None = None,
 ) -> np.ndarray:
@@ -267,6 +315,10 @@ def project_refinement_output(
     validate_refinement_mode(refinement_mode)
     validate_projection_blends(projection_width_blend, projection_height_blend)
     validate_projection_size_smoothing(projection_size_smoothing)
+    validate_projection_confidence_bounds(
+        projection_confidence_floor,
+        projection_confidence_ceiling,
+    )
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
     refined = np.asarray(refiner_output_xywh, dtype=float).reshape(4)
 
@@ -315,7 +367,78 @@ def project_refinement_output(
         previous_projected_size=previous_projected_size,
         projection_size_smoothing=projection_size_smoothing,
     )
+    output = apply_projection_confidence_weighting(
+        candidate,
+        output,
+        confidence_value=projection_confidence_value,
+        confidence_floor=projection_confidence_floor,
+        confidence_ceiling=projection_confidence_ceiling,
+    )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def apply_projection_confidence_weighting(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    confidence_value: float | None,
+    confidence_floor: float | None,
+    confidence_ceiling: float | None,
+) -> np.ndarray:
+    """Shrink projected corrections toward the candidate box using confidence."""
+    if confidence_floor is None and confidence_ceiling is None:
+        return np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    validate_projection_confidence_bounds(confidence_floor, confidence_ceiling)
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    projected = np.asarray(projected_xywh, dtype=float).reshape(4)
+    strength = projection_confidence_strength(
+        confidence_value,
+        confidence_floor,
+        confidence_ceiling,
+    )
+    return candidate + strength * (projected - candidate)
+
+
+def projection_confidence_strength(
+    confidence_value: float | None,
+    confidence_floor: float | None,
+    confidence_ceiling: float | None,
+) -> float:
+    """Return correction strength in [0, 1] for a diagnostic confidence value."""
+    validate_projection_confidence_bounds(confidence_floor, confidence_ceiling)
+    if confidence_floor is None and confidence_ceiling is None:
+        return 1.0
+    if confidence_floor is None or confidence_ceiling is None:
+        raise ValueError("projection confidence floor and ceiling must both be set")
+    if confidence_value is None:
+        return 0.0
+    value = float(confidence_value)
+    if not np.isfinite(value):
+        return 0.0
+    strength = (value - float(confidence_floor)) / (
+        float(confidence_ceiling) - float(confidence_floor)
+    )
+    return float(np.clip(strength, 0.0, 1.0))
+
+
+def projection_confidence_value(result: Any, field: str | None) -> float | None:
+    """Read a scalar projection-confidence diagnostic from a refinement result."""
+    if field is None:
+        return None
+    validate_projection_confidence_field(field)
+    if field == "active_fraction":
+        used_event_count = int(getattr(result, "used_event_count", 0) or 0)
+        active_measurement_count = int(
+            getattr(result, "active_measurement_count", 0) or 0
+        )
+        if used_event_count <= 0:
+            return None
+        return float(active_measurement_count / used_event_count)
+    value = getattr(result, field, None)
+    if value is None:
+        return None
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else None
 
 
 def smooth_projected_size(
@@ -526,6 +649,50 @@ def validate_projection_size_smoothing(projection_size_smoothing: float | None) 
         return
     if not 0.0 <= float(projection_size_smoothing) <= 1.0:
         raise ValueError("projection_size_smoothing must be between 0 and 1")
+
+
+def validate_projection_confidence_field(field: str | None) -> None:
+    """Raise ValueError for unsupported projection confidence fields."""
+    if field is None:
+        return
+    if field not in PROJECTION_CONFIDENCE_FIELDS:
+        expected = ", ".join(PROJECTION_CONFIDENCE_FIELDS)
+        raise ValueError(
+            f"Unsupported projection confidence field {field!r}; expected one of {expected}"
+        )
+
+
+def validate_projection_confidence_bounds(
+    floor: float | None,
+    ceiling: float | None,
+) -> None:
+    """Raise ValueError for invalid confidence-to-strength bounds."""
+    if floor is None and ceiling is None:
+        return
+    if floor is None or ceiling is None:
+        raise ValueError("projection confidence floor and ceiling must both be set")
+    if not np.isfinite(float(floor)) or not np.isfinite(float(ceiling)):
+        raise ValueError("projection confidence floor and ceiling must be finite")
+    if float(floor) >= float(ceiling):
+        raise ValueError("projection confidence floor must be less than ceiling")
+
+
+def validate_projection_confidence_weighting(
+    field: str | None,
+    floor: float | None,
+    ceiling: float | None,
+) -> None:
+    """Raise ValueError for invalid confidence-weighted projection settings."""
+    validate_projection_confidence_field(field)
+    validate_projection_confidence_bounds(floor, ceiling)
+    if field is None and (floor is not None or ceiling is not None):
+        raise ValueError(
+            "projection confidence field is required when floor/ceiling are set"
+        )
+    if field is not None and (floor is None or ceiling is None):
+        raise ValueError(
+            "projection confidence floor and ceiling are required when field is set"
+        )
 
 
 def validate_projection_ratio_gates(

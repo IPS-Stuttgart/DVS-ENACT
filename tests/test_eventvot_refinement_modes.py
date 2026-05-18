@@ -100,6 +100,36 @@ def test_box_projection_smooths_size_around_projected_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([25.0, 15.0, 40.0, 50.0]))
 
 
+def test_projection_confidence_weighting_shrinks_update(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([20.0, 10.0, 20.0, 20.0]),
+        refinement_mode="box",
+        projection_confidence_value=0.25,
+        projection_confidence_floor=0.0,
+        projection_confidence_ceiling=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([15.0, 10.0, 20.0, 20.0]))
+
+
+def test_projection_confidence_weighting_missing_value_keeps_candidate(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([20.0, 10.0, 20.0, 20.0]),
+        refinement_mode="box",
+        projection_confidence_value=None,
+        projection_confidence_floor=0.0,
+        projection_confidence_ceiling=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 10.0, 20.0, 20.0]))
+
+
 def test_box_projection_preserves_refiner_output(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -191,4 +221,5 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
+    assert "--projection-confidence-field" in help_text
     assert "--projection-min-raw-height-ratio" in help_text

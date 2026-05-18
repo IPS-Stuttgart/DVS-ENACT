@@ -24,7 +24,11 @@ from run_eventvot_refinement import (
     resolve_sequence_names,
     run as run_eventvot_refinement,
 )
-from run_eventvot_refinement_modes import ProjectedOutputRefiner, REFINEMENT_MODES
+from run_eventvot_refinement_modes import (
+    PROJECTION_CONFIDENCE_FIELDS,
+    ProjectedOutputRefiner,
+    REFINEMENT_MODES,
+)
 
 DEFAULT_REFINEMENT_BLEND = (0.10, 0.25, 0.50, 1.00)
 DEFAULT_SEARCH_EXPANSION_FACTOR = (1.10, 1.25, 1.50)
@@ -52,6 +56,9 @@ PROJECTION_GRID_KEYS = (
     "projection_height_blend",
     "projection_no_clip",
     "projection_size_smoothing",
+    "projection_confidence_field",
+    "projection_confidence_floor",
+    "projection_confidence_ceiling",
     "projection_min_raw_width_ratio",
     "projection_max_raw_width_ratio",
     "projection_min_raw_height_ratio",
@@ -84,12 +91,14 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
 }
-STRING_GRID_KEYS = {"refinement_mode"}
+STRING_GRID_KEYS = {"refinement_mode", "projection_confidence_field"}
 BOOL_GRID_KEYS = {"projection_no_clip"}
 OPTIONAL_FLOAT_GRID_KEYS = {
     "projection_width_blend",
     "projection_height_blend",
     "projection_size_smoothing",
+    "projection_confidence_floor",
+    "projection_confidence_ceiling",
     "projection_min_raw_width_ratio",
     "projection_max_raw_width_ratio",
     "projection_min_raw_height_ratio",
@@ -228,6 +237,27 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
             "A value of 0 uses the current projection; 1 holds the previous "
             "accepted projected size."
         ),
+    )
+    parser.add_argument(
+        "--projection-confidence-field",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional confidence fields for adaptive projection strength. "
+            f"Choices: {', '.join(PROJECTION_CONFIDENCE_FIELDS)}; use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-floor",
+        nargs="+",
+        default=("none",),
+        help="Confidence values that map projected correction strength to zero.",
+    )
+    parser.add_argument(
+        "--projection-confidence-ceiling",
+        nargs="+",
+        default=("none",),
+        help="Confidence values that map projected correction strength to one.",
     )
     parser.add_argument("--projection-min-raw-width-ratio", nargs="+", default=("none",))
     parser.add_argument("--projection-max-raw-width-ratio", nargs="+", default=("none",))
@@ -448,6 +478,8 @@ def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, Any]]:
             config[key] = normalize_config_value(key, value)
         if has_incomplete_projection_blend(config):
             continue
+        if has_incomplete_projection_confidence(config):
+            continue
         validate_projection_config(config)
         configs.append(config)
     if not configs:
@@ -475,6 +507,21 @@ def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             args.projection_size_smoothing,
             cast=float,
             argument_name="--projection-size-smoothing",
+            allow_none=True,
+        ),
+        "projection_confidence_field": parse_projection_confidence_field_values(
+            args.projection_confidence_field
+        ),
+        "projection_confidence_floor": parse_sweep_values(
+            args.projection_confidence_floor,
+            cast=float,
+            argument_name="--projection-confidence-floor",
+            allow_none=True,
+        ),
+        "projection_confidence_ceiling": parse_sweep_values(
+            args.projection_confidence_ceiling,
+            cast=float,
+            argument_name="--projection-confidence-ceiling",
             allow_none=True,
         ),
         "projection_min_raw_width_ratio": parse_sweep_values(
@@ -520,6 +567,31 @@ def parse_refinement_mode_values(raw_values: list[str] | tuple[str, ...]) -> lis
             values.append(token)
     if not values:
         raise ValueError("--refinement-mode must contain at least one value")
+    return list(dict.fromkeys(values))
+
+
+def parse_projection_confidence_field_values(
+    raw_values: list[str] | tuple[str, ...],
+) -> list[str | None]:
+    """Parse repeated or comma/whitespace-separated projection confidence fields."""
+    values: list[str | None] = []
+    for raw_value in raw_values:
+        for token in re.split(r"[\s,]+", str(raw_value).strip()):
+            if not token:
+                continue
+            normalized = token.strip().lower()
+            if normalized in NONE_SWEEP_TOKENS:
+                values.append(None)
+                continue
+            if token not in PROJECTION_CONFIDENCE_FIELDS:
+                expected = ", ".join(PROJECTION_CONFIDENCE_FIELDS)
+                raise ValueError(
+                    f"Invalid value for --projection-confidence-field: {token!r}; "
+                    f"expected one of {expected} or none"
+                )
+            values.append(token)
+    if not values:
+        raise ValueError("--projection-confidence-field must contain at least one value")
     return list(dict.fromkeys(values))
 
 
@@ -661,6 +733,10 @@ def normalize_config_value(key: str, value: Any) -> Any:
 def validate_projection_config(config: dict[str, Any]) -> None:
     if has_incomplete_projection_blend(config):
         raise ValueError("projection width/height blends must both be set or both be none")
+    if has_incomplete_projection_confidence(config):
+        raise ValueError(
+            "projection confidence field, floor, and ceiling must all be set or all be none"
+        )
     for name in OPTIONAL_FLOAT_GRID_KEYS:
         value = config[name]
         if value is not None and float(value) < 0.0:
@@ -668,6 +744,11 @@ def validate_projection_config(config: dict[str, Any]) -> None:
     smoothing = config["projection_size_smoothing"]
     if smoothing is not None and float(smoothing) > 1.0:
         raise ValueError("projection_size_smoothing must be between 0 and 1")
+    confidence_floor = config["projection_confidence_floor"]
+    confidence_ceiling = config["projection_confidence_ceiling"]
+    if confidence_floor is not None and confidence_ceiling is not None:
+        if confidence_floor >= confidence_ceiling:
+            raise ValueError("projection_confidence_floor must be less than ceiling")
     _validate_min_max_pair(
         config,
         "projection_min_raw_width_ratio",
@@ -690,6 +771,17 @@ def _validate_min_max_pair(config: dict[str, Any], min_key: str, max_key: str) -
 def has_incomplete_projection_blend(config: dict[str, Any]) -> bool:
     return (config["projection_width_blend"] is None) != (
         config["projection_height_blend"] is None
+    )
+
+
+def has_incomplete_projection_confidence(config: dict[str, Any]) -> bool:
+    values = (
+        config["projection_confidence_field"],
+        config["projection_confidence_floor"],
+        config["projection_confidence_ceiling"],
+    )
+    return any(value is None for value in values) and any(
+        value is not None for value in values
     )
 
 
@@ -716,6 +808,7 @@ def make_refiner(
     if (
         config["refinement_mode"] == "box"
         and config["projection_size_smoothing"] is None
+        and config["projection_confidence_field"] is None
     ):
         return refiner
     return ProjectedOutputRefiner(
@@ -725,6 +818,9 @@ def make_refiner(
         projection_height_blend=config["projection_height_blend"],
         projection_no_clip=bool(config["projection_no_clip"]),
         projection_size_smoothing=config["projection_size_smoothing"],
+        projection_confidence_field=config["projection_confidence_field"],
+        projection_confidence_floor=config["projection_confidence_floor"],
+        projection_confidence_ceiling=config["projection_confidence_ceiling"],
         projection_min_raw_width_ratio=config["projection_min_raw_width_ratio"],
         projection_max_raw_width_ratio=config["projection_max_raw_width_ratio"],
         projection_min_raw_height_ratio=config["projection_min_raw_height_ratio"],

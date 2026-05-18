@@ -173,6 +173,12 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
         "none,0.10",
         "--projection-size-smoothing",
         "none,0.50",
+        "--projection-confidence-field",
+        "none mean_event_activity",
+        "--projection-confidence-floor",
+        "none 0.10",
+        "--projection-confidence-ceiling",
+        "none 0.50",
         "--projection-no-clip",
         "--dry-run",
     )
@@ -180,8 +186,8 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 8
-    assert payload["summary"]["config_count"] == 8
+    assert len(grid) == 16
+    assert payload["summary"]["config_count"] == 16
     assert sorted({config["refinement_mode"] for config in grid}) == ["box", "size-only"]
     assert sorted(
         {
@@ -197,6 +203,13 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
             if config["projection_size_smoothing"] is not None
         }
     ) == [0.50]
+    assert sorted(
+        {
+            config["projection_confidence_field"]
+            for config in grid
+            if config["projection_confidence_field"] is not None
+        }
+    ) == ["mean_event_activity"]
     assert all(config["projection_no_clip"] for config in grid)
 
 
@@ -297,7 +310,12 @@ def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeyp
         if key in module.INT_GRID_KEYS:
             changed_config[key] = int(value) + 1
         elif key in module.STRING_GRID_KEYS:
-            changed_config[key] = "size-only" if value != "size-only" else "box"
+            if key == "projection_confidence_field":
+                changed_config[key] = "mean_event_activity"
+                changed_config["projection_confidence_floor"] = 0.1
+                changed_config["projection_confidence_ceiling"] = 0.5
+            else:
+                changed_config[key] = "size-only" if value != "size-only" else "box"
         elif key in module.BOOL_GRID_KEYS:
             changed_config[key] = not value
         elif value is None:
@@ -366,6 +384,12 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
         "0.10",
         "--projection-size-smoothing",
         "0.50",
+        "--projection-confidence-field",
+        "mean_event_activity",
+        "--projection-confidence-floor",
+        "0.10",
+        "--projection-confidence-ceiling",
+        "0.50",
     )
     config = module.iter_parameter_grid(args)[0]
 
@@ -375,6 +399,9 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
     assert refiner.projection_width_blend == 0.10
     assert refiner.projection_height_blend == 0.10
     assert refiner.projection_size_smoothing == 0.50
+    assert refiner.projection_confidence_field == "mean_event_activity"
+    assert refiner.projection_confidence_floor == 0.10
+    assert refiner.projection_confidence_ceiling == 0.50
 
 
 class _FakeResult:
