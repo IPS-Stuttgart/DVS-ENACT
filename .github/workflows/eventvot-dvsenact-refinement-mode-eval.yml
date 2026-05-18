@@ -268,6 +268,34 @@ jobs:
             --tracker "${REFINED_TRACKER_NAME}=${REFINED_RESULT_DIR}" \
             --pair "${BASE_TRACKER_NAME}=${REFINED_TRACKER_NAME}"
 
+      - name: Generate refinement diagnostic attribution report
+        if: always()
+        shell: bash
+        env:
+          TRACKER_NAME: ${{ inputs.tracker_name }}
+        run: |
+          set -euo pipefail
+
+          DIAGNOSTICS_JSON="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/${TRACKER_NAME}_diagnostics.json"
+          DIAGNOSTIC_REPORT_OUT="${GITHUB_WORKSPACE}/${OUTPUT_ROOT}/diagnostic-report"
+
+          if [[ ! -f "$DIAGNOSTICS_JSON" ]]; then
+            echo "::notice::Skipping diagnostic attribution report because diagnostics JSON is missing: $DIAGNOSTICS_JSON"
+            exit 0
+          fi
+          if [[ -z "${REFINED_RESULT_DIR:-}" || ! -d "$REFINED_RESULT_DIR" ]]; then
+            echo "::notice::Skipping diagnostic attribution report because refined results are unavailable: ${REFINED_RESULT_DIR:-}"
+            exit 0
+          fi
+
+          python scripts/report_eventvot_refinement_diagnostics.py \
+            --diagnostics-json "$DIAGNOSTICS_JSON" \
+            --eventvot-root "$EVENTVOT_ROOT_RESOLVED" \
+            --base-results "$BASE_RESULTS_RESOLVED" \
+            --refined-results "$REFINED_RESULT_DIR" \
+            --split "${{ inputs.split }}" \
+            --output-dir "$DIAGNOSTIC_REPORT_OUT"
+
       - name: Build summary
         if: always()
         shell: bash
@@ -351,6 +379,17 @@ jobs:
                           f"{float(row['npr_delta']):+.6f} | {ratio_text} |"
                       )
                   lines.append("")
+
+          diagnostic_report_root = root / "diagnostic-report"
+          for heading, filename in (
+              ("Worst sequences by SR delta", "worst_sequences.md"),
+              ("Best sequences by SR delta", "best_sequences.md"),
+          ):
+              path = diagnostic_report_root / filename
+              if path.exists():
+                  text = path.read_text(encoding="utf-8").strip()
+                  if text:
+                      lines.extend([f"## {heading}", text, ""])
 
           markdown = "\n".join(lines) + "\n"
           summary_path = root / "refinement-mode-summary.md"
