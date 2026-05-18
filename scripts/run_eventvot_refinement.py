@@ -44,6 +44,8 @@ class EventVOTAcceptanceConfig:
     min_mean_event_polarity_weight: float | None = None
     max_quadratic_form_per_active_measurement: float | None = None
     min_active_fraction: float | None = None
+    max_temporal_center_shift_ratio: float | None = None
+    max_temporal_size_change_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class EventVOTAcceptanceDecision:
     raw_candidate_iou: float
     raw_candidate_area_ratio: float
     raw_center_shift_ratio: float
+    temporal_center_shift_ratio: float | None
+    temporal_size_change_ratio: float | None
     active_fraction: float | None
     quadratic_form_per_active_measurement: float | None
 
@@ -444,6 +448,8 @@ def refine_sequence(
             "raw_candidate_iou": 1.0,
             "raw_candidate_area_ratio": 1.0,
             "raw_center_shift_ratio": 0.0,
+            "temporal_center_shift_ratio": None,
+            "temporal_size_change_ratio": None,
             "active_fraction": None,
             "quadratic_form_per_active_measurement": None,
         }
@@ -466,6 +472,7 @@ def refine_sequence(
             base_boxes[frame_index],
             result,
             acceptance_config,
+            previous_output_xywh=refined_boxes[frame_index - 1],
         )
         observe_refinement_decision = getattr(
             refiner,
@@ -492,6 +499,8 @@ def refine_sequence(
                 "raw_candidate_iou": float(decision.raw_candidate_iou),
                 "raw_candidate_area_ratio": float(decision.raw_candidate_area_ratio),
                 "raw_center_shift_ratio": float(decision.raw_center_shift_ratio),
+                "temporal_center_shift_ratio": decision.temporal_center_shift_ratio,
+                "temporal_size_change_ratio": decision.temporal_size_change_ratio,
                 "active_fraction": decision.active_fraction,
                 "quadratic_form_per_active_measurement": (
                     decision.quadratic_form_per_active_measurement
@@ -697,6 +706,8 @@ def evaluate_refinement_acceptance(
     candidate_xywh: np.ndarray,
     result: Any,
     config: EventVOTAcceptanceConfig | None = None,
+    *,
+    previous_output_xywh: np.ndarray | None = None,
 ) -> EventVOTAcceptanceDecision:
     """Return whether a DVS-ENACT refinement should replace the base box."""
     config = config or EventVOTAcceptanceConfig()
@@ -708,6 +719,16 @@ def evaluate_refinement_acceptance(
     raw_candidate_iou = box_iou_xywh(candidate_xywh, raw_refined_xywh)
     raw_candidate_area_ratio = area_ratio_xywh(candidate_xywh, raw_refined_xywh)
     raw_center_shift_ratio = center_shift_ratio_xywh(candidate_xywh, raw_refined_xywh)
+    temporal_center_shift_ratio = (
+        center_shift_ratio_xywh(previous_output_xywh, refined_xywh)
+        if previous_output_xywh is not None
+        else None
+    )
+    temporal_size_change_ratio = (
+        size_change_ratio_xywh(previous_output_xywh, refined_xywh)
+        if previous_output_xywh is not None
+        else None
+    )
     active_fraction = _active_fraction(
         int(result.active_measurement_count),
         int(result.used_event_count),
@@ -727,6 +748,8 @@ def evaluate_refinement_acceptance(
             raw_candidate_iou=raw_candidate_iou,
             raw_candidate_area_ratio=raw_candidate_area_ratio,
             raw_center_shift_ratio=raw_center_shift_ratio,
+            temporal_center_shift_ratio=temporal_center_shift_ratio,
+            temporal_size_change_ratio=temporal_size_change_ratio,
             active_fraction=active_fraction,
             quadratic_form_per_active_measurement=quadratic_form_per_active,
         )
@@ -802,6 +825,20 @@ def evaluate_refinement_acceptance(
         config.min_active_fraction,
         missing_reason="active_fraction_missing",
     )
+    _append_max_float_gate(
+        rejection_reasons,
+        "temporal_center_shift_ratio",
+        temporal_center_shift_ratio,
+        config.max_temporal_center_shift_ratio,
+        missing_reason="temporal_center_shift_ratio_missing",
+    )
+    _append_max_float_gate(
+        rejection_reasons,
+        "temporal_size_change_ratio",
+        temporal_size_change_ratio,
+        config.max_temporal_size_change_ratio,
+        missing_reason="temporal_size_change_ratio_missing",
+    )
 
     return EventVOTAcceptanceDecision(
         accepted=not rejection_reasons,
@@ -812,6 +849,8 @@ def evaluate_refinement_acceptance(
         raw_candidate_iou=raw_candidate_iou,
         raw_candidate_area_ratio=raw_candidate_area_ratio,
         raw_center_shift_ratio=raw_center_shift_ratio,
+        temporal_center_shift_ratio=temporal_center_shift_ratio,
+        temporal_size_change_ratio=temporal_size_change_ratio,
         active_fraction=active_fraction,
         quadratic_form_per_active_measurement=quadratic_form_per_active,
     )
@@ -855,6 +894,16 @@ def center_shift_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarra
     reference_center = reference[:2] + 0.5 * reference[2:]
     proposed_center = proposed[:2] + 0.5 * proposed[2:]
     return float(np.linalg.norm(proposed_center - reference_center) / reference_diagonal)
+
+
+def size_change_ratio_xywh(reference_xywh: np.ndarray, proposed_xywh: np.ndarray) -> float:
+    """Return the largest per-axis size change relative to the reference size."""
+    reference = np.asarray(reference_xywh, dtype=float)
+    proposed = np.asarray(proposed_xywh, dtype=float)
+    if np.any(reference[2:] <= 0.0):
+        return math.inf
+    relative_change = np.abs(proposed[2:] - reference[2:]) / reference[2:]
+    return float(np.max(relative_change))
 
 
 def bbox_dict_to_xywh(bbox: dict[str, Any]) -> np.ndarray:
@@ -1388,6 +1437,8 @@ def add_acceptance_arguments(
     parser.add_argument("--min-mean-event-polarity-weight", type=float)
     parser.add_argument("--max-quadratic-form-per-active-measurement", type=float)
     parser.add_argument("--min-active-fraction", type=float)
+    parser.add_argument("--max-temporal-center-shift-ratio", type=float)
+    parser.add_argument("--max-temporal-size-change-ratio", type=float)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1429,6 +1480,8 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
             args.max_quadratic_form_per_active_measurement
         ),
         min_active_fraction=args.min_active_fraction,
+        max_temporal_center_shift_ratio=args.max_temporal_center_shift_ratio,
+        max_temporal_size_change_ratio=args.max_temporal_size_change_ratio,
     )
 
 

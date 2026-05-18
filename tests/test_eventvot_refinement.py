@@ -368,6 +368,40 @@ def test_eventvot_acceptance_rejects_raw_refinement_jump():
     assert decision.raw_candidate_iou == 0.0
 
 
+def test_eventvot_acceptance_rejects_temporal_output_shocks():
+    module = _load_module()
+
+    jump_decision = module.evaluate_refinement_acceptance(
+        np.array([30.0, 10.0, 40.0, 20.0]),
+        _FakeResult([30.0, 10.0, 40.0, 20.0]),
+        module.EventVOTAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=10.0,
+            max_temporal_center_shift_ratio=0.50,
+            max_temporal_size_change_ratio=2.0,
+        ),
+        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+    )
+    size_decision = module.evaluate_refinement_acceptance(
+        np.array([30.0, 10.0, 40.0, 20.0]),
+        _FakeResult([30.0, 10.0, 40.0, 20.0]),
+        module.EventVOTAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=10.0,
+            max_temporal_center_shift_ratio=2.0,
+            max_temporal_size_change_ratio=0.50,
+        ),
+        previous_output_xywh=np.array([30.0, 10.0, 20.0, 20.0]),
+    )
+
+    assert not jump_decision.accepted
+    assert jump_decision.rejection_reasons == ("temporal_center_shift_ratio",)
+    assert jump_decision.temporal_center_shift_ratio > 0.50
+    assert not size_decision.accepted
+    assert size_decision.rejection_reasons == ("temporal_size_change_ratio",)
+    assert size_decision.temporal_size_change_ratio == 1.0
+
+
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
@@ -455,6 +489,8 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--max-accept-center-shift-ratio" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
+    assert "--max-temporal-center-shift-ratio" in help_text
+    assert "--max-temporal-size-change-ratio" in help_text
 
 
 class _FakeRefiner:

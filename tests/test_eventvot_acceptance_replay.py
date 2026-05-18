@@ -359,6 +359,54 @@ def test_acceptance_replay_size_clamp_caps_size_change():
     np.testing.assert_allclose(projected, np.array([0.0, 15.0, 120.0, 60.0]))
 
 
+def test_acceptance_replay_temporal_gates_reject_output_shocks():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [30.0, 10.0, 40.0, 20.0],
+        "refined_bbox": {
+            "x_min": 30.0,
+            "y_min": 10.0,
+            "x_max": 70.0,
+            "y_max": 30.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    jump_decision = module.evaluate_frame_acceptance(
+        np.array([30.0, 10.0, 40.0, 20.0]),
+        frame,
+        module.ReplayAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=None,
+            max_temporal_center_shift_ratio=0.50,
+            max_temporal_size_change_ratio=2.0,
+        ),
+        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+    )
+    size_decision = module.evaluate_frame_acceptance(
+        np.array([30.0, 10.0, 40.0, 20.0]),
+        frame,
+        module.ReplayAcceptanceConfig(
+            min_candidate_iou=0.0,
+            max_center_shift_ratio=None,
+            max_temporal_center_shift_ratio=2.0,
+            max_temporal_size_change_ratio=0.50,
+        ),
+        previous_output_xywh=np.array([30.0, 10.0, 20.0, 20.0]),
+    )
+
+    assert not jump_decision.accepted
+    assert jump_decision.rejection_reasons == ("temporal_center_shift_ratio",)
+    assert jump_decision.temporal_center_shift_ratio > 0.50
+    assert not size_decision.accepted
+    assert size_decision.rejection_reasons == ("temporal_size_change_ratio",)
+    assert size_decision.temporal_size_change_ratio == 1.0
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -568,6 +616,8 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-polarity-consistency-fraction" in help_text
     assert "--max-quadratic-form-per-active-measurement" in help_text
+    assert "--max-temporal-center-shift-ratio" in help_text
+    assert "--max-temporal-size-change-ratio" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text

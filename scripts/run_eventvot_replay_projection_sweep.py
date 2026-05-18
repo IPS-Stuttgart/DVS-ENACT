@@ -234,6 +234,16 @@ def add_acceptance_grid_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         default=("diagnostic",),
     )
+    parser.add_argument(
+        "--max-temporal-center-shift-ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-temporal-size-change-ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
 
 
 def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
@@ -516,6 +526,8 @@ ACCEPTANCE_GRID_SPECS = (
         float,
     ),
     ("min_active_fraction", "--min-active-fraction", float),
+    ("max_temporal_center_shift_ratio", "--max-temporal-center-shift-ratio", float),
+    ("max_temporal_size_change_ratio", "--max-temporal-size-change-ratio", float),
 )
 
 

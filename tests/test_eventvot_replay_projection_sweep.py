@@ -113,6 +113,8 @@ def test_replay_projection_sweep_help_runs_as_script():
     assert "--replay-output-confidence-field" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
+    assert "--max-temporal-center-shift-ratio" in help_text
+    assert "--max-temporal-size-change-ratio" in help_text
     assert "--sequence-metrics-csv" in help_text
 
 
@@ -166,12 +168,14 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
             "diagnostic 20",
             "--min-raw-candidate-iou",
             "diagnostic none 0.50",
+            "--max-temporal-center-shift-ratio",
+            "diagnostic 0.75",
         ]
     )
 
     configs = module.iter_sweep_grid(args)
 
-    assert len(configs) == 12
+    assert len(configs) == 24
     assert sorted({config.output_projection.mode for config in configs}) == [
         "box",
         "center-only",
@@ -185,6 +189,7 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
         "min_used_event_count": 20,
         "min_raw_candidate_iou": 0.50,
     } in overrides
+    assert {"max_temporal_center_shift_ratio": 0.75} in overrides
 
 
 def test_replay_projection_sweep_rewrites_result_files(tmp_path, monkeypatch):

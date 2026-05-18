@@ -140,20 +140,29 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         "10,20",
         "--min-accept-candidate-iou",
         "0.85 0.95",
+        "--max-temporal-center-shift-ratio",
+        "none 0.75",
         "--dry-run",
     )
 
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 4
-    assert payload["summary"]["config_count"] == 4
+    assert len(grid) == 8
+    assert payload["summary"]["config_count"] == 8
     assert sorted({config["min_accept_used_events"] for config in grid}) == [10, 20]
     assert sorted({config["min_accept_candidate_iou"] for config in grid}) == [
         0.85,
         0.95,
     ]
     assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
+    assert sorted(
+        {
+            config["max_temporal_center_shift_ratio"]
+            for config in grid
+            if config["max_temporal_center_shift_ratio"] is not None
+        }
+    ) == [0.75]
     assert all(config["refinement_mode"] == "box" for config in grid)
 
 
@@ -280,6 +289,8 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert config["min_mean_event_polarity_weight"] is None
     assert config["max_quadratic_form_per_active_measurement"] is None
     assert config["min_active_fraction"] is None
+    assert config["max_temporal_center_shift_ratio"] is None
+    assert config["max_temporal_size_change_ratio"] is None
     assert acceptance.min_raw_candidate_iou is None
     assert acceptance.min_raw_candidate_area_ratio is None
     assert acceptance.max_raw_candidate_area_ratio is None
@@ -288,6 +299,8 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert acceptance.min_mean_event_polarity_weight is None
     assert acceptance.max_quadratic_form_per_active_measurement is None
     assert acceptance.min_active_fraction is None
+    assert acceptance.max_temporal_center_shift_ratio is None
+    assert acceptance.max_temporal_size_change_ratio is None
 
 
 def test_validation_sweep_optional_none_token_can_be_swept_with_values(monkeypatch):
@@ -389,6 +402,8 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         "min_mean_event_polarity_weight": 0.10,
         "max_quadratic_form_per_active_measurement": 2.0,
         "min_active_fraction": 0.50,
+        "max_temporal_center_shift_ratio": 0.75,
+        "max_temporal_size_change_ratio": 0.50,
     }
 
     acceptance = module.acceptance_config_from_config(config)
@@ -408,6 +423,8 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.min_mean_event_polarity_weight == 0.10
     assert acceptance.max_quadratic_form_per_active_measurement == 2.0
     assert acceptance.min_active_fraction == 0.50
+    assert acceptance.max_temporal_center_shift_ratio == 0.75
+    assert acceptance.max_temporal_size_change_ratio == 0.50
 
 
 def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypatch):

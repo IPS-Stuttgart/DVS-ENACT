@@ -84,6 +84,8 @@ ACCEPTANCE_GRID_KEYS = (
     "min_mean_event_polarity_weight",
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
+    "max_temporal_center_shift_ratio",
+    "max_temporal_size_change_ratio",
 )
 OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_raw_candidate_iou",
@@ -94,6 +96,8 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_mean_event_polarity_weight",
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
+    "max_temporal_center_shift_ratio",
+    "max_temporal_size_change_ratio",
 }
 STRING_GRID_KEYS = {"refinement_mode", "projection_confidence_field"}
 BOOL_GRID_KEYS = {"projection_no_clip"}
@@ -415,6 +419,24 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         default=("none",),
         help="Acceptance sweep values for minimum active fraction; use 'none' to disable.",
+    )
+    parser.add_argument(
+        "--max-temporal-center-shift-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for max frame-to-frame center shift ratio; "
+            "use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-temporal-size-change-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for max frame-to-frame size change ratio; "
+            "use 'none' to disable."
+        ),
     )
 
 
@@ -749,6 +771,18 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--min-active-fraction",
             allow_none=True,
         ),
+        "max_temporal_center_shift_ratio": parse_sweep_values(
+            args.max_temporal_center_shift_ratio,
+            cast=float,
+            argument_name="--max-temporal-center-shift-ratio",
+            allow_none=True,
+        ),
+        "max_temporal_size_change_ratio": parse_sweep_values(
+            args.max_temporal_size_change_ratio,
+            cast=float,
+            argument_name="--max-temporal-size-change-ratio",
+            allow_none=True,
+        ),
     }
 
 
@@ -955,6 +989,14 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
             "max_quadratic_form_per_active_measurement",
         ),
         min_active_fraction=optional_float_config_value(config, "min_active_fraction"),
+        max_temporal_center_shift_ratio=optional_float_config_value(
+            config,
+            "max_temporal_center_shift_ratio",
+        ),
+        max_temporal_size_change_ratio=optional_float_config_value(
+            config,
+            "max_temporal_size_change_ratio",
+        ),
     )
 
 

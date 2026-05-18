@@ -38,6 +38,7 @@ from run_eventvot_refinement import (  # noqa: E402
     resolve_base_result_file,
     resolve_eventvot_split_root,
     save_xywh_result_file,
+    size_change_ratio_xywh,
 )
 from run_eventvot_refinement_modes import (  # noqa: E402
     PROJECTION_CONFIDENCE_FIELDS,
@@ -76,6 +77,8 @@ class ReplayAcceptanceConfig:
     min_mean_event_polarity_weight: float | None = None
     max_quadratic_form_per_active_measurement: float | None = None
     min_active_fraction: float | None = None
+    max_temporal_center_shift_ratio: float | None = None
+    max_temporal_size_change_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,8 @@ class ReplayAcceptanceDecision:
     raw_candidate_iou: float
     raw_candidate_area_ratio: float
     raw_center_shift_ratio: float
+    temporal_center_shift_ratio: float | None
+    temporal_size_change_ratio: float | None
     active_fraction: float | None
     quadratic_form_per_active_measurement: float | None
 
@@ -292,6 +297,8 @@ def _add_policy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-mean-event-polarity-weight", type=float)
     parser.add_argument("--max-quadratic-form-per-active-measurement", type=float)
     parser.add_argument("--min-active-fraction", type=float)
+    parser.add_argument("--max-temporal-center-shift-ratio", type=float)
+    parser.add_argument("--max-temporal-size-change-ratio", type=float)
 
 
 def options_from_args(args: argparse.Namespace) -> EventVOTAcceptanceReplayOptions:
@@ -611,6 +618,7 @@ def replay_sequence_boxes(
             config,
             output_projection,
             previous_projected_size=previous_accepted_projected_size,
+            previous_output_xywh=replayed_boxes[frame_index - 1],
         )
         reason_key = "accepted" if decision.accepted else decision.rejection_reasons[0]
         counts[reason_key] += 1
@@ -642,6 +650,7 @@ def evaluate_frame_acceptance(
     output_projection: ReplayOutputProjectionConfig | None = None,
     *,
     previous_projected_size: np.ndarray | None = None,
+    previous_output_xywh: np.ndarray | None = None,
 ) -> ReplayAcceptanceDecision:
     """Evaluate one stored DVS-ENACT refinement under a replay policy."""
 
@@ -661,6 +670,16 @@ def evaluate_frame_acceptance(
     raw_candidate_iou = box_iou_xywh(candidate, raw_proposed)
     raw_candidate_area_ratio = area_ratio_xywh(candidate, raw_proposed)
     raw_center_shift_ratio = center_shift_ratio_xywh(candidate, raw_proposed)
+    temporal_center_shift_ratio = (
+        center_shift_ratio_xywh(previous_output_xywh, proposed)
+        if previous_output_xywh is not None
+        else None
+    )
+    temporal_size_change_ratio = (
+        size_change_ratio_xywh(previous_output_xywh, proposed)
+        if previous_output_xywh is not None
+        else None
+    )
 
     used_event_count = _optional_int(frame.get("used_event_count"))
     active_measurement_count = _optional_int(frame.get("active_measurement_count"))
@@ -776,6 +795,20 @@ def evaluate_frame_acceptance(
             config.min_active_fraction,
             missing_reason="active_fraction_missing",
         )
+        _append_max_float_gate(
+            rejection_reasons,
+            "temporal_center_shift_ratio",
+            temporal_center_shift_ratio,
+            config.max_temporal_center_shift_ratio,
+            missing_reason="temporal_center_shift_ratio_missing",
+        )
+        _append_max_float_gate(
+            rejection_reasons,
+            "temporal_size_change_ratio",
+            temporal_size_change_ratio,
+            config.max_temporal_size_change_ratio,
+            missing_reason="temporal_size_change_ratio_missing",
+        )
 
     return ReplayAcceptanceDecision(
         accepted=not rejection_reasons,
@@ -786,6 +819,8 @@ def evaluate_frame_acceptance(
         raw_candidate_iou=float(raw_candidate_iou),
         raw_candidate_area_ratio=float(raw_candidate_area_ratio),
         raw_center_shift_ratio=float(raw_center_shift_ratio),
+        temporal_center_shift_ratio=temporal_center_shift_ratio,
+        temporal_size_change_ratio=temporal_size_change_ratio,
         active_fraction=active_fraction,
         quadratic_form_per_active_measurement=quadratic_per_active,
     )
