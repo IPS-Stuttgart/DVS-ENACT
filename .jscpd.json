@@ -6,7 +6,11 @@
     "src/dvs_enact/synthetic_tracker.py",
     "tests/test_mevdt_comparison.py",
     "scripts/run_mevdt_filtered_tracker_sweep.py",
-    "scripts/run_mevdt_tracker_comparison.py"
+    "scripts/run_mevdt_tracker_comparison.py",
+    "**/scripts/run_eventvot_acceptance_replay.py",
+    "**/scripts/run_eventvot_confidence_gate_replay.py",
+    "**/scripts/run_eventvot_learned_acceptance.py",
+    "**/tests/test_eventvot_confidence_gate_replay.py"
   ],
   "threshold": 0
 }

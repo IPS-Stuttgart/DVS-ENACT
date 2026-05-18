@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --refinement-mode size-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-no-clip"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only width-only height-only --projection-width-blend 0.175 --projection-height-blend 0.325 --projection-size-deadband-ratio none 0.03 --projection-confidence-field mean_event_activity --projection-confidence-floor 0.10 --projection-confidence-ceiling 0.50"
         required: false
         default: ""
         type: string
@@ -656,6 +656,13 @@ jobs:
               raise SystemExit(f"No validation configs completed; inspect {summary_path}")
           best = top_configs[0]
 
+          def env_value(value):
+              if value is None:
+                  return ""
+              if isinstance(value, bool):
+                  return str(value).lower()
+              return str(value)
+
           mapping = {
               "LOCKED_CONFIG_ID": best["config_id"],
               "LOCKED_REFINEMENT_BLEND": best["refinement_blend"],
@@ -665,10 +672,61 @@ jobs:
               "LOCKED_EVENT_ACTIVITY_FLOOR": best["event_activity_floor"],
               "LOCKED_INACTIVE_ACTIVITY_THRESHOLD": best["inactive_activity_threshold"],
               "LOCKED_MEASUREMENT_NOISE_VARIANCE": best["measurement_noise_variance"],
+              "LOCKED_MIN_RAW_CANDIDATE_IOU": best.get("min_raw_candidate_iou"),
+              "LOCKED_MIN_RAW_CANDIDATE_AREA_RATIO": best.get(
+                  "min_raw_candidate_area_ratio"
+              ),
+              "LOCKED_MAX_RAW_CANDIDATE_AREA_RATIO": best.get(
+                  "max_raw_candidate_area_ratio"
+              ),
+              "LOCKED_MAX_RAW_CENTER_SHIFT_RATIO": best.get(
+                  "max_raw_center_shift_ratio"
+              ),
+              "LOCKED_MIN_POLARITY_CONSISTENCY_FRACTION": best.get(
+                  "min_polarity_consistency_fraction"
+              ),
+              "LOCKED_MIN_MEAN_EVENT_POLARITY_WEIGHT": best.get(
+                  "min_mean_event_polarity_weight"
+              ),
+              "LOCKED_MAX_QUADRATIC_FORM_PER_ACTIVE_MEASUREMENT": best.get(
+                  "max_quadratic_form_per_active_measurement"
+              ),
+              "LOCKED_MIN_ACTIVE_FRACTION": best.get("min_active_fraction"),
+              "LOCKED_REFINEMENT_MODE": best.get("refinement_mode", "box"),
+              "LOCKED_PROJECTION_WIDTH_BLEND": best.get("projection_width_blend"),
+              "LOCKED_PROJECTION_HEIGHT_BLEND": best.get("projection_height_blend"),
+              "LOCKED_PROJECTION_NO_CLIP": best.get("projection_no_clip", False),
+              "LOCKED_PROJECTION_SIZE_SMOOTHING": best.get(
+                  "projection_size_smoothing"
+              ),
+              "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO": best.get(
+                  "projection_size_deadband_ratio"
+              ),
+              "LOCKED_PROJECTION_CONFIDENCE_FIELD": best.get(
+                  "projection_confidence_field"
+              ),
+              "LOCKED_PROJECTION_CONFIDENCE_FLOOR": best.get(
+                  "projection_confidence_floor"
+              ),
+              "LOCKED_PROJECTION_CONFIDENCE_CEILING": best.get(
+                  "projection_confidence_ceiling"
+              ),
+              "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO": best.get(
+                  "projection_min_raw_width_ratio"
+              ),
+              "LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO": best.get(
+                  "projection_max_raw_width_ratio"
+              ),
+              "LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO": best.get(
+                  "projection_min_raw_height_ratio"
+              ),
+              "LOCKED_PROJECTION_MAX_RAW_HEIGHT_RATIO": best.get(
+                  "projection_max_raw_height_ratio"
+              ),
           }
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
               for key, value in mapping.items():
-                  print(f"{key}={value}", file=env_file)
+                  print(f"{key}={env_value(value)}", file=env_file)
 
           selected_path = summary_path.parent / "selected_validation_config.json"
           selected_path.write_text(json.dumps(best, indent=2) + "\n", encoding="utf-8")
@@ -708,6 +766,27 @@ jobs:
             echo "LOCKED_EVENT_ACTIVITY_FLOOR=${{ inputs.event_activity_floor }}"
             echo "LOCKED_INACTIVE_ACTIVITY_THRESHOLD=${{ inputs.inactive_activity_threshold }}"
             echo "LOCKED_MEASUREMENT_NOISE_VARIANCE=${{ inputs.measurement_noise_variance }}"
+            echo "LOCKED_MIN_RAW_CANDIDATE_IOU="
+            echo "LOCKED_MIN_RAW_CANDIDATE_AREA_RATIO="
+            echo "LOCKED_MAX_RAW_CANDIDATE_AREA_RATIO="
+            echo "LOCKED_MAX_RAW_CENTER_SHIFT_RATIO="
+            echo "LOCKED_MIN_POLARITY_CONSISTENCY_FRACTION="
+            echo "LOCKED_MIN_MEAN_EVENT_POLARITY_WEIGHT="
+            echo "LOCKED_MAX_QUADRATIC_FORM_PER_ACTIVE_MEASUREMENT="
+            echo "LOCKED_MIN_ACTIVE_FRACTION="
+            echo "LOCKED_REFINEMENT_MODE=box"
+            echo "LOCKED_PROJECTION_WIDTH_BLEND="
+            echo "LOCKED_PROJECTION_HEIGHT_BLEND="
+            echo "LOCKED_PROJECTION_NO_CLIP=false"
+            echo "LOCKED_PROJECTION_SIZE_SMOOTHING="
+            echo "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO="
+            echo "LOCKED_PROJECTION_CONFIDENCE_FIELD="
+            echo "LOCKED_PROJECTION_CONFIDENCE_FLOOR="
+            echo "LOCKED_PROJECTION_CONFIDENCE_CEILING="
+            echo "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO="
+            echo "LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO="
+            echo "LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO="
+            echo "LOCKED_PROJECTION_MAX_RAW_HEIGHT_RATIO="
           } >> "$GITHUB_ENV"
 
       - name: Validate test inputs
@@ -771,6 +850,61 @@ jobs:
               "max_accept_area_ratio": "${{ inputs.max_accept_area_ratio }}",
               "extra_acceptance_args": os.environ.get("EXTRA_ACCEPTANCE_ARGS", ""),
           }
+          payload["selected_optional_acceptance"] = {
+              "min_raw_candidate_iou": os.environ.get("LOCKED_MIN_RAW_CANDIDATE_IOU", ""),
+              "min_raw_candidate_area_ratio": os.environ.get(
+                  "LOCKED_MIN_RAW_CANDIDATE_AREA_RATIO", ""
+              ),
+              "max_raw_candidate_area_ratio": os.environ.get(
+                  "LOCKED_MAX_RAW_CANDIDATE_AREA_RATIO", ""
+              ),
+              "max_raw_center_shift_ratio": os.environ.get(
+                  "LOCKED_MAX_RAW_CENTER_SHIFT_RATIO", ""
+              ),
+              "min_polarity_consistency_fraction": os.environ.get(
+                  "LOCKED_MIN_POLARITY_CONSISTENCY_FRACTION", ""
+              ),
+              "min_mean_event_polarity_weight": os.environ.get(
+                  "LOCKED_MIN_MEAN_EVENT_POLARITY_WEIGHT", ""
+              ),
+              "max_quadratic_form_per_active_measurement": os.environ.get(
+                  "LOCKED_MAX_QUADRATIC_FORM_PER_ACTIVE_MEASUREMENT", ""
+              ),
+              "min_active_fraction": os.environ.get("LOCKED_MIN_ACTIVE_FRACTION", ""),
+          }
+          payload["projection"] = {
+              "refinement_mode": os.environ.get("LOCKED_REFINEMENT_MODE", "box"),
+              "projection_width_blend": os.environ.get("LOCKED_PROJECTION_WIDTH_BLEND", ""),
+              "projection_height_blend": os.environ.get("LOCKED_PROJECTION_HEIGHT_BLEND", ""),
+              "projection_no_clip": os.environ.get("LOCKED_PROJECTION_NO_CLIP", "false"),
+              "projection_size_smoothing": os.environ.get(
+                  "LOCKED_PROJECTION_SIZE_SMOOTHING", ""
+              ),
+              "projection_size_deadband_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_SIZE_DEADBAND_RATIO", ""
+              ),
+              "projection_confidence_field": os.environ.get(
+                  "LOCKED_PROJECTION_CONFIDENCE_FIELD", ""
+              ),
+              "projection_confidence_floor": os.environ.get(
+                  "LOCKED_PROJECTION_CONFIDENCE_FLOOR", ""
+              ),
+              "projection_confidence_ceiling": os.environ.get(
+                  "LOCKED_PROJECTION_CONFIDENCE_CEILING", ""
+              ),
+              "projection_min_raw_width_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO", ""
+              ),
+              "projection_max_raw_width_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO", ""
+              ),
+              "projection_min_raw_height_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO", ""
+              ),
+              "projection_max_raw_height_ratio": os.environ.get(
+                  "LOCKED_PROJECTION_MAX_RAW_HEIGHT_RATIO", ""
+              ),
+          }
           out = Path(os.environ["GITHUB_WORKSPACE"]) / os.environ["OUTPUT_ROOT"] / "test" / "locked_test_config.json"
           out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
           PY
@@ -796,9 +930,86 @@ jobs:
             --min-accept-candidate-iou "${{ inputs.min_accept_candidate_iou }}"
             --max-accept-area-ratio "${{ inputs.max_accept_area_ratio }}"
           )
-          if [[ -n "$EXTRA_ACCEPTANCE_ARGS" ]]; then
+          if [[ -n "${LOCKED_MIN_RAW_CANDIDATE_IOU:-}" ]]; then
+            args+=(--min-raw-candidate-iou "$LOCKED_MIN_RAW_CANDIDATE_IOU")
+          fi
+          if [[ -n "${LOCKED_MIN_RAW_CANDIDATE_AREA_RATIO:-}" ]]; then
+            args+=(--min-raw-area-ratio "$LOCKED_MIN_RAW_CANDIDATE_AREA_RATIO")
+          fi
+          if [[ -n "${LOCKED_MAX_RAW_CANDIDATE_AREA_RATIO:-}" ]]; then
+            args+=(--max-raw-area-ratio "$LOCKED_MAX_RAW_CANDIDATE_AREA_RATIO")
+          fi
+          if [[ -n "${LOCKED_MAX_RAW_CENTER_SHIFT_RATIO:-}" ]]; then
+            args+=(--max-raw-center-shift-ratio "$LOCKED_MAX_RAW_CENTER_SHIFT_RATIO")
+          fi
+          if [[ -n "${LOCKED_MIN_POLARITY_CONSISTENCY_FRACTION:-}" ]]; then
+            args+=(
+              --min-polarity-consistency-fraction
+              "$LOCKED_MIN_POLARITY_CONSISTENCY_FRACTION"
+            )
+          fi
+          if [[ -n "${LOCKED_MIN_MEAN_EVENT_POLARITY_WEIGHT:-}" ]]; then
+            args+=(--min-mean-event-polarity-weight "$LOCKED_MIN_MEAN_EVENT_POLARITY_WEIGHT")
+          fi
+          if [[ -n "${LOCKED_MAX_QUADRATIC_FORM_PER_ACTIVE_MEASUREMENT:-}" ]]; then
+            args+=(
+              --max-quadratic-form-per-active-measurement
+              "$LOCKED_MAX_QUADRATIC_FORM_PER_ACTIVE_MEASUREMENT"
+            )
+          fi
+          if [[ -n "${LOCKED_MIN_ACTIVE_FRACTION:-}" ]]; then
+            args+=(--min-active-fraction "$LOCKED_MIN_ACTIVE_FRACTION")
+          fi
+          if [[ "${LOCKED_REFINEMENT_MODE:-box}" != "box" ]]; then
+            args+=(--refinement-mode "$LOCKED_REFINEMENT_MODE")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_WIDTH_BLEND:-}" || -n "${LOCKED_PROJECTION_HEIGHT_BLEND:-}" ]]; then
+            if [[ -z "${LOCKED_PROJECTION_WIDTH_BLEND:-}" || -z "${LOCKED_PROJECTION_HEIGHT_BLEND:-}" ]]; then
+              echo "::error::Selected projection blend is incomplete."
+              exit 1
+            fi
+            args+=(
+              --projection-width-blend "$LOCKED_PROJECTION_WIDTH_BLEND"
+              --projection-height-blend "$LOCKED_PROJECTION_HEIGHT_BLEND"
+            )
+          fi
+          if [[ "${LOCKED_PROJECTION_NO_CLIP:-false}" == "true" ]]; then
+            args+=(--projection-no-clip)
+          fi
+          if [[ -n "${LOCKED_PROJECTION_SIZE_SMOOTHING:-}" ]]; then
+            args+=(--projection-size-smoothing "$LOCKED_PROJECTION_SIZE_SMOOTHING")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_SIZE_DEADBAND_RATIO:-}" ]]; then
+            args+=(--projection-size-deadband-ratio "$LOCKED_PROJECTION_SIZE_DEADBAND_RATIO")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_CONFIDENCE_FIELD:-}" || -n "${LOCKED_PROJECTION_CONFIDENCE_FLOOR:-}" || -n "${LOCKED_PROJECTION_CONFIDENCE_CEILING:-}" ]]; then
+            if [[ -z "${LOCKED_PROJECTION_CONFIDENCE_FIELD:-}" || -z "${LOCKED_PROJECTION_CONFIDENCE_FLOOR:-}" || -z "${LOCKED_PROJECTION_CONFIDENCE_CEILING:-}" ]]; then
+              echo "::error::Selected projection confidence weighting is incomplete."
+              exit 1
+            fi
+            args+=(
+              --projection-confidence-field "$LOCKED_PROJECTION_CONFIDENCE_FIELD"
+              --projection-confidence-floor "$LOCKED_PROJECTION_CONFIDENCE_FLOOR"
+              --projection-confidence-ceiling "$LOCKED_PROJECTION_CONFIDENCE_CEILING"
+            )
+          fi
+          if [[ -n "${LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO:-}" ]]; then
+            args+=(--projection-min-raw-width-ratio "$LOCKED_PROJECTION_MIN_RAW_WIDTH_RATIO")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO:-}" ]]; then
+            args+=(--projection-max-raw-width-ratio "$LOCKED_PROJECTION_MAX_RAW_WIDTH_RATIO")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO:-}" ]]; then
+            args+=(--projection-min-raw-height-ratio "$LOCKED_PROJECTION_MIN_RAW_HEIGHT_RATIO")
+          fi
+          if [[ -n "${LOCKED_PROJECTION_MAX_RAW_HEIGHT_RATIO:-}" ]]; then
+            args+=(--projection-max-raw-height-ratio "$LOCKED_PROJECTION_MAX_RAW_HEIGHT_RATIO")
+          fi
+          if [[ "${{ inputs.mode }}" == "locked_test" && -n "$EXTRA_ACCEPTANCE_ARGS" ]]; then
             read -r -a extra_acceptance_args <<< "$EXTRA_ACCEPTANCE_ARGS"
             args+=("${extra_acceptance_args[@]}")
+          elif [[ "${{ inputs.mode }}" == "full" && -n "$EXTRA_ACCEPTANCE_ARGS" ]]; then
+            echo "::notice::Not appending raw validation-sweep extra args to locked test; using selected validation config."
           fi
           if [[ "${{ inputs.update_config_tracker }}" == "true" ]]; then
             args+=(--update-config-tracker)

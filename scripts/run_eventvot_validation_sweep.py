@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import re
@@ -23,6 +24,11 @@ from run_eventvot_refinement import (
     resolve_sequence_names,
     run as run_eventvot_refinement,
 )
+from run_eventvot_refinement_modes import (
+    PROJECTION_CONFIDENCE_FIELDS,
+    ProjectedOutputRefiner,
+    REFINEMENT_MODES,
+)
 
 DEFAULT_REFINEMENT_BLEND = (0.10, 0.25, 0.50, 1.00)
 DEFAULT_SEARCH_EXPANSION_FACTOR = (1.10, 1.25, 1.50)
@@ -32,6 +38,9 @@ DEFAULT_EVENT_ACTIVITY_FLOOR = (0.00, 0.02, 0.05)
 DEFAULT_INACTIVE_ACTIVITY_THRESHOLD = (0.02, 0.05, 0.10)
 DEFAULT_MEASUREMENT_NOISE_VARIANCE = (1.0, 4.0, 9.0)
 
+SweepValue = float | int | str | bool | None
+NONE_SWEEP_TOKENS = {"none", "null", "off", "disabled", "disable"}
+
 REFINER_GRID_KEYS = (
     "refinement_blend",
     "search_expansion_factor",
@@ -40,6 +49,21 @@ REFINER_GRID_KEYS = (
     "event_activity_floor",
     "inactive_activity_threshold",
     "measurement_noise_variance",
+)
+PROJECTION_GRID_KEYS = (
+    "refinement_mode",
+    "projection_width_blend",
+    "projection_height_blend",
+    "projection_no_clip",
+    "projection_size_smoothing",
+    "projection_size_deadband_ratio",
+    "projection_confidence_field",
+    "projection_confidence_floor",
+    "projection_confidence_ceiling",
+    "projection_min_raw_width_ratio",
+    "projection_max_raw_width_ratio",
+    "projection_min_raw_height_ratio",
+    "projection_max_raw_height_ratio",
 )
 ACCEPTANCE_GRID_KEYS = (
     "min_accept_used_events",
@@ -58,12 +82,37 @@ ACCEPTANCE_GRID_KEYS = (
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
 )
+OPTIONAL_ACCEPTANCE_GRID_KEYS = {
+    "min_raw_candidate_iou",
+    "min_raw_candidate_area_ratio",
+    "max_raw_candidate_area_ratio",
+    "max_raw_center_shift_ratio",
+    "min_polarity_consistency_fraction",
+    "min_mean_event_polarity_weight",
+    "max_quadratic_form_per_active_measurement",
+    "min_active_fraction",
+}
+STRING_GRID_KEYS = {"refinement_mode", "projection_confidence_field"}
+BOOL_GRID_KEYS = {"projection_no_clip"}
+OPTIONAL_FLOAT_GRID_KEYS = {
+    "projection_width_blend",
+    "projection_height_blend",
+    "projection_size_smoothing",
+    "projection_size_deadband_ratio",
+    "projection_confidence_floor",
+    "projection_confidence_ceiling",
+    "projection_min_raw_width_ratio",
+    "projection_max_raw_width_ratio",
+    "projection_min_raw_height_ratio",
+    "projection_max_raw_height_ratio",
+}
 INT_GRID_KEYS = {
     "max_events",
     "min_events",
     "min_accept_used_events",
     "min_accept_active_measurements",
 }
+CONFIG_ID_KEYS = REFINER_GRID_KEYS + PROJECTION_GRID_KEYS + ACCEPTANCE_GRID_KEYS
 
 OVERLAP_THRESHOLDS = np.arange(0.0, 1.0001, 0.05)
 ERROR_THRESHOLDS = np.arange(0.0, 51.0, 1.0)
@@ -141,8 +190,90 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(DEFAULT_MEASUREMENT_NOISE_VARIANCE),
     )
+    add_projection_sweep_arguments(parser)
     add_acceptance_sweep_arguments(parser)
     return parser
+
+
+def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add output-projection sweep arguments."""
+    parser.add_argument(
+        "--refinement-mode",
+        nargs="+",
+        default=("box",),
+        help=(
+            "Output projection modes to evaluate. 'box' keeps the full "
+            "DVS-ENACT box update, 'center-only' keeps the base size, and "
+            "'size-only', 'width-only', and 'height-only' keep the base center."
+        ),
+    )
+    parser.add_argument(
+        "--projection-width-blend",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional projection width blends. Use 'none' to use the normal "
+            "--refinement-blend output width."
+        ),
+    )
+    parser.add_argument(
+        "--projection-height-blend",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional projection height blends. Use 'none' to use the normal "
+            "--refinement-blend output height."
+        ),
+    )
+    parser.add_argument(
+        "--projection-no-clip",
+        action="store_true",
+        help="Reject projected outputs that would be clipped by image bounds.",
+    )
+    parser.add_argument(
+        "--projection-size-smoothing",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional temporal size-smoothing values. Use 'none' to disable. "
+            "A value of 0 uses the current projection; 1 holds the previous "
+            "accepted projected size."
+        ),
+    )
+    parser.add_argument(
+        "--projection-size-deadband-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional per-axis size deadband values relative to base width/height. "
+            "Use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-field",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional confidence fields for adaptive projection strength. "
+            f"Choices: {', '.join(PROJECTION_CONFIDENCE_FIELDS)}; use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-floor",
+        nargs="+",
+        default=("none",),
+        help="Confidence values that map projected correction strength to zero.",
+    )
+    parser.add_argument(
+        "--projection-confidence-ceiling",
+        nargs="+",
+        default=("none",),
+        help="Confidence values that map projected correction strength to one.",
+    )
+    parser.add_argument("--projection-min-raw-width-ratio", nargs="+", default=("none",))
+    parser.add_argument("--projection-max-raw-width-ratio", nargs="+", default=("none",))
+    parser.add_argument("--projection-min-raw-height-ratio", nargs="+", default=("none",))
+    parser.add_argument("--projection-max-raw-height-ratio", nargs="+", default=("none",))
 
 
 def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
@@ -150,8 +281,10 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
 
     Each value accepts either repeated shell tokens (``--arg 0.1 0.2``) or a
     single comma/whitespace-separated workflow-dispatch string
-    (``--arg "0.1,0.2"``). Defaults are singletons so the historical refiner
-    grid size is unchanged unless the caller explicitly sweeps gates.
+    (``--arg "0.1,0.2"``). Optional acceptance gates also accept ``none``,
+    ``null``, or ``off`` to leave the corresponding guard disabled. Defaults are
+    singletons so the historical refiner grid size is unchanged unless the
+    caller explicitly sweeps gates.
     """
     parser.add_argument(
         "--min-accept-used-events",
@@ -201,50 +334,53 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--min-raw-candidate-iou",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum raw/base IoU.",
+        default=("none",),
+        help="Acceptance sweep values for minimum raw/base IoU; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-raw-candidate-area-ratio",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum raw/base area ratio.",
+        default=("none",),
+        help="Acceptance sweep values for minimum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-candidate-area-ratio",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for maximum raw/base area ratio.",
+        default=("none",),
+        help="Acceptance sweep values for maximum raw/base area ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-raw-center-shift-ratio",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for maximum raw/base center shift ratio.",
+        default=("none",),
+        help="Acceptance sweep values for maximum raw/base center shift ratio; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-polarity-consistency-fraction",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum polarity consistency.",
+        default=("none",),
+        help="Acceptance sweep values for minimum polarity consistency; use 'none' to disable.",
     )
     parser.add_argument(
         "--min-mean-event-polarity-weight",
         nargs="+",
-        default=("-inf",),
-        help="Acceptance sweep values for minimum mean event polarity weight.",
+        default=("none",),
+        help="Acceptance sweep values for minimum mean event polarity weight; use 'none' to disable.",
     )
     parser.add_argument(
         "--max-quadratic-form-per-active-measurement",
         nargs="+",
-        default=("inf",),
-        help="Acceptance sweep values for max quadratic-form-per-active-measurement.",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for max quadratic-form-per-active-measurement; "
+            "use 'none' to disable."
+        ),
     )
     parser.add_argument(
         "--min-active-fraction",
         nargs="+",
-        default=("0.0",),
-        help="Acceptance sweep values for minimum active fraction.",
+        default=("none",),
+        help="Acceptance sweep values for minimum active fraction; use 'none' to disable.",
     )
 
 
@@ -334,23 +470,149 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, float | int]]:
-    keys = REFINER_GRID_KEYS + ACCEPTANCE_GRID_KEYS
+def iter_parameter_grid(args: argparse.Namespace) -> list[dict[str, Any]]:
+    keys = REFINER_GRID_KEYS + PROJECTION_GRID_KEYS + ACCEPTANCE_GRID_KEYS
+    projection_values = projection_value_lists_from_args(args)
     acceptance_values = acceptance_value_lists_from_args(args)
     values = tuple(
-        getattr(args, key) if key in REFINER_GRID_KEYS else acceptance_values[key]
+        getattr(args, key)
+        if key in REFINER_GRID_KEYS
+        else projection_values[key]
+        if key in PROJECTION_GRID_KEYS
+        else acceptance_values[key]
         for key in keys
     )
-    configs: list[dict[str, float | int]] = []
+    configs: list[dict[str, Any]] = []
     for combination in itertools.product(*values):
-        config: dict[str, float | int] = {}
+        config: dict[str, Any] = {}
         for key, value in zip(keys, combination, strict=True):
-            config[key] = int(value) if key in INT_GRID_KEYS else float(value)
+            config[key] = normalize_config_value(key, value)
+        if has_incomplete_projection_blend(config):
+            continue
+        if has_incomplete_projection_confidence(config):
+            continue
+        validate_projection_config(config)
         configs.append(config)
+    if not configs:
+        raise ValueError("Validation sweep grid did not contain any valid configs")
     return configs
 
 
-def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[float | int]]:
+def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[Any]]:
+    return {
+        "refinement_mode": parse_refinement_mode_values(args.refinement_mode),
+        "projection_width_blend": parse_sweep_values(
+            args.projection_width_blend,
+            cast=float,
+            argument_name="--projection-width-blend",
+            allow_none=True,
+        ),
+        "projection_height_blend": parse_sweep_values(
+            args.projection_height_blend,
+            cast=float,
+            argument_name="--projection-height-blend",
+            allow_none=True,
+        ),
+        "projection_no_clip": [bool(args.projection_no_clip)],
+        "projection_size_smoothing": parse_sweep_values(
+            args.projection_size_smoothing,
+            cast=float,
+            argument_name="--projection-size-smoothing",
+            allow_none=True,
+        ),
+        "projection_size_deadband_ratio": parse_sweep_values(
+            args.projection_size_deadband_ratio,
+            cast=float,
+            argument_name="--projection-size-deadband-ratio",
+            allow_none=True,
+        ),
+        "projection_confidence_field": parse_projection_confidence_field_values(
+            args.projection_confidence_field
+        ),
+        "projection_confidence_floor": parse_sweep_values(
+            args.projection_confidence_floor,
+            cast=float,
+            argument_name="--projection-confidence-floor",
+            allow_none=True,
+        ),
+        "projection_confidence_ceiling": parse_sweep_values(
+            args.projection_confidence_ceiling,
+            cast=float,
+            argument_name="--projection-confidence-ceiling",
+            allow_none=True,
+        ),
+        "projection_min_raw_width_ratio": parse_sweep_values(
+            args.projection_min_raw_width_ratio,
+            cast=float,
+            argument_name="--projection-min-raw-width-ratio",
+            allow_none=True,
+        ),
+        "projection_max_raw_width_ratio": parse_sweep_values(
+            args.projection_max_raw_width_ratio,
+            cast=float,
+            argument_name="--projection-max-raw-width-ratio",
+            allow_none=True,
+        ),
+        "projection_min_raw_height_ratio": parse_sweep_values(
+            args.projection_min_raw_height_ratio,
+            cast=float,
+            argument_name="--projection-min-raw-height-ratio",
+            allow_none=True,
+        ),
+        "projection_max_raw_height_ratio": parse_sweep_values(
+            args.projection_max_raw_height_ratio,
+            cast=float,
+            argument_name="--projection-max-raw-height-ratio",
+            allow_none=True,
+        ),
+    }
+
+
+def parse_refinement_mode_values(raw_values: list[str] | tuple[str, ...]) -> list[str]:
+    """Parse repeated or comma/whitespace-separated projection mode values."""
+    values: list[str] = []
+    for raw_value in raw_values:
+        for token in re.split(r"[\s,]+", str(raw_value).strip()):
+            if not token:
+                continue
+            if token not in REFINEMENT_MODES:
+                expected = ", ".join(REFINEMENT_MODES)
+                raise ValueError(
+                    f"Invalid value for --refinement-mode: {token!r}; "
+                    f"expected one of {expected}"
+                )
+            values.append(token)
+    if not values:
+        raise ValueError("--refinement-mode must contain at least one value")
+    return list(dict.fromkeys(values))
+
+
+def parse_projection_confidence_field_values(
+    raw_values: list[str] | tuple[str, ...],
+) -> list[str | None]:
+    """Parse repeated or comma/whitespace-separated projection confidence fields."""
+    values: list[str | None] = []
+    for raw_value in raw_values:
+        for token in re.split(r"[\s,]+", str(raw_value).strip()):
+            if not token:
+                continue
+            normalized = token.strip().lower()
+            if normalized in NONE_SWEEP_TOKENS:
+                values.append(None)
+                continue
+            if token not in PROJECTION_CONFIDENCE_FIELDS:
+                expected = ", ".join(PROJECTION_CONFIDENCE_FIELDS)
+                raise ValueError(
+                    f"Invalid value for --projection-confidence-field: {token!r}; "
+                    f"expected one of {expected} or none"
+                )
+            values.append(token)
+    if not values:
+        raise ValueError("--projection-confidence-field must contain at least one value")
+    return list(dict.fromkeys(values))
+
+
+def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list[SweepValue]]:
     return {
         "min_accept_used_events": parse_sweep_values(
             args.min_accept_used_events,
@@ -391,41 +653,49 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             args.min_raw_candidate_iou,
             cast=float,
             argument_name="--min-raw-candidate-iou",
+            allow_none=True,
         ),
         "min_raw_candidate_area_ratio": parse_sweep_values(
             args.min_raw_candidate_area_ratio,
             cast=float,
             argument_name="--min-raw-candidate-area-ratio",
+            allow_none=True,
         ),
         "max_raw_candidate_area_ratio": parse_sweep_values(
             args.max_raw_candidate_area_ratio,
             cast=float,
             argument_name="--max-raw-candidate-area-ratio",
+            allow_none=True,
         ),
         "max_raw_center_shift_ratio": parse_sweep_values(
             args.max_raw_center_shift_ratio,
             cast=float,
             argument_name="--max-raw-center-shift-ratio",
+            allow_none=True,
         ),
         "min_polarity_consistency_fraction": parse_sweep_values(
             args.min_polarity_consistency_fraction,
             cast=float,
             argument_name="--min-polarity-consistency-fraction",
+            allow_none=True,
         ),
         "min_mean_event_polarity_weight": parse_sweep_values(
             args.min_mean_event_polarity_weight,
             cast=float,
             argument_name="--min-mean-event-polarity-weight",
+            allow_none=True,
         ),
         "max_quadratic_form_per_active_measurement": parse_sweep_values(
             args.max_quadratic_form_per_active_measurement,
             cast=float,
             argument_name="--max-quadratic-form-per-active-measurement",
+            allow_none=True,
         ),
         "min_active_fraction": parse_sweep_values(
             args.min_active_fraction,
             cast=float,
             argument_name="--min-active-fraction",
+            allow_none=True,
         ),
     }
 
@@ -435,12 +705,16 @@ def parse_sweep_values(
     *,
     cast,
     argument_name: str,
-) -> list[float | int]:
+    allow_none: bool = False,
+) -> list[SweepValue]:
     """Parse repeated or comma/whitespace-separated sweep values."""
-    values: list[float | int] = []
+    values: list[SweepValue] = []
     for raw_value in raw_values:
         for token in re.split(r"[\s,]+", str(raw_value).strip()):
             if not token:
+                continue
+            if allow_none and token.strip().lower() in NONE_SWEEP_TOKENS:
+                values.append(None)
                 continue
             try:
                 values.append(cast(token))
@@ -451,8 +725,8 @@ def parse_sweep_values(
     if not values:
         raise ValueError(f"{argument_name} must contain at least one value")
 
-    unique: list[float | int] = []
-    seen: set[float | int] = set()
+    unique: list[SweepValue] = []
+    seen: set[SweepValue] = set()
     for value in values:
         if value in seen:
             continue
@@ -461,11 +735,81 @@ def parse_sweep_values(
     return unique
 
 
+def normalize_config_value(key: str, value: Any) -> Any:
+    if value is None:
+        return None
+    if key in INT_GRID_KEYS:
+        return int(value)
+    if key in STRING_GRID_KEYS:
+        return str(value)
+    if key in BOOL_GRID_KEYS:
+        return bool(value)
+    return float(value)
+
+
+def validate_projection_config(config: dict[str, Any]) -> None:
+    if has_incomplete_projection_blend(config):
+        raise ValueError("projection width/height blends must both be set or both be none")
+    if has_incomplete_projection_confidence(config):
+        raise ValueError(
+            "projection confidence field, floor, and ceiling must all be set or all be none"
+        )
+    for name in OPTIONAL_FLOAT_GRID_KEYS:
+        value = config[name]
+        if value is not None and float(value) < 0.0:
+            raise ValueError(f"{name} must be non-negative")
+    smoothing = config["projection_size_smoothing"]
+    if smoothing is not None and float(smoothing) > 1.0:
+        raise ValueError("projection_size_smoothing must be between 0 and 1")
+    deadband = config["projection_size_deadband_ratio"]
+    if deadband is not None and float(deadband) < 0.0:
+        raise ValueError("projection_size_deadband_ratio must be non-negative")
+    confidence_floor = config["projection_confidence_floor"]
+    confidence_ceiling = config["projection_confidence_ceiling"]
+    if confidence_floor is not None and confidence_ceiling is not None:
+        if confidence_floor >= confidence_ceiling:
+            raise ValueError("projection_confidence_floor must be less than ceiling")
+    _validate_min_max_pair(
+        config,
+        "projection_min_raw_width_ratio",
+        "projection_max_raw_width_ratio",
+    )
+    _validate_min_max_pair(
+        config,
+        "projection_min_raw_height_ratio",
+        "projection_max_raw_height_ratio",
+    )
+
+
+def _validate_min_max_pair(config: dict[str, Any], min_key: str, max_key: str) -> None:
+    minimum = config[min_key]
+    maximum = config[max_key]
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError(f"{min_key} must not exceed {max_key}")
+
+
+def has_incomplete_projection_blend(config: dict[str, Any]) -> bool:
+    return (config["projection_width_blend"] is None) != (
+        config["projection_height_blend"] is None
+    )
+
+
+def has_incomplete_projection_confidence(config: dict[str, Any]) -> bool:
+    values = (
+        config["projection_confidence_field"],
+        config["projection_confidence_floor"],
+        config["projection_confidence_ceiling"],
+    )
+    return any(value is None for value in values) and any(
+        value is not None for value in values
+    )
+
+
 def make_refiner(
-    config: dict[str, float | int],
+    config: dict[str, SweepValue],
     args: argparse.Namespace,
-) -> DVSContourRefiner:
-    return DVSContourRefiner(
+) -> Any:
+    refiner = DVSContourRefiner(
         DVSContourRefinerConfig(
             input_bbox_format="xywh",
             output_bbox_format="xywh",
@@ -481,9 +825,32 @@ def make_refiner(
             refinement_blend=float(config["refinement_blend"]),
         )
     )
+    if (
+        config["refinement_mode"] == "box"
+        and config["projection_size_smoothing"] is None
+        and config["projection_size_deadband_ratio"] is None
+        and config["projection_confidence_field"] is None
+    ):
+        return refiner
+    return ProjectedOutputRefiner(
+        refiner,
+        refinement_mode=str(config["refinement_mode"]),
+        projection_width_blend=config["projection_width_blend"],
+        projection_height_blend=config["projection_height_blend"],
+        projection_no_clip=bool(config["projection_no_clip"]),
+        projection_size_smoothing=config["projection_size_smoothing"],
+        projection_size_deadband_ratio=config["projection_size_deadband_ratio"],
+        projection_confidence_field=config["projection_confidence_field"],
+        projection_confidence_floor=config["projection_confidence_floor"],
+        projection_confidence_ceiling=config["projection_confidence_ceiling"],
+        projection_min_raw_width_ratio=config["projection_min_raw_width_ratio"],
+        projection_max_raw_width_ratio=config["projection_max_raw_width_ratio"],
+        projection_min_raw_height_ratio=config["projection_min_raw_height_ratio"],
+        projection_max_raw_height_ratio=config["projection_max_raw_height_ratio"],
+    )
 
 
-def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcceptanceConfig:
+def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcceptanceConfig:
     return EventVOTAcceptanceConfig(
         min_used_event_count=int(config["min_accept_used_events"]),
         min_active_measurement_count=int(config["min_accept_active_measurements"]),
@@ -492,27 +859,53 @@ def acceptance_config_from_config(config: dict[str, float | int]) -> EventVOTAcc
         min_candidate_area_ratio=float(config["min_accept_area_ratio"]),
         max_candidate_area_ratio=float(config["max_accept_area_ratio"]),
         max_center_shift_ratio=float(config["max_accept_center_shift_ratio"]),
-        min_raw_candidate_iou=float(config.get("min_raw_candidate_iou", 0.0)),
-        min_raw_candidate_area_ratio=float(config.get("min_raw_candidate_area_ratio", 0.0)),
-        max_raw_candidate_area_ratio=float(config.get("max_raw_candidate_area_ratio", float("inf"))),
-        max_raw_center_shift_ratio=float(config.get("max_raw_center_shift_ratio", float("inf"))),
-        min_polarity_consistency_fraction=float(
-            config.get("min_polarity_consistency_fraction", 0.0)
+        min_raw_candidate_iou=optional_float_config_value(
+            config,
+            "min_raw_candidate_iou",
         ),
-        min_mean_event_polarity_weight=float(
-            config.get("min_mean_event_polarity_weight", float("-inf"))
+        min_raw_candidate_area_ratio=optional_float_config_value(
+            config,
+            "min_raw_candidate_area_ratio",
         ),
-        max_quadratic_form_per_active_measurement=float(
-            config.get("max_quadratic_form_per_active_measurement", float("inf"))
+        max_raw_candidate_area_ratio=optional_float_config_value(
+            config,
+            "max_raw_candidate_area_ratio",
         ),
-        min_active_fraction=float(config.get("min_active_fraction", 0.0)),
+        max_raw_center_shift_ratio=optional_float_config_value(
+            config,
+            "max_raw_center_shift_ratio",
+        ),
+        min_polarity_consistency_fraction=optional_float_config_value(
+            config,
+            "min_polarity_consistency_fraction",
+        ),
+        min_mean_event_polarity_weight=optional_float_config_value(
+            config,
+            "min_mean_event_polarity_weight",
+        ),
+        max_quadratic_form_per_active_measurement=optional_float_config_value(
+            config,
+            "max_quadratic_form_per_active_measurement",
+        ),
+        min_active_fraction=optional_float_config_value(config, "min_active_fraction"),
     )
+
+
+def optional_float_config_value(
+    config: dict[str, SweepValue],
+    key: str,
+) -> float | None:
+    """Return an optional float gate value, preserving disabled ``None``."""
+    value = config.get(key)
+    if value is None:
+        return None
+    return float(value)
 
 
 def make_result_row(
     config_id: str,
     tracker_name: str,
-    config: dict[str, float | int],
+    config: dict[str, SweepValue],
     metrics: dict[str, Any],
     refiner_summary: dict[str, Any],
 ) -> dict[str, Any]:
@@ -544,7 +937,7 @@ def make_result_row(
 
 def write_sweep_outputs(
     rows: list[dict[str, Any]],
-    configs: list[dict[str, float | int]],
+    configs: list[dict[str, SweepValue]],
     base_metrics: dict[str, Any],
     metrics_csv: Path,
     summary_json: Path,
@@ -828,9 +1221,17 @@ def load_numeric_matrix(path: Path, *, min_columns: int) -> np.ndarray:
     return np.asarray(rows, dtype=float)
 
 
-def make_config_id(index: int, config: dict[str, float | int]) -> str:
+def make_config_id(index: int, config: dict[str, SweepValue]) -> str:
+    """Return a stable, cache-safe identifier for a complete sweep config.
+
+    The readable tags intentionally summarize only the historically most useful
+    parameters. The hash prefix is computed from every refiner and acceptance
+    grid key, including gates that are not printed below, so changing any tuned
+    parameter changes the output directory name and diagnostics filename.
+    """
+    config_hash = make_config_hash(config)
     return (
-        f"cfg{index:04d}"
+        f"cfg{index:04d}_h{config_hash}"
         f"_rb{tag_number(config['refinement_blend'])}"
         f"_se{tag_number(config['search_expansion_factor'])}"
         f"_mx{int(config['max_events'])}"
@@ -845,11 +1246,52 @@ def make_config_id(index: int, config: dict[str, float | int]) -> str:
         f"_ar{tag_number(config['min_accept_area_ratio'])}"
         f"_ax{tag_number(config['max_accept_area_ratio'])}"
         f"_cs{tag_number(config['max_accept_center_shift_ratio'])}"
+        f"_pm{tag_text(config['refinement_mode'])}"
     )
+
+
+def make_config_hash(config: dict[str, SweepValue]) -> str:
+    """Hash all sweep parameters that affect refinement or acceptance."""
+    payload = {
+        key: canonical_config_value(key, config[key])
+        for key in CONFIG_ID_KEYS
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def canonical_config_value(key: str, value: Any) -> float | int | str | bool | None:
+    if value is None:
+        return None
+    if key in INT_GRID_KEYS:
+        return int(value)
+    if key in STRING_GRID_KEYS:
+        return str(value)
+    if key in BOOL_GRID_KEYS:
+        return bool(value)
+    if value is None:
+        return None
+    numeric_value = float(value)
+    if np.isposinf(numeric_value):
+        return "inf"
+    if np.isneginf(numeric_value):
+        return "-inf"
+    if np.isnan(numeric_value):
+        raise ValueError(f"{key} cannot be NaN in a validation-sweep config")
+    return numeric_value
 
 
 def tag_number(value: float | int) -> str:
     return f"{float(value):g}".replace("-", "m").replace(".", "p")
+
+
+def tag_text(value: Any) -> str:
+    return str(value).replace("-", "").replace("_", "")
 
 
 def _is_test_split(split: str) -> bool:

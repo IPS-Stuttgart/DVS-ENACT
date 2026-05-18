@@ -380,12 +380,12 @@ def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     assert windows[1][1].ts.tolist() == [20, 30]
 
 
-def test_eventvot_time_span_reads_last_event_without_full_count(tmp_path):
+def test_eventvot_time_span_reads_min_max_and_count(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
     event_csv = tmp_path / "test" / "recording_0001" / "recording_0001.csv"
 
-    assert module.read_eventvot_event_time_span(event_csv) == (0, 30, -1)
+    assert module.read_eventvot_event_time_span(event_csv) == (0, 30, 4)
 
 
 def test_eventvot_frame_windows_use_numpy_for_xypt_csv(tmp_path):

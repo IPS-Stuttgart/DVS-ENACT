@@ -148,13 +148,13 @@ def read_eventvot_event_time_span(
     *,
     event_column_order: str = "auto",
 ) -> tuple[int, int, int]:
-    """Return first timestamp, last timestamp, and parsed event count if known."""
+    """Return minimum timestamp, maximum timestamp, and parsed event count."""
     schema = infer_eventvot_event_schema(event_csv, event_column_order)
-    first_event = _first_parseable_event(event_csv, schema)
-    last_event = _last_parseable_event(event_csv, schema)
-    if first_event is None or last_event is None:
+    events = list(iter_eventvot_events(event_csv, event_column_order=schema))
+    if not events:
         raise ValueError(f"No parseable events found in {event_csv}")
-    return int(first_event[0]), int(last_event[0]), -1
+    timestamps = [event[0] for event in events]
+    return int(min(timestamps)), int(max(timestamps)), len(events)
 
 
 def infer_eventvot_event_schema(event_csv: Path, event_column_order: str) -> str:
@@ -254,44 +254,22 @@ def iter_eventvot_frame_windows(
     except ValueError:
         pass
 
-    first_ts, last_ts, _event_count = read_eventvot_event_time_span(
-        event_csv,
-        event_column_order=schema,
-    )
-    if last_ts <= first_ts:
+    events = list(iter_eventvot_events(event_csv, event_column_order=schema))
+    if not events:
         for frame_index in range(1, frame_count):
             yield frame_index, empty_event_batch()
         return
-
-    frame_times = np.linspace(float(first_ts), float(last_ts), frame_count)
-    current_frame = 1
-    timestamps: list[int] = []
-    xs: list[int] = []
-    ys: list[int] = []
-    polarities: list[int] = []
-
-    for timestamp, x_value, y_value, polarity in iter_eventvot_events(
-        event_csv,
-        event_column_order=event_column_order,
-    ):
-        while current_frame < frame_count - 1 and timestamp >= frame_times[current_frame]:
-            yield current_frame, _event_batch_from_lists(timestamps, xs, ys, polarities)
-            timestamps, xs, ys, polarities = [], [], [], []
-            current_frame += 1
-
-        if timestamp < frame_times[current_frame - 1]:
-            continue
-        if current_frame == frame_count - 1 and timestamp > frame_times[current_frame]:
-            continue
-        timestamps.append(int(timestamp))
-        xs.append(int(x_value))
-        ys.append(int(y_value))
-        polarities.append(int(polarity))
-
-    while current_frame < frame_count:
-        yield current_frame, _event_batch_from_lists(timestamps, xs, ys, polarities)
-        timestamps, xs, ys, polarities = [], [], [], []
-        current_frame += 1
+    timestamps = np.asarray([event[0] for event in events], dtype=np.int64)
+    xs = np.asarray([event[1] for event in events], dtype=np.int32)
+    ys = np.asarray([event[2] for event in events], dtype=np.int32)
+    polarities = np.asarray([event[3] for event in events], dtype=np.int8)
+    yield from _iter_eventvot_frame_windows_from_arrays(
+        timestamps,
+        xs,
+        ys,
+        polarities,
+        frame_count,
+    )
 
 
 def _iter_eventvot_frame_windows_numpy(
@@ -305,11 +283,37 @@ def _iter_eventvot_frame_windows_numpy(
             yield frame_index, empty_event_batch()
         return
     timestamps, xs, ys, polarities = _eventvot_columns_from_array(data, schema)
+    yield from _iter_eventvot_frame_windows_from_arrays(
+        timestamps,
+        xs,
+        ys,
+        polarities,
+        frame_count,
+    )
+
+
+def _iter_eventvot_frame_windows_from_arrays(
+    timestamps: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    polarities: np.ndarray,
+    frame_count: int,
+) -> Iterator[tuple[int, EventBatch]]:
+    timestamps = np.asarray(timestamps, dtype=np.int64)
+    xs = np.asarray(xs, dtype=np.int32)
+    ys = np.asarray(ys, dtype=np.int32)
+    polarities = np.asarray(polarities, dtype=np.int8)
     if timestamps.size == 0:
         for frame_index in range(1, frame_count):
             yield frame_index, empty_event_batch()
         return
 
+    timestamps, xs, ys, polarities = _sort_event_arrays_by_timestamp(
+        timestamps,
+        xs,
+        ys,
+        polarities,
+    )
     first_ts = int(timestamps[0])
     last_ts = int(timestamps[-1])
     if last_ts <= first_ts:
@@ -331,6 +335,18 @@ def _iter_eventvot_frame_windows_numpy(
             y=np.asarray(ys[start:end], dtype=np.int32),
             p=np.asarray(polarities[start:end], dtype=np.int8),
         )
+
+
+def _sort_event_arrays_by_timestamp(
+    timestamps: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    polarities: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if timestamps.size <= 1 or np.all(timestamps[:-1] <= timestamps[1:]):
+        return timestamps, xs, ys, polarities
+    order = np.argsort(timestamps, kind="stable")
+    return timestamps[order], xs[order], ys[order], polarities[order]
 
 
 def _eventvot_columns_from_array(
@@ -402,6 +418,9 @@ def refine_sequence(
             )
 
     event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    reset_refiner_state = getattr(refiner, "reset_state", None)
+    if reset_refiner_state is not None:
+        reset_refiner_state()
 
     refined_boxes = np.array(base_boxes, dtype=float, copy=True)
     timings = np.zeros(frame_count, dtype=float)
@@ -448,6 +467,13 @@ def refine_sequence(
             result,
             acceptance_config,
         )
+        observe_refinement_decision = getattr(
+            refiner,
+            "observe_refinement_decision",
+            None,
+        )
+        if observe_refinement_decision is not None:
+            observe_refinement_decision(base_boxes[frame_index], result, decision.accepted)
         refined_boxes[frame_index] = (
             refiner_output
             if decision.accepted

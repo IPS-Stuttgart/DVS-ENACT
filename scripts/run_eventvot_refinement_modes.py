@@ -4,8 +4,9 @@ This script is a small compatibility wrapper around ``run_eventvot_refinement``.
 It intentionally avoids duplicating EventVOT parsing/evaluation code.  The main
 use cases are conservative projection modes for strong trackers such as
 HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
-the external tracker's size, and ``size-only`` lets DVS-ENACT correct the box
-size while retaining the external tracker's center.
+the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
+while retaining the external tracker's center, and ``width-only``/``height-only``
+let validation sweeps keep just the useful size axis.
 """
 
 from __future__ import annotations
@@ -21,7 +22,13 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 
 import run_eventvot_refinement as base
 
-REFINEMENT_MODES = ("box", "center-only", "size-only")
+REFINEMENT_MODES = ("box", "center-only", "size-only", "width-only", "height-only")
+PROJECTION_CONFIDENCE_FIELDS = (
+    "mean_event_activity",
+    "active_fraction",
+    "polarity_consistency_fraction",
+    "mean_event_polarity_weight",
+)
 
 
 class ProjectedOutputRefiner:
@@ -41,6 +48,11 @@ class ProjectedOutputRefiner:
         projection_width_blend: float | None = None,
         projection_height_blend: float | None = None,
         projection_no_clip: bool = False,
+        projection_size_smoothing: float | None = None,
+        projection_size_deadband_ratio: float | None = None,
+        projection_confidence_field: str | None = None,
+        projection_confidence_floor: float | None = None,
+        projection_confidence_ceiling: float | None = None,
         projection_min_raw_width_ratio: float | None = None,
         projection_max_raw_width_ratio: float | None = None,
         projection_min_raw_height_ratio: float | None = None,
@@ -48,6 +60,13 @@ class ProjectedOutputRefiner:
     ):
         validate_refinement_mode(refinement_mode)
         validate_projection_blends(projection_width_blend, projection_height_blend)
+        validate_projection_size_smoothing(projection_size_smoothing)
+        validate_projection_size_deadband(projection_size_deadband_ratio)
+        validate_projection_confidence_weighting(
+            projection_confidence_field,
+            projection_confidence_floor,
+            projection_confidence_ceiling,
+        )
         validate_projection_ratio_gates(
             projection_min_raw_width_ratio,
             projection_max_raw_width_ratio,
@@ -60,14 +79,29 @@ class ProjectedOutputRefiner:
         self.projection_width_blend = projection_width_blend
         self.projection_height_blend = projection_height_blend
         self.projection_no_clip = projection_no_clip
+        self.projection_size_smoothing = projection_size_smoothing
+        self.projection_size_deadband_ratio = projection_size_deadband_ratio
+        self.projection_confidence_field = projection_confidence_field
+        self.projection_confidence_floor = projection_confidence_floor
+        self.projection_confidence_ceiling = projection_confidence_ceiling
         self.projection_min_raw_width_ratio = projection_min_raw_width_ratio
         self.projection_max_raw_width_ratio = projection_max_raw_width_ratio
         self.projection_min_raw_height_ratio = projection_min_raw_height_ratio
         self.projection_max_raw_height_ratio = projection_max_raw_height_ratio
+        self._previous_accepted_projected_size: np.ndarray | None = None
+
+    def reset_state(self) -> None:
+        """Reset temporal projection state at sequence boundaries."""
+        self._previous_accepted_projected_size = None
 
     def refine(self, candidate_bbox: Any, events: Any, **kwargs: Any) -> DVSRefinementResult:
         result = self.refiner.refine(candidate_bbox, events, **kwargs)
-        if self.refinement_mode == "box" or result.fallback_reason is not None:
+        if (
+            self.refinement_mode == "box"
+            and self.projection_size_smoothing is None
+            and self.projection_size_deadband_ratio is None
+            and self.projection_confidence_field is None
+        ) or result.fallback_reason is not None:
             return result
 
         candidate_xywh = bbox_dict_to_xywh(result.candidate_bbox)
@@ -80,6 +114,15 @@ class ProjectedOutputRefiner:
             raw_refined_xywh=raw_refined_xywh,
             projection_width_blend=self.projection_width_blend,
             projection_height_blend=self.projection_height_blend,
+            previous_projected_size=self._previous_accepted_projected_size,
+            projection_size_smoothing=self.projection_size_smoothing,
+            projection_size_deadband_ratio=self.projection_size_deadband_ratio,
+            projection_confidence_value=projection_confidence_value(
+                result,
+                self.projection_confidence_field,
+            ),
+            projection_confidence_floor=self.projection_confidence_floor,
+            projection_confidence_ceiling=self.projection_confidence_ceiling,
         )
         projected_xywh = clip_xywh_box(
             unclipped_projected_xywh,
@@ -112,6 +155,25 @@ class ProjectedOutputRefiner:
             fallback_reason=fallback_reason,
         )
 
+    def observe_refinement_decision(
+        self,
+        _candidate_bbox: Any,
+        result: DVSRefinementResult,
+        accepted: bool,
+    ) -> None:
+        """Record accepted projected size for the next frame."""
+        if (
+            not accepted
+            or self.projection_size_smoothing is None
+            or self.refinement_mode == "center-only"
+            or result.fallback_reason is not None
+        ):
+            return
+        self._previous_accepted_projected_size = np.asarray(
+            result.as_xywh(),
+            dtype=float,
+        )[2:].copy()
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Return the base EventVOT parser extended with refinement modes."""
@@ -129,15 +191,16 @@ def build_parser() -> argparse.ArgumentParser:
             "DVS-ENACT update. 'center-only' keeps the base-track width/height "
             "and transfers only the DVS-ENACT center correction. 'size-only' "
             "keeps the base-track center and transfers only the DVS-ENACT "
-            "width/height correction."
+            "width/height correction. 'width-only' and 'height-only' transfer "
+            "only one DVS-ENACT size axis."
         ),
     )
     parser.add_argument(
         "--projection-width-blend",
         type=float,
         help=(
-            "Optional width blend for size-only mode. When supplied together "
-            "with --projection-height-blend, size-only projection blends from "
+            "Optional width blend for size projection modes. When supplied "
+            "together with --projection-height-blend, projection blends from "
             "the raw DVS-ENACT refined width instead of the already blended "
             "--refinement-blend output."
         ),
@@ -146,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--projection-height-blend",
         type=float,
         help=(
-            "Optional height blend for size-only mode. Must be supplied "
+            "Optional height blend for size projection modes. Must be supplied "
             "together with --projection-width-blend."
         ),
     )
@@ -154,6 +217,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--projection-no-clip",
         action="store_true",
         help="Reject projected refinement outputs that would be clipped by image bounds.",
+    )
+    parser.add_argument(
+        "--projection-size-smoothing",
+        type=float,
+        help=(
+            "Optional temporal size smoothing for projected outputs. The value "
+            "is the weight of the previous accepted projected width/height; "
+            "0 uses the current projection and 1 holds the previous size."
+        ),
+    )
+    parser.add_argument(
+        "--projection-size-deadband-ratio",
+        type=float,
+        help=(
+            "Optional per-axis size deadband relative to the base width/height. "
+            "Projected size changes smaller than this ratio are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-field",
+        choices=PROJECTION_CONFIDENCE_FIELDS,
+        help=(
+            "Optional diagnostic field used to shrink projected corrections "
+            "toward the base tracker when DVS confidence is weak."
+        ),
+    )
+    parser.add_argument(
+        "--projection-confidence-floor",
+        type=float,
+        help="Confidence value that maps projected correction strength to zero.",
+    )
+    parser.add_argument(
+        "--projection-confidence-ceiling",
+        type=float,
+        help="Confidence value that maps projected correction strength to one.",
     )
     parser.add_argument("--projection-min-raw-width-ratio", type=float)
     parser.add_argument("--projection-max-raw-width-ratio", type=float)
@@ -178,6 +276,11 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_width_blend=args.projection_width_blend,
         projection_height_blend=args.projection_height_blend,
         projection_no_clip=args.projection_no_clip,
+        projection_size_smoothing=args.projection_size_smoothing,
+        projection_size_deadband_ratio=args.projection_size_deadband_ratio,
+        projection_confidence_field=args.projection_confidence_field,
+        projection_confidence_floor=args.projection_confidence_floor,
+        projection_confidence_ceiling=args.projection_confidence_ceiling,
         projection_min_raw_width_ratio=args.projection_min_raw_width_ratio,
         projection_max_raw_width_ratio=args.projection_max_raw_width_ratio,
         projection_min_raw_height_ratio=args.projection_min_raw_height_ratio,
@@ -216,12 +319,24 @@ def project_refinement_output(
     raw_refined_xywh: np.ndarray | None = None,
     projection_width_blend: float | None = None,
     projection_height_blend: float | None = None,
+    previous_projected_size: np.ndarray | None = None,
+    projection_size_smoothing: float | None = None,
+    projection_size_deadband_ratio: float | None = None,
+    projection_confidence_value: float | None = None,
+    projection_confidence_floor: float | None = None,
+    projection_confidence_ceiling: float | None = None,
     image_width: float | None = None,
     image_height: float | None = None,
 ) -> np.ndarray:
     """Return the candidate replacement box for the selected refinement mode."""
     validate_refinement_mode(refinement_mode)
     validate_projection_blends(projection_width_blend, projection_height_blend)
+    validate_projection_size_smoothing(projection_size_smoothing)
+    validate_projection_size_deadband(projection_size_deadband_ratio)
+    validate_projection_confidence_bounds(
+        projection_confidence_floor,
+        projection_confidence_ceiling,
+    )
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
     refined = np.asarray(refiner_output_xywh, dtype=float).reshape(4)
 
@@ -238,7 +353,7 @@ def project_refinement_output(
             ],
             dtype=float,
         )
-    else:
+    elif refinement_mode in {"size-only", "width-only", "height-only"}:
         candidate_center = candidate[:2] + 0.5 * candidate[2:]
         if projection_width_blend is not None and projection_height_blend is not None:
             if raw_refined_xywh is None:
@@ -253,6 +368,11 @@ def project_refinement_output(
             projected_size = np.array([width, height], dtype=float)
         else:
             projected_size = refined[2:]
+        projected_size = project_size_axes(
+            candidate[2:],
+            projected_size,
+            refinement_mode=refinement_mode,
+        )
         output = np.array(
             [
                 candidate_center[0] - 0.5 * projected_size[0],
@@ -262,8 +382,200 @@ def project_refinement_output(
             ],
             dtype=float,
         )
+    else:
+        raise AssertionError(f"Unhandled refinement mode: {refinement_mode}")
 
+    output = smooth_projected_size(
+        candidate,
+        output,
+        refinement_mode=refinement_mode,
+        previous_projected_size=previous_projected_size,
+        projection_size_smoothing=projection_size_smoothing,
+    )
+    output = apply_projection_confidence_weighting(
+        candidate,
+        output,
+        confidence_value=projection_confidence_value,
+        confidence_floor=projection_confidence_floor,
+        confidence_ceiling=projection_confidence_ceiling,
+    )
+    output = apply_projection_size_deadband(
+        candidate,
+        output,
+        refinement_mode=refinement_mode,
+        projection_size_deadband_ratio=projection_size_deadband_ratio,
+    )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def apply_projection_size_deadband(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    projection_size_deadband_ratio: float | None,
+) -> np.ndarray:
+    """Ignore projected size changes that are small relative to the base size."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_size_deadband(projection_size_deadband_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_size_deadband_ratio is None:
+        return output
+
+    axes = projected_size_axes(refinement_mode)
+    if axes.size == 0:
+        return output
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_size = np.maximum(candidate[2:], 1e-9)
+    size_delta_ratio = np.abs(output[2:] - candidate[2:]) / candidate_size
+    deadband_axes = axes[
+        size_delta_ratio[axes] < float(projection_size_deadband_ratio)
+    ]
+    if deadband_axes.size == 0:
+        return output
+
+    new_size = np.array(output[2:], dtype=float, copy=True)
+    new_size[deadband_axes] = candidate[2:][deadband_axes]
+    if refinement_mode in {"size-only", "width-only", "height-only"}:
+        center = candidate[:2] + 0.5 * candidate[2:]
+    else:
+        center = output[:2] + 0.5 * output[2:]
+    output[:2] = center - 0.5 * new_size
+    output[2:] = new_size
+    return output
+
+
+def apply_projection_confidence_weighting(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    confidence_value: float | None,
+    confidence_floor: float | None,
+    confidence_ceiling: float | None,
+) -> np.ndarray:
+    """Shrink projected corrections toward the candidate box using confidence."""
+    if confidence_floor is None and confidence_ceiling is None:
+        return np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    validate_projection_confidence_bounds(confidence_floor, confidence_ceiling)
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    projected = np.asarray(projected_xywh, dtype=float).reshape(4)
+    strength = projection_confidence_strength(
+        confidence_value,
+        confidence_floor,
+        confidence_ceiling,
+    )
+    return candidate + strength * (projected - candidate)
+
+
+def projection_confidence_strength(
+    confidence_value: float | None,
+    confidence_floor: float | None,
+    confidence_ceiling: float | None,
+) -> float:
+    """Return correction strength in [0, 1] for a diagnostic confidence value."""
+    validate_projection_confidence_bounds(confidence_floor, confidence_ceiling)
+    if confidence_floor is None and confidence_ceiling is None:
+        return 1.0
+    if confidence_floor is None or confidence_ceiling is None:
+        raise ValueError("projection confidence floor and ceiling must both be set")
+    if confidence_value is None:
+        return 0.0
+    value = float(confidence_value)
+    if not np.isfinite(value):
+        return 0.0
+    strength = (value - float(confidence_floor)) / (
+        float(confidence_ceiling) - float(confidence_floor)
+    )
+    return float(np.clip(strength, 0.0, 1.0))
+
+
+def projection_confidence_value(result: Any, field: str | None) -> float | None:
+    """Read a scalar projection-confidence diagnostic from a refinement result."""
+    if field is None:
+        return None
+    validate_projection_confidence_field(field)
+    if field == "active_fraction":
+        used_event_count = int(getattr(result, "used_event_count", 0) or 0)
+        active_measurement_count = int(
+            getattr(result, "active_measurement_count", 0) or 0
+        )
+        if used_event_count <= 0:
+            return None
+        return float(active_measurement_count / used_event_count)
+    value = getattr(result, field, None)
+    if value is None:
+        return None
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else None
+
+
+def smooth_projected_size(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    previous_projected_size: np.ndarray | None,
+    projection_size_smoothing: float | None,
+) -> np.ndarray:
+    """Blend projected width/height toward the previous accepted projected size."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_size_smoothing(projection_size_smoothing)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if (
+        projection_size_smoothing is None
+        or previous_projected_size is None
+        or refinement_mode == "center-only"
+    ):
+        return output
+
+    previous_size = np.asarray(previous_projected_size, dtype=float).reshape(2)
+    smoothing = float(projection_size_smoothing)
+    smoothed_size = np.array(output[2:], dtype=float, copy=True)
+    size_axes = projected_size_axes(refinement_mode)
+    smoothed_size[size_axes] = (
+        (1.0 - smoothing) * output[2:][size_axes]
+        + smoothing * previous_size[size_axes]
+    )
+    smoothed_size = np.maximum(smoothed_size, 0.0)
+    if refinement_mode in {"size-only", "width-only", "height-only"}:
+        candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+        center = candidate[:2] + 0.5 * candidate[2:]
+    else:
+        center = output[:2] + 0.5 * output[2:]
+    output[:2] = center - 0.5 * smoothed_size
+    output[2:] = smoothed_size
+    return output
+
+
+def project_size_axes(
+    candidate_size: np.ndarray,
+    projected_size: np.ndarray,
+    *,
+    refinement_mode: str,
+) -> np.ndarray:
+    """Return size with only the axes selected by refinement mode updated."""
+    validate_refinement_mode(refinement_mode)
+    candidate = np.asarray(candidate_size, dtype=float).reshape(2)
+    projected = np.asarray(projected_size, dtype=float).reshape(2)
+    if refinement_mode == "size-only":
+        return np.array(projected, dtype=float, copy=True)
+    if refinement_mode == "width-only":
+        return np.array([projected[0], candidate[1]], dtype=float)
+    if refinement_mode == "height-only":
+        return np.array([candidate[0], projected[1]], dtype=float)
+    raise ValueError(f"{refinement_mode!r} is not a size projection mode")
+
+
+def projected_size_axes(refinement_mode: str) -> np.ndarray:
+    """Return width/height indices modified by a projection mode."""
+    validate_refinement_mode(refinement_mode)
+    if refinement_mode in {"box", "size-only"}:
+        return np.array([0, 1], dtype=int)
+    if refinement_mode == "width-only":
+        return np.array([0], dtype=int)
+    if refinement_mode == "height-only":
+        return np.array([1], dtype=int)
+    return np.array([], dtype=int)
 
 
 def clip_xywh_box(
@@ -433,6 +745,68 @@ def validate_projection_blends(
             continue
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{name} must be between 0 and 1")
+
+
+def validate_projection_size_smoothing(projection_size_smoothing: float | None) -> None:
+    """Raise ValueError for invalid temporal size smoothing factors."""
+    if projection_size_smoothing is None:
+        return
+    if not 0.0 <= float(projection_size_smoothing) <= 1.0:
+        raise ValueError("projection_size_smoothing must be between 0 and 1")
+
+
+def validate_projection_size_deadband(
+    projection_size_deadband_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection size deadband ratios."""
+    if projection_size_deadband_ratio is None:
+        return
+    if float(projection_size_deadband_ratio) < 0.0:
+        raise ValueError("projection_size_deadband_ratio must be non-negative")
+
+
+def validate_projection_confidence_field(field: str | None) -> None:
+    """Raise ValueError for unsupported projection confidence fields."""
+    if field is None:
+        return
+    if field not in PROJECTION_CONFIDENCE_FIELDS:
+        expected = ", ".join(PROJECTION_CONFIDENCE_FIELDS)
+        raise ValueError(
+            f"Unsupported projection confidence field {field!r}; expected one of {expected}"
+        )
+
+
+def validate_projection_confidence_bounds(
+    floor: float | None,
+    ceiling: float | None,
+) -> None:
+    """Raise ValueError for invalid confidence-to-strength bounds."""
+    if floor is None and ceiling is None:
+        return
+    if floor is None or ceiling is None:
+        raise ValueError("projection confidence floor and ceiling must both be set")
+    if not np.isfinite(float(floor)) or not np.isfinite(float(ceiling)):
+        raise ValueError("projection confidence floor and ceiling must be finite")
+    if float(floor) >= float(ceiling):
+        raise ValueError("projection confidence floor must be less than ceiling")
+
+
+def validate_projection_confidence_weighting(
+    field: str | None,
+    floor: float | None,
+    ceiling: float | None,
+) -> None:
+    """Raise ValueError for invalid confidence-weighted projection settings."""
+    validate_projection_confidence_field(field)
+    validate_projection_confidence_bounds(floor, ceiling)
+    if field is None and (floor is not None or ceiling is not None):
+        raise ValueError(
+            "projection confidence field is required when floor/ceiling are set"
+        )
+    if field is not None and (floor is None or ceiling is None):
+        raise ValueError(
+            "projection confidence floor and ceiling are required when field is set"
+        )
 
 
 def validate_projection_ratio_gates(

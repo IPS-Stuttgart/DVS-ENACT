@@ -53,6 +53,34 @@ def test_size_only_projection_keeps_candidate_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
 
 
+def test_width_only_projection_keeps_candidate_center_and_height(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="width-only",
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 20.0, 50.0, 40.0]))
+
+
+def test_height_only_projection_keeps_candidate_center_and_width(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="height-only",
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 10.0, 30.0, 60.0]))
+
+
 def test_size_only_projection_supports_independent_size_blends(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -68,6 +96,108 @@ def test_size_only_projection_supports_independent_size_blends(monkeypatch):
     )
 
     np.testing.assert_allclose(projected, np.array([7.5, 15.0, 35.0, 50.0]))
+
+
+def test_size_only_projection_smooths_previous_accepted_size(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        previous_projected_size=np.array([20.0, 20.0]),
+        projection_size_smoothing=0.5,
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([7.5, 20.0, 35.0, 40.0]))
+
+
+def test_width_only_projection_smooths_only_width(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="width-only",
+        previous_projected_size=np.array([20.0, 80.0]),
+        projection_size_smoothing=0.5,
+        image_width=200.0,
+        image_height=200.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([7.5, 20.0, 35.0, 40.0]))
+
+
+def test_size_deadband_ignores_tiny_axis_changes(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([9.0, 15.0, 102.0, 60.0]),
+        refinement_mode="size-only",
+        projection_size_deadband_ratio=0.05,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 15.0, 100.0, 60.0]))
+
+
+def test_box_size_deadband_preserves_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([20.0, 30.0, 102.0, 51.0]),
+        refinement_mode="box",
+        projection_size_deadband_ratio=0.05,
+    )
+
+    np.testing.assert_allclose(projected, np.array([21.0, 30.5, 100.0, 50.0]))
+
+
+def test_box_projection_smooths_size_around_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([20.0, 10.0, 50.0, 60.0]),
+        refinement_mode="box",
+        previous_projected_size=np.array([30.0, 40.0]),
+        projection_size_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([25.0, 15.0, 40.0, 50.0]))
+
+
+def test_projection_confidence_weighting_shrinks_update(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([20.0, 10.0, 20.0, 20.0]),
+        refinement_mode="box",
+        projection_confidence_value=0.25,
+        projection_confidence_floor=0.0,
+        projection_confidence_ceiling=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([15.0, 10.0, 20.0, 20.0]))
+
+
+def test_projection_confidence_weighting_missing_value_keeps_candidate(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        np.array([20.0, 10.0, 20.0, 20.0]),
+        refinement_mode="box",
+        projection_confidence_value=None,
+        projection_confidence_floor=0.0,
+        projection_confidence_ceiling=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 10.0, 20.0, 20.0]))
 
 
 def test_box_projection_preserves_refiner_output(monkeypatch):
@@ -157,7 +287,12 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
     assert "size-only" in help_text
+    assert "width-only" in help_text
+    assert "height-only" in help_text
     assert "--projection-width-blend" in help_text
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
+    assert "--projection-size-smoothing" in help_text
+    assert "--projection-size-deadband-ratio" in help_text
+    assert "--projection-confidence-field" in help_text
     assert "--projection-min-raw-height-ratio" in help_text
