@@ -110,6 +110,7 @@ def test_replay_projection_sweep_help_runs_as_script():
     assert "--diagnostics-json" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-size-clamp-ratio" in help_text
+    assert "--replay-output-center-smoothing" in help_text
     assert "--replay-output-confidence-field" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
@@ -133,12 +134,14 @@ def test_replay_projection_sweep_grid_parses_dispatch_strings(tmp_path, monkeypa
             "none,0.25",
             "--replay-output-size-clamp-ratio",
             "none 0.20",
+            "--replay-output-center-smoothing",
+            "none 0.50",
         ]
     )
 
     configs = module.iter_projection_grid(args)
 
-    assert len(configs) == 8
+    assert len(configs) == 16
     assert sorted({config.mode for config in configs}) == ["box", "scale-only"]
     assert sorted({config.blend for config in configs}, key=lambda value: value or -1) == [
         None,
@@ -148,6 +151,10 @@ def test_replay_projection_sweep_grid_parses_dispatch_strings(tmp_path, monkeypa
         {config.size_clamp_ratio for config in configs},
         key=lambda value: value or -1,
     ) == [None, 0.20]
+    assert sorted(
+        {config.center_smoothing for config in configs},
+        key=lambda value: value or -1,
+    ) == [None, 0.50]
 
 
 def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(

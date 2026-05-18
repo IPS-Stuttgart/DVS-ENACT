@@ -94,6 +94,7 @@ class ReplayOutputProjectionConfig:
     mode: str = "diagnostic"
     blend: float | None = None
     size_smoothing: float | None = None
+    center_smoothing: float | None = None
     center_clamp_ratio: float | None = None
     center_deadband_ratio: float | None = None
     size_clamp_ratio: float | None = None
@@ -201,6 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional temporal size smoothing for replayed projected outputs. "
             "The value is the weight of the previous accepted replay width/height."
+        ),
+    )
+    parser.add_argument(
+        "--replay-output-center-smoothing",
+        type=float,
+        help=(
+            "Optional temporal center smoothing for replayed projected outputs. "
+            "The value is the weight of the previous accepted replay center."
         ),
     )
     parser.add_argument(
@@ -444,6 +453,7 @@ def output_projection_config_from_args(
         mode=args.replay_output_mode,
         blend=args.replay_output_blend,
         size_smoothing=args.replay_output_size_smoothing,
+        center_smoothing=args.replay_output_center_smoothing,
         center_clamp_ratio=args.replay_output_center_clamp_ratio,
         center_deadband_ratio=args.replay_output_center_deadband_ratio,
         size_clamp_ratio=args.replay_output_size_clamp_ratio,
@@ -473,6 +483,7 @@ def output_projection_config_from_diagnostics(
         mode=config.mode,
         blend=config.blend,
         size_smoothing=config.size_smoothing,
+        center_smoothing=config.center_smoothing,
         center_clamp_ratio=config.center_clamp_ratio,
         center_deadband_ratio=config.center_deadband_ratio,
         size_clamp_ratio=config.size_clamp_ratio,
@@ -507,6 +518,13 @@ def validate_output_projection_config(config: ReplayOutputProjectionConfig) -> N
             )
         if not 0.0 <= float(config.size_smoothing) <= 1.0:
             raise ValueError("--replay-output-size-smoothing must be between 0 and 1")
+    if config.center_smoothing is not None:
+        if config.mode == "diagnostic":
+            raise ValueError(
+                "--replay-output-center-smoothing requires a projected output mode"
+            )
+        if not 0.0 <= float(config.center_smoothing) <= 1.0:
+            raise ValueError("--replay-output-center-smoothing must be between 0 and 1")
     if config.size_deadband_ratio is not None:
         if config.mode == "diagnostic":
             raise ValueError(
@@ -598,6 +616,7 @@ def replay_sequence_boxes(
     counts: Counter[str] = Counter()
     decision_records: list[dict[str, Any]] = []
     output_projection = output_projection or ReplayOutputProjectionConfig()
+    previous_accepted_projected_center: np.ndarray | None = None
     previous_accepted_projected_size: np.ndarray | None = None
 
     if not frames:
@@ -617,6 +636,7 @@ def replay_sequence_boxes(
             frame,
             config,
             output_projection,
+            previous_projected_center=previous_accepted_projected_center,
             previous_projected_size=previous_accepted_projected_size,
             previous_output_xywh=replayed_boxes[frame_index - 1],
         )
@@ -627,11 +647,23 @@ def replay_sequence_boxes(
                 base_boxes[frame_index],
                 frame,
                 output_projection,
+                previous_projected_center=previous_accepted_projected_center,
                 previous_projected_size=previous_accepted_projected_size,
             )
             replayed_boxes[frame_index] = replayed_output
             if output_projection.mode != "diagnostic":
-                previous_accepted_projected_size = replayed_output[2:].copy()
+                if (
+                    output_projection.center_smoothing is not None
+                    and output_projection.mode in {"box", "center-only"}
+                ):
+                    previous_accepted_projected_center = (
+                        replayed_output[:2] + 0.5 * replayed_output[2:]
+                    ).copy()
+                if (
+                    output_projection.size_smoothing is not None
+                    and output_projection.mode != "center-only"
+                ):
+                    previous_accepted_projected_size = replayed_output[2:].copy()
         decision_records.append(
             {
                 "sequence": sequence_name,
@@ -649,6 +681,7 @@ def evaluate_frame_acceptance(
     config: ReplayAcceptanceConfig,
     output_projection: ReplayOutputProjectionConfig | None = None,
     *,
+    previous_projected_center: np.ndarray | None = None,
     previous_projected_size: np.ndarray | None = None,
     previous_output_xywh: np.ndarray | None = None,
 ) -> ReplayAcceptanceDecision:
@@ -660,6 +693,7 @@ def evaluate_frame_acceptance(
         candidate,
         frame,
         output_projection,
+        previous_projected_center=previous_projected_center,
         previous_projected_size=previous_projected_size,
     )
     raw_proposed = frame_raw_refined_xywh(frame, fallback=proposed)
@@ -847,6 +881,7 @@ def frame_projected_output_xywh(
     frame: dict[str, Any],
     output_projection: ReplayOutputProjectionConfig,
     *,
+    previous_projected_center: np.ndarray | None = None,
     previous_projected_size: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return the accepted replay box under the selected output projection."""
@@ -865,8 +900,10 @@ def frame_projected_output_xywh(
         source_output,
         refinement_mode=output_projection.mode,
         raw_refined_xywh=raw_refined,
+        previous_projected_center=previous_projected_center,
         previous_projected_size=previous_projected_size,
         projection_size_smoothing=output_projection.size_smoothing,
+        projection_center_smoothing=output_projection.center_smoothing,
         projection_center_clamp_ratio=output_projection.center_clamp_ratio,
         projection_center_deadband_ratio=output_projection.center_deadband_ratio,
         projection_size_clamp_ratio=output_projection.size_clamp_ratio,

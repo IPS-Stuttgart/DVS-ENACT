@@ -247,6 +247,48 @@ def test_box_projection_smooths_size_around_projected_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([25.0, 15.0, 40.0, 50.0]))
 
 
+def test_box_projection_smooths_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([30.0, 20.0, 30.0, 40.0]),
+        refinement_mode="box",
+        previous_projected_center=np.array([25.0, 40.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([20.0, 20.0, 30.0, 40.0]))
+
+
+def test_center_only_projection_smooths_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([30.0, 20.0, 30.0, 40.0]),
+        refinement_mode="center-only",
+        previous_projected_center=np.array([25.0, 40.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([20.0, 20.0, 30.0, 40.0]))
+
+
+def test_size_only_projection_ignores_center_smoothing(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        previous_projected_center=np.array([0.0, 0.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
+
+
 def test_projection_confidence_weighting_shrinks_update(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -371,6 +413,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-height-blend" in help_text
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
+    assert "--projection-center-smoothing" in help_text
     assert "--projection-center-clamp-ratio" in help_text
     assert "--projection-center-deadband-ratio" in help_text
     assert "--projection-size-clamp-ratio" in help_text

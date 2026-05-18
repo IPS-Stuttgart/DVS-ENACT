@@ -111,6 +111,7 @@ def add_projection_grid_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--replay-output-mode", nargs="+", default=("diagnostic",))
     parser.add_argument("--replay-output-blend", nargs="+", default=("none",))
     parser.add_argument("--replay-output-size-smoothing", nargs="+", default=("none",))
+    parser.add_argument("--replay-output-center-smoothing", nargs="+", default=("none",))
     parser.add_argument(
         "--replay-output-center-clamp-ratio",
         nargs="+",
@@ -408,6 +409,10 @@ def iter_projection_grid(args: argparse.Namespace) -> list[ReplayOutputProjectio
         "size_smoothing": parse_sweep_values(
             args.replay_output_size_smoothing,
             argument_name="--replay-output-size-smoothing",
+        ),
+        "center_smoothing": parse_sweep_values(
+            args.replay_output_center_smoothing,
+            argument_name="--replay-output-center-smoothing",
         ),
         "center_clamp_ratio": parse_sweep_values(
             args.replay_output_center_clamp_ratio,

@@ -56,6 +56,7 @@ PROJECTION_GRID_KEYS = (
     "projection_height_blend",
     "projection_no_clip",
     "projection_size_smoothing",
+    "projection_center_smoothing",
     "projection_center_clamp_ratio",
     "projection_center_deadband_ratio",
     "projection_size_clamp_ratio",
@@ -105,6 +106,7 @@ OPTIONAL_FLOAT_GRID_KEYS = {
     "projection_width_blend",
     "projection_height_blend",
     "projection_size_smoothing",
+    "projection_center_smoothing",
     "projection_center_clamp_ratio",
     "projection_center_deadband_ratio",
     "projection_size_clamp_ratio",
@@ -249,6 +251,16 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
             "Optional temporal size-smoothing values. Use 'none' to disable. "
             "A value of 0 uses the current projection; 1 holds the previous "
             "accepted projected size."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-smoothing",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional temporal center-smoothing values. Use 'none' to disable. "
+            "A value of 0 uses the current projection; 1 holds the previous "
+            "accepted projected center."
         ),
     )
     parser.add_argument(
@@ -576,6 +588,12 @@ def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--projection-size-smoothing",
             allow_none=True,
         ),
+        "projection_center_smoothing": parse_sweep_values(
+            args.projection_center_smoothing,
+            cast=float,
+            argument_name="--projection-center-smoothing",
+            allow_none=True,
+        ),
         "projection_size_deadband_ratio": parse_sweep_values(
             args.projection_size_deadband_ratio,
             cast=float,
@@ -847,6 +865,9 @@ def validate_projection_config(config: dict[str, Any]) -> None:
     smoothing = config["projection_size_smoothing"]
     if smoothing is not None and float(smoothing) > 1.0:
         raise ValueError("projection_size_smoothing must be between 0 and 1")
+    center_smoothing = config["projection_center_smoothing"]
+    if center_smoothing is not None and float(center_smoothing) > 1.0:
+        raise ValueError("projection_center_smoothing must be between 0 and 1")
     deadband = config["projection_size_deadband_ratio"]
     if deadband is not None and float(deadband) < 0.0:
         raise ValueError("projection_size_deadband_ratio must be non-negative")
@@ -923,6 +944,7 @@ def make_refiner(
     if (
         config["refinement_mode"] == "box"
         and config["projection_size_smoothing"] is None
+        and config["projection_center_smoothing"] is None
         and config["projection_center_clamp_ratio"] is None
         and config["projection_center_deadband_ratio"] is None
         and config["projection_size_clamp_ratio"] is None
@@ -937,6 +959,7 @@ def make_refiner(
         projection_height_blend=config["projection_height_blend"],
         projection_no_clip=bool(config["projection_no_clip"]),
         projection_size_smoothing=config["projection_size_smoothing"],
+        projection_center_smoothing=config["projection_center_smoothing"],
         projection_center_clamp_ratio=config["projection_center_clamp_ratio"],
         projection_center_deadband_ratio=config["projection_center_deadband_ratio"],
         projection_size_clamp_ratio=config["projection_size_clamp_ratio"],

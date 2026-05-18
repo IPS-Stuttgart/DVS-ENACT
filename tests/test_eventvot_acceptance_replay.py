@@ -212,6 +212,36 @@ def test_acceptance_replay_smooths_replayed_projected_size():
     np.testing.assert_allclose(projected, np.array([5.0, 5.0, 30.0, 30.0]))
 
 
+def test_acceptance_replay_smooths_replayed_projected_center():
+    module = _load_module()
+    frame = {
+        "frame_index": 2,
+        "fallback_reason": None,
+        "refiner_output_xywh": [30.0, 10.0, 20.0, 20.0],
+        "refined_bbox": {
+            "x_min": 30.0,
+            "y_min": 10.0,
+            "x_max": 50.0,
+            "y_max": 30.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(
+            mode="box",
+            center_smoothing=0.5,
+        ),
+        previous_projected_center=np.array([20.0, 20.0]),
+    )
+
+    np.testing.assert_allclose(projected, np.array([20.0, 10.0, 20.0, 20.0]))
+
+
 def test_acceptance_replay_confidence_weights_replayed_projection():
     module = _load_module()
     frame = {
@@ -591,6 +621,7 @@ def test_acceptance_replay_run_uses_output_projection_config(tmp_path):
         "mode": "center-only",
         "blend": 0.5,
         "size_smoothing": None,
+        "center_smoothing": None,
         "center_clamp_ratio": None,
         "center_deadband_ratio": None,
         "size_clamp_ratio": None,
@@ -621,6 +652,7 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text
+    assert "--replay-output-center-smoothing" in help_text
     assert "--replay-output-center-clamp-ratio" in help_text
     assert "--replay-output-center-deadband-ratio" in help_text
     assert "--replay-output-size-clamp-ratio" in help_text
