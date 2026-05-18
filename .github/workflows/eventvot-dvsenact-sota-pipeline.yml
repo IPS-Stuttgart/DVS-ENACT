@@ -131,7 +131,7 @@ on:
         default: "1.50"
         type: string
       extra_acceptance_args:
-        description: "Extra refinement CLI args, e.g. --refinement-mode size-only width-only height-only --projection-center-clamp-ratio none 0.05 --projection-size-clamp-ratio none 0.15"
+        description: "Extra refinement CLI args, e.g. --refinement-mode size-only scale-only width-only height-only --projection-center-clamp-ratio none 0.05 --projection-size-clamp-ratio none 0.15"
         required: false
         default: ""
         type: string

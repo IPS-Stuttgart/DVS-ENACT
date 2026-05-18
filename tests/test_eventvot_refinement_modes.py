@@ -81,6 +81,18 @@ def test_height_only_projection_keeps_candidate_center_and_width(monkeypatch):
     np.testing.assert_allclose(projected, np.array([10.0, 10.0, 30.0, 60.0]))
 
 
+def test_scale_only_projection_preserves_candidate_aspect(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([0.0, 0.0, 10.0, 20.0]),
+        np.array([0.0, 0.0, 40.0, 20.0]),
+        refinement_mode="scale-only",
+    )
+
+    np.testing.assert_allclose(projected, np.array([-5.0, -10.0, 20.0, 40.0]))
+
+
 def test_size_only_projection_supports_independent_size_blends(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -352,6 +364,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
     assert "size-only" in help_text
+    assert "scale-only" in help_text
     assert "width-only" in help_text
     assert "height-only" in help_text
     assert "--projection-width-blend" in help_text

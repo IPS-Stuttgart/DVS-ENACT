@@ -155,6 +155,32 @@ def test_acceptance_replay_can_project_width_only():
     np.testing.assert_allclose(projected, np.array([0.0, 10.0, 40.0, 30.0]))
 
 
+def test_acceptance_replay_can_project_scale_only():
+    module = _load_module()
+    frame = {
+        "frame_index": 1,
+        "fallback_reason": None,
+        "refiner_output_xywh": [0.0, 0.0, 40.0, 20.0],
+        "refined_bbox": {
+            "x_min": 0.0,
+            "y_min": 0.0,
+            "x_max": 40.0,
+            "y_max": 20.0,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": 0.8,
+    }
+
+    projected = module.frame_projected_output_xywh(
+        np.array([0.0, 0.0, 10.0, 20.0]),
+        frame,
+        module.ReplayOutputProjectionConfig(mode="scale-only"),
+    )
+
+    np.testing.assert_allclose(projected, np.array([-5.0, -10.0, 20.0, 40.0]))
+
+
 def test_acceptance_replay_smooths_replayed_projected_size():
     module = _load_module()
     frame = {

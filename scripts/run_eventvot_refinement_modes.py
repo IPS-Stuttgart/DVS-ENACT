@@ -5,8 +5,10 @@ It intentionally avoids duplicating EventVOT parsing/evaluation code.  The main
 use cases are conservative projection modes for strong trackers such as
 HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
 the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
-while retaining the external tracker's center, and ``width-only``/``height-only``
-let validation sweeps keep just the useful size axis.
+while retaining the external tracker's center, ``scale-only`` preserves the
+external tracker's aspect ratio while changing only the overall size, and
+``width-only``/``height-only`` let validation sweeps keep just the useful size
+axis.
 """
 
 from __future__ import annotations
@@ -22,7 +24,14 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 
 import run_eventvot_refinement as base
 
-REFINEMENT_MODES = ("box", "center-only", "size-only", "width-only", "height-only")
+REFINEMENT_MODES = (
+    "box",
+    "center-only",
+    "size-only",
+    "scale-only",
+    "width-only",
+    "height-only",
+)
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
     "active_fraction",
@@ -206,8 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
             "DVS-ENACT update. 'center-only' keeps the base-track width/height "
             "and transfers only the DVS-ENACT center correction. 'size-only' "
             "keeps the base-track center and transfers only the DVS-ENACT "
-            "width/height correction. 'width-only' and 'height-only' transfer "
-            "only one DVS-ENACT size axis."
+            "width/height correction. 'scale-only' keeps the base-track aspect "
+            "ratio while transferring DVS-ENACT scale. 'width-only' and "
+            "'height-only' transfer only one DVS-ENACT size axis."
         ),
     )
     parser.add_argument(
@@ -401,7 +411,7 @@ def project_refinement_output(
             ],
             dtype=float,
         )
-    elif refinement_mode in {"size-only", "width-only", "height-only"}:
+    elif refinement_mode in {"size-only", "scale-only", "width-only", "height-only"}:
         candidate_center = candidate[:2] + 0.5 * candidate[2:]
         if projection_width_blend is not None and projection_height_blend is not None:
             if raw_refined_xywh is None:
@@ -528,7 +538,7 @@ def apply_projection_size_clamp(
         max_delta[axes],
     )
     clamped_size = np.maximum(clamped_size, 0.0)
-    if refinement_mode in {"size-only", "width-only", "height-only"}:
+    if refinement_mode in {"size-only", "scale-only", "width-only", "height-only"}:
         center = candidate[:2] + 0.5 * candidate[2:]
     else:
         center = output[:2] + 0.5 * output[2:]
@@ -591,7 +601,7 @@ def apply_projection_size_deadband(
 
     new_size = np.array(output[2:], dtype=float, copy=True)
     new_size[deadband_axes] = candidate[2:][deadband_axes]
-    if refinement_mode in {"size-only", "width-only", "height-only"}:
+    if refinement_mode in {"size-only", "scale-only", "width-only", "height-only"}:
         center = candidate[:2] + 0.5 * candidate[2:]
     else:
         center = output[:2] + 0.5 * output[2:]
@@ -692,7 +702,7 @@ def smooth_projected_size(
         + smoothing * previous_size[size_axes]
     )
     smoothed_size = np.maximum(smoothed_size, 0.0)
-    if refinement_mode in {"size-only", "width-only", "height-only"}:
+    if refinement_mode in {"size-only", "scale-only", "width-only", "height-only"}:
         candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
         center = candidate[:2] + 0.5 * candidate[2:]
     else:
@@ -714,6 +724,11 @@ def project_size_axes(
     projected = np.asarray(projected_size, dtype=float).reshape(2)
     if refinement_mode == "size-only":
         return np.array(projected, dtype=float, copy=True)
+    if refinement_mode == "scale-only":
+        candidate_area = max(float(np.prod(candidate)), 1e-18)
+        projected_area = max(float(np.prod(np.maximum(projected, 0.0))), 0.0)
+        scale = float(np.sqrt(projected_area / candidate_area))
+        return candidate * scale
     if refinement_mode == "width-only":
         return np.array([projected[0], candidate[1]], dtype=float)
     if refinement_mode == "height-only":
@@ -724,7 +739,7 @@ def project_size_axes(
 def projected_size_axes(refinement_mode: str) -> np.ndarray:
     """Return width/height indices modified by a projection mode."""
     validate_refinement_mode(refinement_mode)
-    if refinement_mode in {"box", "size-only"}:
+    if refinement_mode in {"box", "size-only", "scale-only"}:
         return np.array([0, 1], dtype=int)
     if refinement_mode == "width-only":
         return np.array([0], dtype=int)

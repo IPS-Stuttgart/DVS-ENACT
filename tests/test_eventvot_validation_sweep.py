@@ -166,7 +166,7 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
         result_root,
         *_single_config_grid_args(),
         "--refinement-mode",
-        "box size-only width-only height-only",
+        "box size-only scale-only width-only height-only",
         "--projection-width-blend",
         "none,0.10",
         "--projection-height-blend",
@@ -194,11 +194,12 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 512
-    assert payload["summary"]["config_count"] == 512
+    assert len(grid) == 640
+    assert payload["summary"]["config_count"] == 640
     assert sorted({config["refinement_mode"] for config in grid}) == [
         "box",
         "height-only",
+        "scale-only",
         "size-only",
         "width-only",
     ]
