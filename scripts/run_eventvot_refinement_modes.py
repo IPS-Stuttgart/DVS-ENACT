@@ -49,6 +49,7 @@ class ProjectedOutputRefiner:
         projection_height_blend: float | None = None,
         projection_no_clip: bool = False,
         projection_size_smoothing: float | None = None,
+        projection_size_deadband_ratio: float | None = None,
         projection_confidence_field: str | None = None,
         projection_confidence_floor: float | None = None,
         projection_confidence_ceiling: float | None = None,
@@ -60,6 +61,7 @@ class ProjectedOutputRefiner:
         validate_refinement_mode(refinement_mode)
         validate_projection_blends(projection_width_blend, projection_height_blend)
         validate_projection_size_smoothing(projection_size_smoothing)
+        validate_projection_size_deadband(projection_size_deadband_ratio)
         validate_projection_confidence_weighting(
             projection_confidence_field,
             projection_confidence_floor,
@@ -78,6 +80,7 @@ class ProjectedOutputRefiner:
         self.projection_height_blend = projection_height_blend
         self.projection_no_clip = projection_no_clip
         self.projection_size_smoothing = projection_size_smoothing
+        self.projection_size_deadband_ratio = projection_size_deadband_ratio
         self.projection_confidence_field = projection_confidence_field
         self.projection_confidence_floor = projection_confidence_floor
         self.projection_confidence_ceiling = projection_confidence_ceiling
@@ -96,6 +99,7 @@ class ProjectedOutputRefiner:
         if (
             self.refinement_mode == "box"
             and self.projection_size_smoothing is None
+            and self.projection_size_deadband_ratio is None
             and self.projection_confidence_field is None
         ) or result.fallback_reason is not None:
             return result
@@ -112,6 +116,7 @@ class ProjectedOutputRefiner:
             projection_height_blend=self.projection_height_blend,
             previous_projected_size=self._previous_accepted_projected_size,
             projection_size_smoothing=self.projection_size_smoothing,
+            projection_size_deadband_ratio=self.projection_size_deadband_ratio,
             projection_confidence_value=projection_confidence_value(
                 result,
                 self.projection_confidence_field,
@@ -223,6 +228,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--projection-size-deadband-ratio",
+        type=float,
+        help=(
+            "Optional per-axis size deadband relative to the base width/height. "
+            "Projected size changes smaller than this ratio are ignored."
+        ),
+    )
+    parser.add_argument(
         "--projection-confidence-field",
         choices=PROJECTION_CONFIDENCE_FIELDS,
         help=(
@@ -264,6 +277,7 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_height_blend=args.projection_height_blend,
         projection_no_clip=args.projection_no_clip,
         projection_size_smoothing=args.projection_size_smoothing,
+        projection_size_deadband_ratio=args.projection_size_deadband_ratio,
         projection_confidence_field=args.projection_confidence_field,
         projection_confidence_floor=args.projection_confidence_floor,
         projection_confidence_ceiling=args.projection_confidence_ceiling,
@@ -307,6 +321,7 @@ def project_refinement_output(
     projection_height_blend: float | None = None,
     previous_projected_size: np.ndarray | None = None,
     projection_size_smoothing: float | None = None,
+    projection_size_deadband_ratio: float | None = None,
     projection_confidence_value: float | None = None,
     projection_confidence_floor: float | None = None,
     projection_confidence_ceiling: float | None = None,
@@ -317,6 +332,7 @@ def project_refinement_output(
     validate_refinement_mode(refinement_mode)
     validate_projection_blends(projection_width_blend, projection_height_blend)
     validate_projection_size_smoothing(projection_size_smoothing)
+    validate_projection_size_deadband(projection_size_deadband_ratio)
     validate_projection_confidence_bounds(
         projection_confidence_floor,
         projection_confidence_ceiling,
@@ -383,7 +399,50 @@ def project_refinement_output(
         confidence_floor=projection_confidence_floor,
         confidence_ceiling=projection_confidence_ceiling,
     )
+    output = apply_projection_size_deadband(
+        candidate,
+        output,
+        refinement_mode=refinement_mode,
+        projection_size_deadband_ratio=projection_size_deadband_ratio,
+    )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def apply_projection_size_deadband(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    projection_size_deadband_ratio: float | None,
+) -> np.ndarray:
+    """Ignore projected size changes that are small relative to the base size."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_size_deadband(projection_size_deadband_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_size_deadband_ratio is None:
+        return output
+
+    axes = projected_size_axes(refinement_mode)
+    if axes.size == 0:
+        return output
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_size = np.maximum(candidate[2:], 1e-9)
+    size_delta_ratio = np.abs(output[2:] - candidate[2:]) / candidate_size
+    deadband_axes = axes[
+        size_delta_ratio[axes] < float(projection_size_deadband_ratio)
+    ]
+    if deadband_axes.size == 0:
+        return output
+
+    new_size = np.array(output[2:], dtype=float, copy=True)
+    new_size[deadband_axes] = candidate[2:][deadband_axes]
+    if refinement_mode in {"size-only", "width-only", "height-only"}:
+        center = candidate[:2] + 0.5 * candidate[2:]
+    else:
+        center = output[:2] + 0.5 * output[2:]
+    output[:2] = center - 0.5 * new_size
+    output[2:] = new_size
+    return output
 
 
 def apply_projection_confidence_weighting(
@@ -694,6 +753,16 @@ def validate_projection_size_smoothing(projection_size_smoothing: float | None) 
         return
     if not 0.0 <= float(projection_size_smoothing) <= 1.0:
         raise ValueError("projection_size_smoothing must be between 0 and 1")
+
+
+def validate_projection_size_deadband(
+    projection_size_deadband_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection size deadband ratios."""
+    if projection_size_deadband_ratio is None:
+        return
+    if float(projection_size_deadband_ratio) < 0.0:
+        raise ValueError("projection_size_deadband_ratio must be non-negative")
 
 
 def validate_projection_confidence_field(field: str | None) -> None:
