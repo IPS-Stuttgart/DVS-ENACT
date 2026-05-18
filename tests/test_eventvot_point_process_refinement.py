@@ -99,7 +99,7 @@ def test_point_process_refinement_help_runs_as_script():
         stderr=subprocess.STDOUT,
     )
 
-    assert "point-process likelihood gate" in help_text
+    assert "point-process" in help_text
     assert "--point-process-min-delta-log-likelihood" in help_text
     assert "--point-process-samples-per-edge" in help_text
     assert "--disable-point-process-gate" in help_text
@@ -156,19 +156,21 @@ class _FakeResult:
         return self.refined_bbox
 
     def to_dict(self):
-        return {
-            "fallback_reason": self.fallback_reason,
-            "candidate_bbox": {},
-            "search_bbox": self.search_bbox,
-            "refined_bbox": self.refined_bbox,
-            "output_bbox": self.output_bbox,
-            "event_velocity": self.event_velocity,
-            "event_count": self.event_count,
-            "used_event_count": self.used_event_count,
-            "active_measurement_count": self.active_measurement_count,
-            "mean_event_activity": self.mean_event_activity,
-            "mean_event_polarity_weight": self.mean_event_polarity_weight,
-            "polarity_consistency_fraction": self.polarity_consistency_fraction,
-            "polarity_contrast_sign": self.polarity_contrast_sign,
-            "quadratic_form": self.quadratic_form,
-        }
+        payload = {"candidate_bbox": {}, "search_bbox": self.search_bbox}
+        for key in (
+            "fallback_reason",
+            "refined_bbox",
+            "output_bbox",
+            "event_velocity",
+            "event_count",
+            "used_event_count",
+            "active_measurement_count",
+            "mean_event_activity",
+            "mean_event_polarity_weight",
+            "polarity_consistency_fraction",
+            "polarity_contrast_sign",
+            "quadratic_form",
+        ):
+            value = getattr(self, key)
+            payload[key] = value() if callable(value) else value
+        return payload

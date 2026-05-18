@@ -164,31 +164,30 @@ def compare_refinement_likelihood(
     events: EventBatch,
     velocity: np.ndarray | list[float] | tuple[float, float],
     config: BBoxEventLikelihoodConfig | None = None,
-    *,
-    bbox_format: str = "xyxy",
-    batch_duration: float | None = None,
-    image_area: float | None = None,
+    **score_kwargs: Any,
 ) -> RefinementLikelihoodComparison:
     """Compare base and refined bboxes using the same event window."""
+    bbox_format = str(score_kwargs.pop("bbox_format", "xyxy"))
+    batch_duration = score_kwargs.pop("batch_duration", None)
+    image_area = score_kwargs.pop("image_area", None)
+    if score_kwargs:
+        unknown = ", ".join(sorted(score_kwargs))
+        raise TypeError(f"Unexpected score keyword argument(s): {unknown}")
     config = config or BBoxEventLikelihoodConfig()
-    base_score = score_bbox_event_likelihood(
-        base_bbox,
-        events,
-        velocity,
-        config,
-        bbox_format=bbox_format,
-        batch_duration=batch_duration,
-        image_area=image_area,
-    )
-    refined_score = score_bbox_event_likelihood(
-        refined_bbox,
-        events,
-        velocity,
-        config,
-        bbox_format=bbox_format,
-        batch_duration=batch_duration,
-        image_area=image_area,
-    )
+    scores = {
+        label: score_bbox_event_likelihood(
+            bbox,
+            events,
+            velocity,
+            config,
+            bbox_format=bbox_format,
+            batch_duration=batch_duration,
+            image_area=image_area,
+        )
+        for label, bbox in (("base", base_bbox), ("refined", refined_bbox))
+    }
+    base_score = scores["base"]
+    refined_score = scores["refined"]
     delta = refined_score.terms.log_likelihood - base_score.terms.log_likelihood
     event_count = max(base_score.terms.event_count, refined_score.terms.event_count)
     per_event = None if event_count <= 0 else float(delta / event_count)

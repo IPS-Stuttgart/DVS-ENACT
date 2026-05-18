@@ -14,8 +14,7 @@ from typing import Any
 import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from run_eventvot_refinement import (  # noqa: E402
     EventVOTAcceptanceConfig,
@@ -76,16 +75,13 @@ class EventVOTPointProcessGateConfig:
     def __post_init__(self) -> None:
         if self.samples_per_edge <= 0:
             raise ValueError("samples_per_edge must be positive")
-        if self.spatial_sigma_px <= 0.0:
-            raise ValueError("spatial_sigma_px must be positive")
-        if self.foreground_rate < 0.0:
-            raise ValueError("foreground_rate must be non-negative")
-        if self.background_rate < 0.0:
-            raise ValueError("background_rate must be non-negative")
-        if self.activity_floor < 0.0:
-            raise ValueError("activity_floor must be non-negative")
-        if self.min_intensity <= 0.0:
-            raise ValueError("min_intensity must be positive")
+        EventLikelihoodConfig(
+            spatial_sigma_px=self.spatial_sigma_px,
+            foreground_rate=self.foreground_rate,
+            background_rate=self.background_rate,
+            activity_floor=self.activity_floor,
+            min_intensity=self.min_intensity,
+        )
 
     def likelihood_config(self) -> BBoxEventLikelihoodConfig:
         """Return the box-likelihood configuration used by the gate."""
@@ -327,30 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    output_results = _resolve_cli_output_results(args)
-    config_tracker_path = _resolve_cli_config_tracker_path(args)
-    sequence_names = load_requested_sequence_names(
-        args.sequence,
-        args.sequence_list,
-        args.sequence_file,
-    )
     payload = run(
-        EventVOTPointProcessRefinementOptions(
-            eventvot_root=args.eventvot_root,
-            base_results=args.base_results,
-            output_results=output_results,
-            split=args.split,
-            sequences=sequence_names,
-            sequence_index=args.sequence_index,
-            sequence_count=args.sequence_count,
-            tracker_name=args.tracker_name,
-            skip_existing=not args.no_skip_existing,
-            event_column_order=args.event_column_order,
-            diagnostics_json=args.diagnostics_json,
-            config_tracker_path=config_tracker_path,
-            acceptance_config=_acceptance_config_from_args(args),
-            point_process_gate=_point_process_gate_from_args(args),
-        ),
+        _options_from_args(args),
         refiner=_refiner_from_args(args),
     )
     print(json.dumps(payload["summary"], indent=2))
@@ -524,7 +498,11 @@ def _json_ready_options(
 
 
 def _add_point_process_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--disable-point-process-gate", action="store_true")
+    parser.add_argument(
+        "--disable-point-process-gate",
+        action="store_true",
+        help="Disable the point-process likelihood gate.",
+    )
     parser.add_argument("--point-process-min-delta-log-likelihood", type=float, default=0.0)
     parser.add_argument("--point-process-min-delta-log-likelihood-per-event", type=float)
     parser.add_argument("--point-process-samples-per-edge", type=int, default=24)
@@ -555,6 +533,39 @@ def _point_process_gate_from_args(
         include_expected_count=not args.point_process_disable_expected_count,
         normalize_kernel=not args.point_process_disable_kernel_normalization,
     )
+
+
+def _options_from_args(args: argparse.Namespace) -> EventVOTPointProcessRefinementOptions:
+    sequence_names = load_requested_sequence_names(
+        args.sequence,
+        args.sequence_list,
+        args.sequence_file,
+    )
+    return EventVOTPointProcessRefinementOptions(
+        **_common_option_kwargs(args, sequence_names),
+        point_process_gate=_point_process_gate_from_args(args),
+    )
+
+
+def _common_option_kwargs(
+    args: argparse.Namespace,
+    sequence_names: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "eventvot_root": args.eventvot_root,
+        "base_results": args.base_results,
+        "output_results": _resolve_cli_output_results(args),
+        "split": args.split,
+        "sequences": sequence_names,
+        "sequence_index": args.sequence_index,
+        "sequence_count": args.sequence_count,
+        "tracker_name": args.tracker_name,
+        "skip_existing": not args.no_skip_existing,
+        "event_column_order": args.event_column_order,
+        "diagnostics_json": args.diagnostics_json,
+        "config_tracker_path": _resolve_cli_config_tracker_path(args),
+        "acceptance_config": _acceptance_config_from_args(args),
+    }
 
 
 if __name__ == "__main__":
