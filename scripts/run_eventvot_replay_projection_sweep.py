@@ -1,9 +1,9 @@
-"""Sweep EventVOT replay output projections from existing diagnostics.
+"""Sweep EventVOT replay policies from existing diagnostics.
 
 This script is the cheap companion to ``run_eventvot_validation_sweep.py``.  It
 does not recompute DVS-ENACT refinements.  Instead, it reuses an existing
-diagnostics JSON and tries different replay-output projection policies, then
-optionally evaluates the rewritten EventVOT result files.
+diagnostics JSON and tries different replay-output projection and acceptance
+policies, then optionally evaluates the rewritten EventVOT result files.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from run_eventvot_acceptance_replay import (  # noqa: E402
     EventVOTAcceptanceReplayOptions,
     REPLAY_OUTPUT_MODES,
+    ReplayAcceptanceConfig,
     ReplayOutputProjectionConfig,
     run as run_acceptance_replay,
     validate_output_projection_config,
@@ -32,6 +33,16 @@ from run_eventvot_acceptance_replay import (  # noqa: E402
 from run_eventvot_refinement_modes import PROJECTION_CONFIDENCE_FIELDS  # noqa: E402
 
 NONE_SWEEP_TOKENS = {"none", "null", "off", "disabled", "disable"}
+DIAGNOSTIC_SWEEP_TOKENS = {"diagnostic", "original", "default", "keep"}
+DIAGNOSTIC_VALUE = object()
+
+
+@dataclass(frozen=True)
+class ReplaySweepConfig:
+    """One replay-sweep configuration."""
+
+    output_projection: ReplayOutputProjectionConfig
+    acceptance_overrides: dict[str, Any]
 
 
 def main() -> int:
@@ -44,7 +55,7 @@ def main() -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep replay-output projections from an EventVOT DVS-ENACT "
+            "Sweep replay-output policies from an EventVOT DVS-ENACT "
             "diagnostics JSON without recomputing refinements."
         )
     )
@@ -60,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-csv", type=Path)
     parser.add_argument("--summary-json", type=Path)
     add_projection_grid_arguments(parser)
+    add_acceptance_grid_arguments(parser)
     return parser
 
 
@@ -104,18 +116,106 @@ def add_projection_grid_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_acceptance_grid_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--min-accept-used-events",
+        dest="min_used_event_count",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-accept-active-measurements",
+        dest="min_active_measurement_count",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-accept-mean-activity",
+        dest="min_mean_event_activity",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-accept-candidate-iou",
+        dest="min_candidate_iou",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-accept-area-ratio",
+        dest="min_candidate_area_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-accept-area-ratio",
+        dest="max_candidate_area_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-accept-center-shift-ratio",
+        dest="max_center_shift_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-raw-candidate-iou",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-raw-area-ratio",
+        dest="min_raw_candidate_area_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-raw-area-ratio",
+        dest="max_raw_candidate_area_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-raw-center-shift-ratio",
+        dest="max_raw_center_shift_ratio",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-polarity-consistency-fraction",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-mean-event-polarity-weight",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--max-quadratic-form-per-active-measurement",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
+        "--min-active-fraction",
+        nargs="+",
+        default=("diagnostic",),
+    )
+
+
 def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
-    configs = list(iter_projection_grid(args))
+    configs = list(iter_sweep_grid(args))
     if args.max_configs is not None:
         configs = configs[: args.max_configs]
     if not configs:
-        raise ValueError("Replay projection sweep grid did not contain any configs")
+        raise ValueError("Replay policy sweep grid did not contain any configs")
 
     output_root = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     for config_index, config in enumerate(configs, start=1):
-        config_id = make_projection_config_id(config_index, config)
+        config_id = make_sweep_config_id(config_index, config)
         result_dir = output_root / "results" / config_id
         summary_json = output_root / "summaries" / f"{config_id}.json"
         payload = run_acceptance_replay(
@@ -128,13 +228,27 @@ def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
                 sequences=tuple(args.sequence),
                 summary_json=summary_json,
                 skip_evaluation=args.skip_evaluation,
-                output_projection_config=config,
+                output_projection_config=config.output_projection,
+                config_overrides=config.acceptance_overrides,
             )
         )
         rows.append(make_result_row(config_id, config, result_dir, payload))
         write_sweep_outputs(rows, configs, args)
 
     return write_sweep_outputs(rows, configs, args)
+
+
+def iter_sweep_grid(args: argparse.Namespace) -> list[ReplaySweepConfig]:
+    configs: list[ReplaySweepConfig] = []
+    for output_projection in iter_projection_grid(args):
+        for acceptance_overrides in iter_acceptance_override_grid(args):
+            configs.append(
+                ReplaySweepConfig(
+                    output_projection=output_projection,
+                    acceptance_overrides=acceptance_overrides,
+                )
+            )
+    return configs
 
 
 def iter_projection_grid(args: argparse.Namespace) -> list[ReplayOutputProjectionConfig]:
@@ -245,6 +359,80 @@ def parse_sweep_values(
     return unique_preserve_order(values)
 
 
+ACCEPTANCE_GRID_SPECS = (
+    ("min_used_event_count", "--min-accept-used-events", int),
+    ("min_active_measurement_count", "--min-accept-active-measurements", int),
+    ("min_mean_event_activity", "--min-accept-mean-activity", float),
+    ("min_candidate_iou", "--min-accept-candidate-iou", float),
+    ("min_candidate_area_ratio", "--min-accept-area-ratio", float),
+    ("max_candidate_area_ratio", "--max-accept-area-ratio", float),
+    ("max_center_shift_ratio", "--max-accept-center-shift-ratio", float),
+    ("min_raw_candidate_iou", "--min-raw-candidate-iou", float),
+    ("min_raw_candidate_area_ratio", "--min-raw-area-ratio", float),
+    ("max_raw_candidate_area_ratio", "--max-raw-area-ratio", float),
+    ("max_raw_center_shift_ratio", "--max-raw-center-shift-ratio", float),
+    ("min_polarity_consistency_fraction", "--min-polarity-consistency-fraction", float),
+    ("min_mean_event_polarity_weight", "--min-mean-event-polarity-weight", float),
+    (
+        "max_quadratic_form_per_active_measurement",
+        "--max-quadratic-form-per-active-measurement",
+        float,
+    ),
+    ("min_active_fraction", "--min-active-fraction", float),
+)
+
+
+def iter_acceptance_override_grid(args: argparse.Namespace) -> list[dict[str, Any]]:
+    value_lists = {
+        key: parse_acceptance_sweep_values(
+            getattr(args, key),
+            argument_name=argument_name,
+            cast=cast,
+        )
+        for key, argument_name, cast in ACCEPTANCE_GRID_SPECS
+    }
+    keys = tuple(value_lists)
+    configs: list[dict[str, Any]] = []
+    acceptance_fields = set(asdict(ReplayAcceptanceConfig()))
+    for values in _product(*(value_lists[key] for key in keys)):
+        raw = dict(zip(keys, values, strict=True))
+        overrides = {
+            key: value
+            for key, value in raw.items()
+            if value is not DIAGNOSTIC_VALUE
+        }
+        unknown_keys = sorted(set(overrides) - acceptance_fields)
+        if unknown_keys:
+            raise ValueError(f"Unknown acceptance-policy fields: {unknown_keys}")
+        configs.append(overrides)
+    return configs
+
+
+def parse_acceptance_sweep_values(
+    raw_values: list[str] | tuple[str, ...],
+    *,
+    argument_name: str,
+    cast: type,
+) -> list[Any]:
+    values: list[Any] = []
+    for raw_value in raw_values:
+        for token in split_tokens(raw_value):
+            normalized = token.lower()
+            if normalized in DIAGNOSTIC_SWEEP_TOKENS:
+                values.append(DIAGNOSTIC_VALUE)
+                continue
+            if normalized in NONE_SWEEP_TOKENS:
+                values.append(None)
+                continue
+            try:
+                values.append(cast(token))
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid value for {argument_name}: {token!r}"
+                ) from error
+    return unique_preserve_order(values)
+
+
 def split_tokens(raw_value: Any) -> list[str]:
     return [
         token
@@ -278,28 +466,51 @@ def make_projection_config_id(
     index: int,
     config: ReplayOutputProjectionConfig,
 ) -> str:
+    return make_sweep_config_id(
+        index,
+        ReplaySweepConfig(
+            output_projection=config,
+            acceptance_overrides={},
+        ),
+    )
+
+
+def make_sweep_config_id(
+    index: int,
+    config: ReplaySweepConfig,
+) -> str:
     payload = json.dumps(
-        asdict(config),
+        sweep_config_to_dict(config),
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()[:12]
-    return f"replay{index:04d}_h{digest}_pm{tag_text(config.mode)}"
+    return f"replay{index:04d}_h{digest}_pm{tag_text(config.output_projection.mode)}"
 
 
 def make_result_row(
     config_id: str,
-    config: ReplayOutputProjectionConfig,
+    config: ReplaySweepConfig,
     result_dir: Path,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     summary = payload["summary"]
     metrics = summary.get("metrics") or {}
+    acceptance_config = payload.get("acceptance_config") or {}
     return {
         "config_id": config_id,
         "output_results": str(result_dir),
-        **asdict(config),
+        "acceptance_overrides": json.dumps(
+            config.acceptance_overrides,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        **asdict(config.output_projection),
+        **{
+            f"acceptance_{key}": value
+            for key, value in acceptance_config.items()
+        },
         "sequence_count": summary["sequence_count"],
         "frame_count": summary["frame_count"],
         "accepted_refinement_count": summary["accepted_refinement_count"],
@@ -312,7 +523,7 @@ def make_result_row(
 
 def write_sweep_outputs(
     rows: list[dict[str, Any]],
-    configs: list[ReplayOutputProjectionConfig],
+    configs: list[ReplaySweepConfig],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     ranked = rank_rows(rows)
@@ -328,8 +539,7 @@ def write_sweep_outputs(
     payload = {
         "schema_version": 1,
         "description": (
-            "Replay-output projection sweep from existing EventVOT DVS-ENACT "
-            "diagnostics."
+            "Replay policy sweep from existing EventVOT DVS-ENACT diagnostics."
         ),
         "summary": {
             "config_count": len(configs),
@@ -339,7 +549,7 @@ def write_sweep_outputs(
             "metrics_csv": str(metrics_csv),
         },
         "top_configs": ranked[: args.top_k],
-        "grid": [asdict(config) for config in configs],
+        "grid": [sweep_config_to_dict(config) for config in configs],
     }
     summary_json.parent.mkdir(parents=True, exist_ok=True)
     summary_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -366,6 +576,13 @@ def _descending_metric(value: Any) -> float:
 
 def tag_text(value: Any) -> str:
     return str(value).replace("-", "").replace("_", "")
+
+
+def sweep_config_to_dict(config: ReplaySweepConfig) -> dict[str, Any]:
+    return {
+        "output_projection": asdict(config.output_projection),
+        "acceptance_overrides": config.acceptance_overrides,
+    }
 
 
 def _product(*value_lists: list[Any]):

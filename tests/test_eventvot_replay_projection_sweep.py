@@ -92,11 +92,13 @@ def test_replay_projection_sweep_help_runs_as_script():
         stderr=subprocess.STDOUT,
     )
 
-    assert "Sweep replay-output projections" in help_text
+    assert "Sweep replay-output policies" in help_text
     assert "--diagnostics-json" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-size-clamp-ratio" in help_text
     assert "--replay-output-confidence-field" in help_text
+    assert "--min-raw-candidate-iou" in help_text
+    assert "--min-active-fraction" in help_text
 
 
 def test_replay_projection_sweep_grid_parses_dispatch_strings(tmp_path, monkeypatch):
@@ -131,6 +133,45 @@ def test_replay_projection_sweep_grid_parses_dispatch_strings(tmp_path, monkeypa
     ) == [None, 0.20]
 
 
+def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_module(monkeypatch)
+    args = module.build_parser().parse_args(
+        [
+            "--diagnostics-json",
+            str(tmp_path / "diagnostics.json"),
+            "--output-root",
+            str(tmp_path / "out"),
+            "--skip-evaluation",
+            "--replay-output-mode",
+            "box center-only",
+            "--min-accept-used-events",
+            "diagnostic 20",
+            "--min-raw-candidate-iou",
+            "diagnostic none 0.50",
+        ]
+    )
+
+    configs = module.iter_sweep_grid(args)
+
+    assert len(configs) == 12
+    assert sorted({config.output_projection.mode for config in configs}) == [
+        "box",
+        "center-only",
+    ]
+    overrides = [config.acceptance_overrides for config in configs]
+    assert {} in overrides
+    assert {"min_used_event_count": 20} in overrides
+    assert {"min_raw_candidate_iou": None} in overrides
+    assert {"min_raw_candidate_iou": 0.50} in overrides
+    assert {
+        "min_used_event_count": 20,
+        "min_raw_candidate_iou": 0.50,
+    } in overrides
+
+
 def test_replay_projection_sweep_rewrites_result_files(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     diagnostics_json = _write_replay_fixture(tmp_path)
@@ -160,5 +201,47 @@ def test_replay_projection_sweep_rewrites_result_files(tmp_path, monkeypatch):
     result_files = sorted((output_root / "results").glob("*/seq1.txt"))
     assert len(result_files) == 2
     rewritten = [np.loadtxt(path) for path in result_files]
-    assert any(np.allclose(boxes[1], np.array([20.0, 5.0, 40.0, 30.0])) for boxes in rewritten)
-    assert any(np.allclose(boxes[1], np.array([30.0, 10.0, 20.0, 20.0])) for boxes in rewritten)
+    assert any(
+        np.allclose(boxes[1], np.array([20.0, 5.0, 40.0, 30.0]))
+        for boxes in rewritten
+    )
+    assert any(
+        np.allclose(boxes[1], np.array([30.0, 10.0, 20.0, 20.0]))
+        for boxes in rewritten
+    )
+
+
+def test_replay_projection_sweep_can_sweep_acceptance_gates(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    diagnostics_json = _write_replay_fixture(tmp_path)
+    output_root = tmp_path / "sweep"
+    args = module.build_parser().parse_args(
+        [
+            "--diagnostics-json",
+            str(diagnostics_json),
+            "--output-root",
+            str(output_root),
+            "--skip-evaluation",
+            "--replay-output-mode",
+            "box",
+            "--replay-output-blend",
+            "1.0",
+            "--min-accept-active-measurements",
+            "diagnostic 999",
+        ]
+    )
+
+    payload = module.run_projection_sweep(args)
+
+    assert payload["summary"]["config_count"] == 2
+    rows = payload["top_configs"]
+    assert sorted(row["accepted_refinement_count"] for row in rows) == [0, 1]
+    assert {row["acceptance_min_active_measurement_count"] for row in rows} == {
+        3,
+        999,
+    }
+    assert any(row["acceptance_overrides"] == "{}" for row in rows)
+    assert any(
+        row["acceptance_overrides"] == '{"min_active_measurement_count":999}'
+        for row in rows
+    )
