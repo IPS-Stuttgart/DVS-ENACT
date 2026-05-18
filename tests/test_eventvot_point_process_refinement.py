@@ -107,10 +107,7 @@ def test_point_process_refinement_help_runs_as_script():
 
 class _FakeRefiner:
     def __init__(self, module, results):
-        self.config = module.DVSContourRefinerConfig(
-            input_bbox_format="xywh",
-            output_bbox_format="xywh",
-        )
+        self.config = module.default_eventvot_refiner().config
         self._results = list(results)
 
     def refine(self, _candidate, _events, *, previous_candidate_bbox=None):
