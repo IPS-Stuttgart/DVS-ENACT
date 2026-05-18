@@ -1,15 +1,207 @@
-name: Disabled temporary DVS-ENACT acceptance gate helper
+name: Temporary EventVOT resume manifest patch runner
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - fix/eventvot-resume-manifest
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  disabled:
-    name: Disabled helper
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply EventVOT resume manifest patch') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Explain disabled state
-        run: echo "Temporary helper disabled; acceptance-gate sweep implementation landed in 983559f."
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/eventvot-resume-manifest
+      - name: Apply resume-manifest patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          HELPER_WORKFLOW = """name: Disabled temporary DVS-ENACT acceptance gate helper\n\non:\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:\n  disabled:\n    name: Disabled helper\n    runs-on: ubuntu-latest\n    steps:\n      - name: Explain disabled state\n        run: echo \"Temporary helper disabled; acceptance-gate sweep implementation landed in 983559f.\"\n"""
+
+          def replace_once(text: str, old: str, new: str) -> str:
+              if old not in text:
+                  raise SystemExit(f"Expected text not found:\n{old[:400]}")
+              return text.replace(old, new, 1)
+
+          script_path = Path("scripts/run_eventvot_refinement.py")
+          script = script_path.read_text(encoding="utf-8")
+          if "RESUME_MANIFEST_SCHEMA_VERSION" not in script:
+              script = replace_once(script, "import csv\n", "import csv\nimport hashlib\n")
+              script = replace_once(
+                  script,
+                  "from dataclasses import asdict, dataclass, field\n",
+                  "from dataclasses import asdict, dataclass, field, is_dataclass\n",
+              )
+              script = replace_once(
+                  script,
+                  """from dvs_enact import (\n    DVSContourRefiner,\n    DVSContourRefinerConfig,\n    EventBatch,\n    empty_event_batch,\n)\n\n\n@dataclass(frozen=True)\n""",
+                  """from dvs_enact import (\n    DVSContourRefiner,\n    DVSContourRefinerConfig,\n    EventBatch,\n    empty_event_batch,\n)\n\n\nRESUME_MANIFEST_SCHEMA_VERSION = 1\nREFINER_RESUME_ATTRIBUTE_NAMES = (\n    \"refinement_mode\",\n    \"projection_width_blend\",\n    \"projection_height_blend\",\n    \"projection_no_clip\",\n    \"projection_min_raw_width_ratio\",\n    \"projection_max_raw_width_ratio\",\n    \"projection_min_raw_height_ratio\",\n    \"projection_max_raw_height_ratio\",\n)\n\n\n@dataclass(frozen=True)\n""",
+              )
+              script = replace_once(
+                  script,
+                  """def existing_output_result_is_complete(\n    output_result_file: Path,\n    base_boxes: np.ndarray,\n) -> tuple[bool, np.ndarray | None]:\n    \"\"\"Return whether an existing result file is complete enough to resume.\"\"\"\n    if not output_result_file.exists():\n        return False, None\n    try:\n        output_boxes = load_xywh_result_file(output_result_file)\n    except (OSError, ValueError):\n        return False, None\n    if output_boxes.shape != base_boxes.shape:\n        return False, None\n    if output_boxes.ndim != 2 or output_boxes.shape[1] != 4:\n        return False, None\n    if not np.all(np.isfinite(output_boxes)):\n        return False, None\n    if np.any(output_boxes[:, 2:] <= 0.0):\n        return False, None\n    return True, output_boxes\n\n\n""",
+                  """def existing_output_result_is_complete(\n    output_result_file: Path,\n    base_boxes: np.ndarray,\n) -> tuple[bool, np.ndarray | None]:\n    \"\"\"Return whether an existing result file is complete enough to resume.\"\"\"\n    if not output_result_file.exists():\n        return False, None\n    try:\n        output_boxes = load_xywh_result_file(output_result_file)\n    except (OSError, ValueError):\n        return False, None\n    if output_boxes.shape != base_boxes.shape:\n        return False, None\n    if output_boxes.ndim != 2 or output_boxes.shape[1] != 4:\n        return False, None\n    if not np.all(np.isfinite(output_boxes)):\n        return False, None\n    if np.any(output_boxes[:, 2:] <= 0.0):\n        return False, None\n    return True, output_boxes\n\n\ndef existing_output_result_is_reusable(\n    output_result_file: Path,\n    base_boxes: np.ndarray,\n    expected_manifest: dict[str, Any],\n) -> tuple[bool, np.ndarray | None]:\n    \"\"\"Return whether an existing result file is complete and config-compatible.\"\"\"\n    complete, output_boxes = existing_output_result_is_complete(\n        output_result_file,\n        base_boxes,\n    )\n    if not complete or output_boxes is None:\n        return False, None\n    manifest_matches, _reason = resume_manifest_matches(\n        output_result_file,\n        expected_manifest,\n    )\n    if not manifest_matches:\n        return False, None\n    return True, output_boxes\n\n\ndef resume_manifest_path(result_file: Path) -> Path:\n    \"\"\"Return the sidecar manifest path for an EventVOT result file.\"\"\"\n    return result_file.with_name(f\"{result_file.stem}_dvsenact_manifest.json\")\n\n\ndef build_resume_manifest(\n    sequence_name: str,\n    base_result_file: Path,\n    base_boxes: np.ndarray,\n    refiner: Any,\n    *,\n    event_column_order: str,\n    acceptance_config: EventVOTAcceptanceConfig,\n) -> dict[str, Any]:\n    \"\"\"Build the configuration fingerprint required for safe resume/skipping.\"\"\"\n    return _json_ready(\n        {\n            \"schema_version\": RESUME_MANIFEST_SCHEMA_VERSION,\n            \"sequence\": sequence_name,\n            \"frame_count\": int(np.asarray(base_boxes).shape[0]),\n            \"base_result_sha256\": _sha256_file(base_result_file),\n            \"event_column_order\": event_column_order,\n            \"refiner\": build_refiner_resume_config(refiner),\n            \"acceptance_config\": acceptance_config,\n        }\n    )\n\n\ndef build_refiner_resume_config(refiner: Any) -> dict[str, Any]:\n    \"\"\"Return all known result-affecting refiner settings for resume matching.\"\"\"\n    payload: dict[str, Any] = {\n        \"class\": f\"{refiner.__class__.__module__}.{refiner.__class__.__qualname__}\",\n    }\n    if hasattr(refiner, \"config\"):\n        payload[\"config\"] = getattr(refiner, \"config\")\n    for attribute_name in REFINER_RESUME_ATTRIBUTE_NAMES:\n        if hasattr(refiner, attribute_name):\n            payload[attribute_name] = getattr(refiner, attribute_name)\n    return _json_ready(payload)\n\n\ndef resume_manifest_matches(\n    result_file: Path,\n    expected_manifest: dict[str, Any],\n) -> tuple[bool, str | None]:\n    \"\"\"Return whether an existing sidecar manifest matches the current run.\"\"\"\n    manifest_file = resume_manifest_path(result_file)\n    if not manifest_file.exists():\n        return False, \"missing_resume_manifest\"\n    try:\n        existing_manifest = json.loads(manifest_file.read_text(encoding=\"utf-8\"))\n    except (OSError, json.JSONDecodeError):\n        return False, \"invalid_resume_manifest\"\n    if _canonical_json(existing_manifest) != _canonical_json(expected_manifest):\n        return False, \"resume_manifest_mismatch\"\n    return True, None\n\n\ndef write_resume_manifest(result_file: Path, manifest: dict[str, Any]) -> None:\n    \"\"\"Write a deterministic sidecar manifest for future safe resume runs.\"\"\"\n    manifest_file = resume_manifest_path(result_file)\n    manifest_file.parent.mkdir(parents=True, exist_ok=True)\n    manifest_file.write_text(\n        json.dumps(_json_ready(manifest), indent=2, sort_keys=True, allow_nan=False)\n        + \"\\n\",\n        encoding=\"utf-8\",\n    )\n\n\ndef _sha256_file(path: Path) -> str:\n    digest = hashlib.sha256()\n    with path.open(\"rb\") as handle:\n        for chunk in iter(lambda: handle.read(1024 * 1024), b\"\"):\n            digest.update(chunk)\n    return digest.hexdigest()\n\n\ndef _canonical_json(value: Any) -> str:\n    return json.dumps(\n        _json_ready(value),\n        sort_keys=True,\n        separators=(\",\", \":\"),\n        allow_nan=False,\n    )\n\n\ndef _json_ready(value: Any) -> Any:\n    if is_dataclass(value) and not isinstance(value, type):\n        return _json_ready(asdict(value))\n    if isinstance(value, Path):\n        return str(value)\n    if isinstance(value, dict):\n        return {str(key): _json_ready(item) for key, item in value.items()}\n    if isinstance(value, (list, tuple)):\n        return [_json_ready(item) for item in value]\n    if isinstance(value, np.generic):\n        return _json_ready(value.item())\n    if isinstance(value, float):\n        if math.isfinite(value):\n            return value\n        if math.isnan(value):\n            return \"nan\"\n        return \"inf\" if value > 0.0 else \"-inf\"\n    return value\n\n\n""",
+              )
+              script = replace_once(
+                  script,
+                  """    base_boxes = load_xywh_result_file(base_result_file)\n    frame_count = int(base_boxes.shape[0])\n    _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)\n    if skip_existing:\n        complete, output_boxes = existing_output_result_is_complete(\n            output_result_file,\n            base_boxes,\n        )\n""",
+                  """    base_boxes = load_xywh_result_file(base_result_file)\n    frame_count = int(base_boxes.shape[0])\n    _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)\n    resume_manifest = build_resume_manifest(\n        sequence_name,\n        base_result_file,\n        base_boxes,\n        refiner,\n        event_column_order=event_column_order,\n        acceptance_config=acceptance_config,\n    )\n    if skip_existing:\n        complete, output_boxes = existing_output_result_is_reusable(\n            output_result_file,\n            base_boxes,\n            resume_manifest,\n        )\n""",
+              )
+              script = replace_once(
+                  script,
+                  """    save_xywh_result_file(output_result_file, refined_boxes)\n    _save_timing_file(output_result_file, timings)\n    fallback_counts = Counter(\n""",
+                  """    save_xywh_result_file(output_result_file, refined_boxes)\n    _save_timing_file(output_result_file, timings)\n    write_resume_manifest(output_result_file, resume_manifest)\n    fallback_counts = Counter(\n""",
+              )
+              script = replace_once(
+                  script,
+                  """        \"event_csv\": str(event_csv),\n        \"base_result_file\": str(base_result_file),\n        \"output_result_file\": str(output_result_file),\n""",
+                  """        \"event_csv\": str(event_csv),\n        \"base_result_file\": str(base_result_file),\n        \"output_result_file\": str(output_result_file),\n        \"resume_manifest_file\": str(resume_manifest_path(output_result_file)),\n""",
+              )
+              script = replace_once(
+                  script,
+                  """        \"event_csv\": None,\n        \"base_result_file\": str(base_result_file),\n        \"output_result_file\": str(output_result_file),\n""",
+                  """        \"event_csv\": None,\n        \"base_result_file\": str(base_result_file),\n        \"output_result_file\": str(output_result_file),\n        \"resume_manifest_file\": str(resume_manifest_path(output_result_file)),\n""",
+              )
+              script = replace_once(
+                  script,
+                  """        \"eventvot_evaluator\": {\n            \"tracker_name\": options.tracker_name,\n            \"tracking_result_dir\": str(output_root),\n            \"config_tracker_updated\": config_tracker_updated,\n        },\n        \"refiner_config\": asdict(refiner.config),\n        \"acceptance_config\": asdict(options.acceptance_config),\n""",
+                  """        \"eventvot_evaluator\": {\n            \"tracker_name\": options.tracker_name,\n            \"tracking_result_dir\": str(output_root),\n            \"config_tracker_updated\": config_tracker_updated,\n        },\n        \"refiner_config\": asdict(refiner.config),\n        \"refiner_resume_config\": build_refiner_resume_config(refiner),\n        \"resume_manifest_schema_version\": RESUME_MANIFEST_SCHEMA_VERSION,\n        \"acceptance_config\": asdict(options.acceptance_config),\n""",
+              )
+              script = replace_once(
+                  script,
+                  """            \"Recompute sequences even when <sequence>.txt already exists and \"\n            \"looks complete in the output directory.\"\n""",
+                  """            \"Recompute sequences even when <sequence>.txt already exists, \"\n            \"looks complete, and has a matching DVS-ENACT resume manifest.\"\n""",
+              )
+              script_path.write_text(script, encoding="utf-8")
+
+          test_path = Path("tests/test_eventvot_refinement.py")
+          tests = test_path.read_text(encoding="utf-8")
+          if "test_eventvot_refinement_recomputes_stale_manifest_result" not in tests:
+              old_start = tests.index("def test_eventvot_refinement_skips_complete_existing_result")
+              old_end = tests.index("\ndef test_eventvot_refinement_selects_sequence_chunk", old_start)
+              replacement = '''def test_eventvot_refinement_skips_complete_existing_result_with_matching_manifest(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    output_results.mkdir()
+    output_result_file = output_results / "recording_0001.txt"
+    output_result_file.write_text(
+        "8\t8\t10\t10\n9.5\t8\t10\t10\n10\t8\t10\t10\n",
+        encoding="utf-8",
+    )
+    refiner = _FailingRefiner(module)
+    base_result_file = base_results / "recording_0001.txt"
+    base_boxes = module.load_xywh_result_file(base_result_file)
+    manifest = module.build_resume_manifest(
+        "recording_0001",
+        base_result_file,
+        base_boxes,
+        refiner,
+        event_column_order="auto",
+        acceptance_config=module.EventVOTAcceptanceConfig(),
+    )
+    module.write_resume_manifest(output_result_file, manifest)
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=refiner,
+    )
+
+    summary = payload["summary"]
+    sequence = payload["sequences"][0]
+    assert summary["skipped_existing_output_count"] == 1
+    assert summary["fallback_counts"]["skipped_existing_output"] == 3
+    assert sequence["skipped_existing_output"]
+    assert sequence["accepted_refinement_count"] == 1
+    assert sequence["frames"] == []
+    assert (output_results / "recording_0001_time.txt").exists()
+    assert (output_results / "recording_0001_dvsenact_manifest.json").exists()
+
+
+def test_eventvot_refinement_recomputes_stale_manifest_result(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    output_results.mkdir()
+    output_result_file = output_results / "recording_0001.txt"
+    output_result_file.write_text(
+        "8\t8\t10\t10\n99\t99\t10\t10\n99\t99\t10\t10\n",
+        encoding="utf-8",
+    )
+    base_result_file = base_results / "recording_0001.txt"
+    base_boxes = module.load_xywh_result_file(base_result_file)
+    stale_manifest = module.build_resume_manifest(
+        "recording_0001",
+        base_result_file,
+        base_boxes,
+        _FakeRefiner(module, []),
+        event_column_order="txyp",
+        acceptance_config=module.EventVOTAcceptanceConfig(),
+    )
+    module.write_resume_manifest(output_result_file, stale_manifest)
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FakeRefiner(
+            module,
+            [
+                _FakeResult([9.25, 8.0, 10.0, 10.0]),
+                _FakeResult([10.25, 8.0, 10.0, 10.0]),
+            ],
+        ),
+    )
+
+    refined = np.loadtxt(output_result_file)
+    np.testing.assert_allclose(
+        refined,
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [9.25, 8.0, 10.0, 10.0],
+                [10.25, 8.0, 10.0, 10.0],
+            ]
+        ),
+    )
+    assert payload["summary"]["skipped_existing_output_count"] == 0
+    assert payload["summary"]["accepted_refinement_count"] == 2
+    assert payload["sequences"][0]["frames"]
+    assert (output_results / "recording_0001_dvsenact_manifest.json").exists()
+'''
+              tests = tests[:old_start] + replacement + tests[old_end:]
+              test_path.write_text(tests, encoding="utf-8")
+
+          Path(".github/workflows/apply-dvs-enact-acceptance-gates.yml").write_text(
+              HELPER_WORKFLOW,
+              encoding="utf-8",
+          )
+          PY
+      - name: Run targeted checks
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m py_compile scripts/run_eventvot_refinement.py
+          python -m pytest tests/test_eventvot_refinement.py -q
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/run_eventvot_refinement.py tests/test_eventvot_refinement.py .github/workflows/apply-dvs-enact-acceptance-gates.yml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Apply EventVOT resume manifest patch"
+          git push
