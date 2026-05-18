@@ -31,10 +31,22 @@ from run_eventvot_acceptance_replay import (  # noqa: E402
     validate_output_projection_config,
 )
 from run_eventvot_refinement_modes import PROJECTION_CONFIDENCE_FIELDS  # noqa: E402
+from run_eventvot_refinement import resolve_eventvot_split_root  # noqa: E402
+from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
 
 NONE_SWEEP_TOKENS = {"none", "null", "off", "disabled", "disable"}
 DIAGNOSTIC_SWEEP_TOKENS = {"diagnostic", "original", "default", "keep"}
 DIAGNOSTIC_VALUE = object()
+RANK_METRICS = (
+    "delta_sr_auc",
+    "sr_auc",
+    "delta_pr_auc",
+    "pr_auc",
+    "delta_npr_auc",
+    "npr_auc",
+    "delta_mean_iou",
+    "mean_iou",
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-evaluation", action="store_true")
     parser.add_argument("--max-configs", type=int)
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument(
+        "--rank-metric",
+        choices=RANK_METRICS,
+        default="delta_sr_auc",
+        help=(
+            "Metric used to rank configurations. Delta metrics compare replayed "
+            "outputs against --base-results when evaluation is enabled."
+        ),
+    )
     parser.add_argument("--metrics-csv", type=Path)
     parser.add_argument("--summary-json", type=Path)
     add_projection_grid_arguments(parser)
@@ -205,6 +226,8 @@ def add_acceptance_grid_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
+    diagnostics = load_diagnostics(args.diagnostics_json)
+    baseline_metrics = evaluate_baseline_metrics(args, diagnostics)
     configs = list(iter_sweep_grid(args))
     if args.max_configs is not None:
         configs = configs[: args.max_configs]
@@ -232,10 +255,75 @@ def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
                 config_overrides=config.acceptance_overrides,
             )
         )
-        rows.append(make_result_row(config_id, config, result_dir, payload))
-        write_sweep_outputs(rows, configs, args)
+        rows.append(
+            make_result_row(
+                config_id,
+                config,
+                result_dir,
+                payload,
+                baseline_metrics=baseline_metrics,
+            )
+        )
+        write_sweep_outputs(rows, configs, args, baseline_metrics=baseline_metrics)
 
-    return write_sweep_outputs(rows, configs, args)
+    return write_sweep_outputs(rows, configs, args, baseline_metrics=baseline_metrics)
+
+
+def load_diagnostics(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def evaluate_baseline_metrics(
+    args: argparse.Namespace,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Evaluate the base tracker once so sweep rows can report deltas."""
+    if args.skip_evaluation or args.eventvot_root is None:
+        return None
+    sequence_names = selected_sequence_names(diagnostics, tuple(args.sequence))
+    if not sequence_names:
+        return None
+    result_root = resolve_baseline_result_root(args, diagnostics, sequence_names)
+    if result_root is None:
+        return None
+    split = args.split or diagnostics.get("options", {}).get("split", "test")
+    split_root = resolve_eventvot_split_root(args.eventvot_root, str(split))
+    return evaluate_eventvot_results(split_root, result_root, sequence_names)
+
+
+def selected_sequence_names(
+    diagnostics: dict[str, Any],
+    requested_sequences: tuple[str, ...],
+) -> list[str]:
+    requested = set(requested_sequences)
+    sequence_names: list[str] = []
+    for sequence_summary in diagnostics.get("sequences", []):
+        sequence_name = str(sequence_summary.get("sequence"))
+        if requested and sequence_name not in requested:
+            continue
+        sequence_names.append(sequence_name)
+    return sequence_names
+
+
+def resolve_baseline_result_root(
+    args: argparse.Namespace,
+    diagnostics: dict[str, Any],
+    sequence_names: list[str],
+) -> Path | None:
+    if args.base_results is not None:
+        return args.base_results
+    selected = set(sequence_names)
+    parents: set[Path] = set()
+    for sequence_summary in diagnostics.get("sequences", []):
+        if str(sequence_summary.get("sequence")) not in selected:
+            continue
+        base_result_file = sequence_summary.get("base_result_file")
+        if base_result_file is None:
+            return None
+        parents.add(Path(str(base_result_file)).parent)
+    if len(parents) == 1:
+        return next(iter(parents))
+    return None
 
 
 def iter_sweep_grid(args: argparse.Namespace) -> list[ReplaySweepConfig]:
@@ -494,10 +582,16 @@ def make_result_row(
     config: ReplaySweepConfig,
     result_dir: Path,
     payload: dict[str, Any],
+    *,
+    baseline_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = payload["summary"]
     metrics = summary.get("metrics") or {}
     acceptance_config = payload.get("acceptance_config") or {}
+    frame_count = int(summary["frame_count"])
+    sequence_count = int(summary["sequence_count"])
+    accepted_count = int(summary["accepted_refinement_count"])
+    refinable_frame_count = max(0, frame_count - sequence_count)
     return {
         "config_id": config_id,
         "output_results": str(result_dir),
@@ -514,19 +608,48 @@ def make_result_row(
         "sequence_count": summary["sequence_count"],
         "frame_count": summary["frame_count"],
         "accepted_refinement_count": summary["accepted_refinement_count"],
+        "acceptance_rate": (
+            float(accepted_count / refinable_frame_count)
+            if refinable_frame_count
+            else 0.0
+        ),
         "sr_auc": metrics.get("sr_auc"),
+        "delta_sr_auc": metric_delta(metrics, baseline_metrics, "sr_auc"),
         "pr_auc": metrics.get("pr_auc"),
+        "delta_pr_auc": metric_delta(metrics, baseline_metrics, "pr_auc"),
+        "pr_20": metrics.get("pr_20"),
+        "delta_pr_20": metric_delta(metrics, baseline_metrics, "pr_20"),
         "npr_auc": metrics.get("npr_auc"),
+        "delta_npr_auc": metric_delta(metrics, baseline_metrics, "npr_auc"),
+        "npr_020": metrics.get("npr_020"),
+        "delta_npr_020": metric_delta(metrics, baseline_metrics, "npr_020"),
         "mean_iou": metrics.get("mean_iou"),
+        "delta_mean_iou": metric_delta(metrics, baseline_metrics, "mean_iou"),
     }
+
+
+def metric_delta(
+    metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any] | None,
+    key: str,
+) -> float | None:
+    if baseline_metrics is None:
+        return None
+    value = metrics.get(key)
+    baseline_value = baseline_metrics.get(key)
+    if value is None or baseline_value is None:
+        return None
+    return float(value) - float(baseline_value)
 
 
 def write_sweep_outputs(
     rows: list[dict[str, Any]],
     configs: list[ReplaySweepConfig],
     args: argparse.Namespace,
+    *,
+    baseline_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ranked = rank_rows(rows)
+    ranked = rank_rows(rows, args.rank_metric)
     metrics_csv = args.metrics_csv or args.output_root / "projection_sweep_metrics.csv"
     summary_json = args.summary_json or args.output_root / "projection_sweep_summary.json"
     if rows:
@@ -544,10 +667,14 @@ def write_sweep_outputs(
         "summary": {
             "config_count": len(configs),
             "completed_config_count": len(rows),
+            "rank_metric": args.rank_metric,
             "best_config_id": ranked[0]["config_id"] if ranked else None,
+            "best_rank_metric": ranked[0].get(args.rank_metric) if ranked else None,
             "best_sr_auc": ranked[0].get("sr_auc") if ranked else None,
+            "best_delta_sr_auc": ranked[0].get("delta_sr_auc") if ranked else None,
             "metrics_csv": str(metrics_csv),
         },
+        "baseline_metrics": baseline_metrics,
         "top_configs": ranked[: args.top_k],
         "grid": [sweep_config_to_dict(config) for config in configs],
     }
@@ -556,10 +683,11 @@ def write_sweep_outputs(
     return payload
 
 
-def rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def rank_rows(rows: list[dict[str, Any]], rank_metric: str = "delta_sr_auc") -> list[dict[str, Any]]:
     return sorted(
         rows,
         key=lambda row: (
+            _descending_metric(row.get(rank_metric)),
             _descending_metric(row.get("sr_auc")),
             _descending_metric(row.get("pr_auc")),
             _descending_metric(row.get("npr_auc")),

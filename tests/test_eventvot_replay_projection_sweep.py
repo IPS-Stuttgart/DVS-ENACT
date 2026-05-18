@@ -84,6 +84,19 @@ def _write_replay_fixture(root: Path) -> Path:
     return diagnostics_json
 
 
+def _write_eventvot_fixture(root: Path) -> Path:
+    split_root = root / "Testing Subset"
+    sequence_dir = split_root / "seq1"
+    sequence_dir.mkdir(parents=True)
+    (split_root / "list.txt").write_text("seq1\n", encoding="utf-8")
+    (sequence_dir / "groundtruth.txt").write_text(
+        "10\t10\t20\t20\n20\t5\t40\t30\n",
+        encoding="utf-8",
+    )
+    (sequence_dir / "absent.txt").write_text("1\n1\n", encoding="utf-8")
+    return root
+
+
 def test_replay_projection_sweep_help_runs_as_script():
     help_text = subprocess.check_output(
         (sys.executable, str(SCRIPT_PATH), "--help"),
@@ -245,3 +258,38 @@ def test_replay_projection_sweep_can_sweep_acceptance_gates(tmp_path, monkeypatc
         row["acceptance_overrides"] == '{"min_active_measurement_count":999}'
         for row in rows
     )
+
+
+def test_replay_projection_sweep_reports_baseline_deltas(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    diagnostics_json = _write_replay_fixture(tmp_path)
+    eventvot_root = _write_eventvot_fixture(tmp_path / "eventvot")
+    output_root = tmp_path / "sweep"
+    args = module.build_parser().parse_args(
+        [
+            "--diagnostics-json",
+            str(diagnostics_json),
+            "--eventvot-root",
+            str(eventvot_root),
+            "--output-root",
+            str(output_root),
+            "--replay-output-mode",
+            "box",
+            "--replay-output-blend",
+            "1.0",
+            "--rank-metric",
+            "delta_sr_auc",
+        ]
+    )
+
+    payload = module.run_projection_sweep(args)
+
+    assert payload["baseline_metrics"] is not None
+    assert payload["summary"]["rank_metric"] == "delta_sr_auc"
+    assert payload["summary"]["best_delta_sr_auc"] > 0.0
+    assert payload["summary"]["best_rank_metric"] == payload["summary"]["best_delta_sr_auc"]
+    top_config = payload["top_configs"][0]
+    assert top_config["delta_sr_auc"] > 0.0
+    assert top_config["delta_pr_auc"] > 0.0
+    assert top_config["delta_npr_auc"] > 0.0
+    assert top_config["mean_iou"] > payload["baseline_metrics"]["mean_iou"]
