@@ -149,6 +149,44 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
     assert all(config["max_accept_center_shift_ratio"] == 0.25 for config in grid)
 
 
+def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeypatch):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        "--refinement-blend",
+        "0.1",
+        "--search-expansion-factor",
+        "1.1",
+        "--max-events",
+        "64",
+        "--min-events",
+        "3",
+        "--event-activity-floor",
+        "0.0",
+        "--inactive-activity-threshold",
+        "0.1",
+        "--measurement-noise-variance",
+        "1.0",
+        "--dry-run",
+    )
+    config = module.iter_parameter_grid(args)[0]
+    config_id = module.make_config_id(1, config)
+
+    assert "_h" in config_id
+    for key in module.CONFIG_ID_KEYS:
+        changed_config = dict(config)
+        if key in module.INT_GRID_KEYS:
+            changed_config[key] = int(changed_config[key]) + 1
+        else:
+            value = float(changed_config[key])
+            changed_config[key] = 42.0 if not math.isfinite(value) else value + 0.125
+
+        assert module.make_config_id(1, changed_config) != config_id, key
+
+
 def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     module = _load_module(monkeypatch)
     config = {
