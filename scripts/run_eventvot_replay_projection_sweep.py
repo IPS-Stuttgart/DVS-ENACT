@@ -57,6 +57,16 @@ class ReplaySweepConfig:
     acceptance_overrides: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class BaselineEvaluation:
+    """Baseline metrics used to compute replay deltas."""
+
+    split_root: Path
+    sequence_names: tuple[str, ...]
+    metrics: dict[str, Any]
+    sequence_metrics: dict[str, dict[str, Any]]
+
+
 def main() -> int:
     args = build_parser().parse_args()
     payload = run_projection_sweep(args)
@@ -90,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--metrics-csv", type=Path)
+    parser.add_argument("--sequence-metrics-csv", type=Path)
     parser.add_argument("--summary-json", type=Path)
     add_projection_grid_arguments(parser)
     add_acceptance_grid_arguments(parser)
@@ -227,7 +238,10 @@ def add_acceptance_grid_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
     diagnostics = load_diagnostics(args.diagnostics_json)
-    baseline_metrics = evaluate_baseline_metrics(args, diagnostics)
+    baseline_evaluation = evaluate_baseline(args, diagnostics)
+    baseline_metrics = (
+        baseline_evaluation.metrics if baseline_evaluation is not None else None
+    )
     configs = list(iter_sweep_grid(args))
     if args.max_configs is not None:
         configs = configs[: args.max_configs]
@@ -237,6 +251,7 @@ def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
     output_root = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
+    sequence_rows: list[dict[str, Any]] = []
     for config_index, config in enumerate(configs, start=1):
         config_id = make_sweep_config_id(config_index, config)
         result_dir = output_root / "results" / config_id
@@ -255,28 +270,48 @@ def run_projection_sweep(args: argparse.Namespace) -> dict[str, Any]:
                 config_overrides=config.acceptance_overrides,
             )
         )
-        rows.append(
-            make_result_row(
-                config_id,
-                config,
-                result_dir,
-                payload,
-                baseline_metrics=baseline_metrics,
-            )
+        row = make_result_row(
+            config_id,
+            config,
+            result_dir,
+            payload,
+            baseline_metrics=baseline_metrics,
         )
-        write_sweep_outputs(rows, configs, args, baseline_metrics=baseline_metrics)
+        config_sequence_rows = make_sequence_result_rows(
+            config_id,
+            config,
+            result_dir,
+            payload,
+            baseline_evaluation=baseline_evaluation,
+        )
+        add_sequence_delta_summary(row, config_sequence_rows)
+        rows.append(row)
+        sequence_rows.extend(config_sequence_rows)
+        write_sweep_outputs(
+            rows,
+            configs,
+            args,
+            baseline_metrics=baseline_metrics,
+            sequence_rows=sequence_rows,
+        )
 
-    return write_sweep_outputs(rows, configs, args, baseline_metrics=baseline_metrics)
+    return write_sweep_outputs(
+        rows,
+        configs,
+        args,
+        baseline_metrics=baseline_metrics,
+        sequence_rows=sequence_rows,
+    )
 
 
 def load_diagnostics(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def evaluate_baseline_metrics(
+def evaluate_baseline(
     args: argparse.Namespace,
     diagnostics: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> BaselineEvaluation | None:
     """Evaluate the base tracker once so sweep rows can report deltas."""
     if args.skip_evaluation or args.eventvot_root is None:
         return None
@@ -288,7 +323,21 @@ def evaluate_baseline_metrics(
         return None
     split = args.split or diagnostics.get("options", {}).get("split", "test")
     split_root = resolve_eventvot_split_root(args.eventvot_root, str(split))
-    return evaluate_eventvot_results(split_root, result_root, sequence_names)
+    metrics = evaluate_eventvot_results(split_root, result_root, sequence_names)
+    sequence_metrics = {
+        sequence_name: evaluate_eventvot_results(
+            split_root,
+            result_root,
+            [sequence_name],
+        )
+        for sequence_name in sequence_names
+    }
+    return BaselineEvaluation(
+        split_root=split_root,
+        sequence_names=tuple(sequence_names),
+        metrics=metrics,
+        sequence_metrics=sequence_metrics,
+    )
 
 
 def selected_sequence_names(
@@ -628,6 +677,113 @@ def make_result_row(
     }
 
 
+def make_sequence_result_rows(
+    config_id: str,
+    config: ReplaySweepConfig,
+    result_dir: Path,
+    payload: dict[str, Any],
+    *,
+    baseline_evaluation: BaselineEvaluation | None = None,
+) -> list[dict[str, Any]]:
+    if baseline_evaluation is None:
+        return []
+    sequence_summaries = {
+        str(sequence_summary["sequence"]): sequence_summary
+        for sequence_summary in payload.get("sequences", [])
+    }
+    rows: list[dict[str, Any]] = []
+    for sequence_name in baseline_evaluation.sequence_names:
+        sequence_summary = sequence_summaries.get(sequence_name)
+        if sequence_summary is None:
+            continue
+        metrics = evaluate_eventvot_results(
+            baseline_evaluation.split_root,
+            result_dir,
+            [sequence_name],
+        )
+        baseline_metrics = baseline_evaluation.sequence_metrics.get(sequence_name)
+        frame_count = int(sequence_summary.get("frame_count", 0))
+        accepted_count = int(
+            (sequence_summary.get("acceptance_counts") or {}).get("accepted", 0)
+        )
+        refinable_frame_count = max(0, frame_count - 1)
+        rows.append(
+            {
+                "config_id": config_id,
+                "sequence": sequence_name,
+                "output_results": str(result_dir),
+                "acceptance_overrides": json.dumps(
+                    config.acceptance_overrides,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                **asdict(config.output_projection),
+                "frame_count": frame_count,
+                "accepted_refinement_count": accepted_count,
+                "acceptance_rate": (
+                    float(accepted_count / refinable_frame_count)
+                    if refinable_frame_count
+                    else 0.0
+                ),
+                "acceptance_counts": json.dumps(
+                    sequence_summary.get("acceptance_counts") or {},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "sr_auc": metrics.get("sr_auc"),
+                "delta_sr_auc": metric_delta(metrics, baseline_metrics, "sr_auc"),
+                "pr_auc": metrics.get("pr_auc"),
+                "delta_pr_auc": metric_delta(metrics, baseline_metrics, "pr_auc"),
+                "pr_20": metrics.get("pr_20"),
+                "delta_pr_20": metric_delta(metrics, baseline_metrics, "pr_20"),
+                "npr_auc": metrics.get("npr_auc"),
+                "delta_npr_auc": metric_delta(metrics, baseline_metrics, "npr_auc"),
+                "npr_020": metrics.get("npr_020"),
+                "delta_npr_020": metric_delta(metrics, baseline_metrics, "npr_020"),
+                "mean_iou": metrics.get("mean_iou"),
+                "delta_mean_iou": metric_delta(metrics, baseline_metrics, "mean_iou"),
+            }
+        )
+    return rows
+
+
+def add_sequence_delta_summary(
+    row: dict[str, Any],
+    sequence_rows: list[dict[str, Any]],
+) -> None:
+    deltas = [
+        (str(sequence_row["sequence"]), float(sequence_row["delta_sr_auc"]))
+        for sequence_row in sequence_rows
+        if sequence_row.get("delta_sr_auc") is not None
+    ]
+    row["sequence_delta_sr_positive_count"] = sum(
+        1 for _sequence_name, delta in deltas if delta > 0.0
+    )
+    row["sequence_delta_sr_negative_count"] = sum(
+        1 for _sequence_name, delta in deltas if delta < 0.0
+    )
+    row["sequence_delta_sr_zero_count"] = sum(
+        1 for _sequence_name, delta in deltas if delta == 0.0
+    )
+    if not deltas:
+        row["mean_sequence_delta_sr_auc"] = None
+        row["best_sequence_delta_sr_auc"] = None
+        row["best_sequence_delta_sr_sequence"] = None
+        row["worst_sequence_delta_sr_auc"] = None
+        row["worst_sequence_delta_sr_sequence"] = None
+        return
+
+    best_sequence, best_delta = max(deltas, key=lambda item: item[1])
+    worst_sequence, worst_delta = min(deltas, key=lambda item: item[1])
+    row["mean_sequence_delta_sr_auc"] = float(
+        sum(delta for _sequence_name, delta in deltas) / len(deltas)
+    )
+    row["best_sequence_delta_sr_auc"] = best_delta
+    row["best_sequence_delta_sr_sequence"] = best_sequence
+    row["worst_sequence_delta_sr_auc"] = worst_delta
+    row["worst_sequence_delta_sr_sequence"] = worst_sequence
+
+
 def metric_delta(
     metrics: dict[str, Any],
     baseline_metrics: dict[str, Any] | None,
@@ -648,9 +804,14 @@ def write_sweep_outputs(
     args: argparse.Namespace,
     *,
     baseline_metrics: dict[str, Any] | None = None,
+    sequence_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     ranked = rank_rows(rows, args.rank_metric)
     metrics_csv = args.metrics_csv or args.output_root / "projection_sweep_metrics.csv"
+    sequence_metrics_csv = (
+        args.sequence_metrics_csv
+        or args.output_root / "projection_sweep_sequence_metrics.csv"
+    )
     summary_json = args.summary_json or args.output_root / "projection_sweep_summary.json"
     if rows:
         metrics_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -658,6 +819,12 @@ def write_sweep_outputs(
             writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(ranked)
+    if sequence_rows:
+        sequence_metrics_csv.parent.mkdir(parents=True, exist_ok=True)
+        with sequence_metrics_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(sequence_rows[0]))
+            writer.writeheader()
+            writer.writerows(sequence_rows)
 
     payload = {
         "schema_version": 1,
@@ -673,6 +840,9 @@ def write_sweep_outputs(
             "best_sr_auc": ranked[0].get("sr_auc") if ranked else None,
             "best_delta_sr_auc": ranked[0].get("delta_sr_auc") if ranked else None,
             "metrics_csv": str(metrics_csv),
+            "sequence_metrics_csv": (
+                str(sequence_metrics_csv) if sequence_rows else None
+            ),
         },
         "baseline_metrics": baseline_metrics,
         "top_configs": ranked[: args.top_k],

@@ -1,4 +1,5 @@
 import importlib.util
+import csv
 import json
 import subprocess
 import sys
@@ -112,6 +113,7 @@ def test_replay_projection_sweep_help_runs_as_script():
     assert "--replay-output-confidence-field" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
+    assert "--sequence-metrics-csv" in help_text
 
 
 def test_replay_projection_sweep_grid_parses_dispatch_strings(tmp_path, monkeypatch):
@@ -288,8 +290,24 @@ def test_replay_projection_sweep_reports_baseline_deltas(tmp_path, monkeypatch):
     assert payload["summary"]["rank_metric"] == "delta_sr_auc"
     assert payload["summary"]["best_delta_sr_auc"] > 0.0
     assert payload["summary"]["best_rank_metric"] == payload["summary"]["best_delta_sr_auc"]
+    assert payload["summary"]["sequence_metrics_csv"] is not None
     top_config = payload["top_configs"][0]
     assert top_config["delta_sr_auc"] > 0.0
     assert top_config["delta_pr_auc"] > 0.0
     assert top_config["delta_npr_auc"] > 0.0
     assert top_config["mean_iou"] > payload["baseline_metrics"]["mean_iou"]
+    assert top_config["sequence_delta_sr_positive_count"] == 1
+    assert top_config["sequence_delta_sr_negative_count"] == 0
+    assert top_config["best_sequence_delta_sr_sequence"] == "seq1"
+    assert top_config["worst_sequence_delta_sr_sequence"] == "seq1"
+
+    sequence_metrics_csv = output_root / "projection_sweep_sequence_metrics.csv"
+    assert sequence_metrics_csv.exists()
+    with sequence_metrics_csv.open(newline="", encoding="utf-8") as handle:
+        sequence_rows = list(csv.DictReader(handle))
+    assert len(sequence_rows) == 1
+    assert sequence_rows[0]["config_id"] == top_config["config_id"]
+    assert sequence_rows[0]["sequence"] == "seq1"
+    assert float(sequence_rows[0]["delta_sr_auc"]) > 0.0
+    assert float(sequence_rows[0]["delta_pr_auc"]) > 0.0
+    assert int(sequence_rows[0]["accepted_refinement_count"]) == 1
