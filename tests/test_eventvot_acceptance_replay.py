@@ -502,6 +502,76 @@ def test_acceptance_replay_motion_prediction_gate_rejects_inconsistent_update():
     assert decision.motion_prediction_error_ratio > 0.50
 
 
+def test_acceptance_replay_can_hold_rejected_center_correction():
+    module = _load_module()
+    frames = [
+        {
+            "frame_index": 0,
+            "fallback_reason": "initial_frame",
+            "refiner_output_xywh": [8.0, 8.0, 10.0, 10.0],
+        },
+        {
+            "frame_index": 1,
+            "fallback_reason": None,
+            "refiner_output_xywh": [11.0, 8.0, 10.0, 10.0],
+            "refined_bbox": {
+                "x_min": 11.0,
+                "y_min": 8.0,
+                "x_max": 21.0,
+                "y_max": 18.0,
+            },
+            "used_event_count": 32,
+            "active_measurement_count": 16,
+            "mean_event_activity": 0.8,
+        },
+        {
+            "frame_index": 2,
+            "fallback_reason": None,
+            "refiner_output_xywh": [99.0, 99.0, 10.0, 10.0],
+            "refined_bbox": {
+                "x_min": 99.0,
+                "y_min": 99.0,
+                "x_max": 109.0,
+                "y_max": 109.0,
+            },
+            "used_event_count": 0,
+            "active_measurement_count": 0,
+            "mean_event_activity": 0.0,
+        },
+    ]
+
+    replayed, counts, decisions = module.replay_sequence_boxes(
+        "seq1",
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [9.0, 8.0, 10.0, 10.0],
+                [10.0, 8.0, 10.0, 10.0],
+            ]
+        ),
+        frames,
+        module.ReplayAcceptanceConfig(
+            max_rejected_center_hold_frames=1,
+            rejected_center_hold_decay=1.0,
+        ),
+    )
+
+    np.testing.assert_allclose(
+        replayed,
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [11.0, 8.0, 10.0, 10.0],
+                [12.0, 8.0, 10.0, 10.0],
+            ]
+        ),
+    )
+    assert counts["accepted"] == 1
+    assert counts["held_rejected_center"] == 1
+    assert decisions[1]["held_rejected_center_correction"]
+    assert decisions[1]["rejected_center_hold_age"] == 1
+
+
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
     module = _load_module()
     base_results = tmp_path / "base"
@@ -716,6 +786,8 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
     assert "--max-motion-prediction-error-ratio" in help_text
+    assert "--max-rejected-center-hold-frames" in help_text
+    assert "--rejected-center-hold-decay" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text

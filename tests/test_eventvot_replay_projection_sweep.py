@@ -118,6 +118,8 @@ def test_replay_projection_sweep_help_runs_as_script():
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
     assert "--max-motion-prediction-error-ratio" in help_text
+    assert "--max-rejected-center-hold-frames" in help_text
+    assert "--rejected-center-hold-decay" in help_text
     assert "--sequence-metrics-csv" in help_text
 
 
@@ -187,12 +189,16 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
             "diagnostic 0.75",
             "--max-motion-prediction-error-ratio",
             "diagnostic 0.50",
+            "--max-rejected-center-hold-frames",
+            "diagnostic 2",
+            "--rejected-center-hold-decay",
+            "diagnostic 0.50",
         ]
     )
 
     configs = module.iter_sweep_grid(args)
 
-    assert len(configs) == 48
+    assert len(configs) == 192
     assert sorted({config.output_projection.mode for config in configs}) == [
         "box",
         "center-only",
@@ -208,6 +214,8 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
     } in overrides
     assert {"max_temporal_center_shift_ratio": 0.75} in overrides
     assert {"max_motion_prediction_error_ratio": 0.50} in overrides
+    assert {"max_rejected_center_hold_frames": 2} in overrides
+    assert {"rejected_center_hold_decay": 0.50} in overrides
 
 
 def test_replay_projection_sweep_rewrites_result_files(tmp_path, monkeypatch):

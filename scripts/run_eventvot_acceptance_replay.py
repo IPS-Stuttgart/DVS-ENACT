@@ -33,13 +33,16 @@ if str(SCRIPT_DIR) not in sys.path:
 from run_eventvot_refinement import (  # noqa: E402
     area_ratio_xywh,
     box_iou_xywh,
+    center_offset_xywh,
     center_shift_ratio_xywh,
     load_xywh_result_file,
     resolve_base_result_file,
     resolve_eventvot_split_root,
+    rejected_center_hold_output_xywh,
     save_xywh_result_file,
     motion_prediction_error_ratio_xywh,
     size_change_ratio_xywh,
+    validate_rejected_center_hold_config,
 )
 from run_eventvot_refinement_modes import (  # noqa: E402
     PROJECTION_CONFIDENCE_FIELDS,
@@ -81,6 +84,8 @@ class ReplayAcceptanceConfig:
     max_temporal_center_shift_ratio: float | None = None
     max_temporal_size_change_ratio: float | None = None
     max_motion_prediction_error_ratio: float | None = None
+    max_rejected_center_hold_frames: int = 0
+    rejected_center_hold_decay: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -322,6 +327,8 @@ def _add_policy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-temporal-center-shift-ratio", type=float)
     parser.add_argument("--max-temporal-size-change-ratio", type=float)
     parser.add_argument("--max-motion-prediction-error-ratio", type=float)
+    parser.add_argument("--max-rejected-center-hold-frames", type=int)
+    parser.add_argument("--rejected-center-hold-decay", type=float)
 
 
 def options_from_args(args: argparse.Namespace) -> EventVOTAcceptanceReplayOptions:
@@ -355,6 +362,10 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
     config = options.acceptance_config or acceptance_config_from_diagnostics(
         diagnostics,
         options.config_overrides,
+    )
+    validate_rejected_center_hold_config(
+        config.max_rejected_center_hold_frames,
+        config.rejected_center_hold_decay,
     )
     output_projection = output_projection_config_from_diagnostics(
         options.output_projection_config,
@@ -416,6 +427,9 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
         "sequence_count": len(sequence_outputs),
         "frame_count": sum(output["frame_count"] for output in sequence_outputs),
         "accepted_refinement_count": int(aggregate_counts.get("accepted", 0)),
+        "held_rejected_center_count": int(
+            aggregate_counts.get("held_rejected_center", 0)
+        ),
         "acceptance_counts": dict(sorted(aggregate_counts.items())),
         "metrics": metrics,
         "output_results": str(options.output_results),
@@ -642,6 +656,8 @@ def replay_sequence_boxes(
     previous_accepted_projected_center: np.ndarray | None = None
     previous_accepted_projected_size: np.ndarray | None = None
     previous_accepted_candidate_center: np.ndarray | None = None
+    held_center_offset: np.ndarray | None = None
+    center_hold_age = 0
 
     if not frames:
         counts["missing_frame_diagnostics"] += int(base_boxes.shape[0])
@@ -668,6 +684,8 @@ def replay_sequence_boxes(
         )
         reason_key = "accepted" if decision.accepted else decision.rejection_reasons[0]
         counts[reason_key] += 1
+        held_rejected_center = False
+        rejected_center_hold_age = 0
         if decision.accepted:
             replayed_output = frame_projected_output_xywh(
                 base_boxes[frame_index],
@@ -678,6 +696,8 @@ def replay_sequence_boxes(
                 previous_projected_size=previous_accepted_projected_size,
             )
             replayed_boxes[frame_index] = replayed_output
+            held_center_offset = center_offset_xywh(base_boxes[frame_index], replayed_output)
+            center_hold_age = 0
             if output_projection.mode != "diagnostic":
                 if (
                     output_projection.center_smoothing is not None
@@ -694,11 +714,31 @@ def replay_sequence_boxes(
                     and output_projection.mode != "center-only"
                 ):
                     previous_accepted_projected_size = replayed_output[2:].copy()
+        else:
+            held_output = rejected_center_hold_output_xywh(
+                base_boxes[frame_index],
+                held_center_offset,
+                next_hold_age=center_hold_age + 1,
+                max_hold_frames=config.max_rejected_center_hold_frames,
+                decay=config.rejected_center_hold_decay,
+            )
+            if held_output is None:
+                held_center_offset = None
+                center_hold_age = 0
+            else:
+                replayed_boxes[frame_index] = held_output
+                center_hold_age += 1
+                rejected_center_hold_age = center_hold_age
+                held_rejected_center = True
+                counts["held_rejected_center"] += 1
         decision_records.append(
             {
                 "sequence": sequence_name,
                 "frame_index": frame_index,
                 **decision_to_dict(decision),
+                "held_rejected_center_correction": held_rejected_center,
+                "rejected_center_hold_age": rejected_center_hold_age,
+                "output_xywh": replayed_boxes[frame_index].astype(float).tolist(),
             }
         )
 

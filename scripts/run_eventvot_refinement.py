@@ -47,6 +47,8 @@ class EventVOTAcceptanceConfig:
     max_temporal_center_shift_ratio: float | None = None
     max_temporal_size_change_ratio: float | None = None
     max_motion_prediction_error_ratio: float | None = None
+    max_rejected_center_hold_frames: int = 0
+    rejected_center_hold_decay: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -405,6 +407,10 @@ def refine_sequence(
 ) -> dict[str, Any]:
     """Refine one EventVOT sequence result file."""
     acceptance_config = acceptance_config or EventVOTAcceptanceConfig()
+    validate_rejected_center_hold_config(
+        acceptance_config.max_rejected_center_hold_frames,
+        acceptance_config.rejected_center_hold_decay,
+    )
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
@@ -429,6 +435,8 @@ def refine_sequence(
         reset_refiner_state()
 
     refined_boxes = np.array(base_boxes, dtype=float, copy=True)
+    held_center_offset: np.ndarray | None = None
+    center_hold_age = 0
     timings = np.zeros(frame_count, dtype=float)
     frames: list[dict[str, Any]] = [
         {
@@ -455,6 +463,9 @@ def refine_sequence(
             "motion_prediction_error_ratio": None,
             "active_fraction": None,
             "quadratic_form_per_active_measurement": None,
+            "held_rejected_center_correction": False,
+            "rejected_center_hold_age": 0,
+            "rejected_center_hold_decay": 1.0,
         }
     ]
 
@@ -485,11 +496,26 @@ def refine_sequence(
         )
         if observe_refinement_decision is not None:
             observe_refinement_decision(base_boxes[frame_index], result, decision.accepted)
-        refined_boxes[frame_index] = (
-            refiner_output
-            if decision.accepted
-            else np.asarray(base_boxes[frame_index], dtype=float)
-        )
+        held_output = None
+        if decision.accepted:
+            refined_boxes[frame_index] = refiner_output
+            held_center_offset = center_offset_xywh(base_boxes[frame_index], refiner_output)
+            center_hold_age = 0
+        else:
+            held_output = rejected_center_hold_output_xywh(
+                base_boxes[frame_index],
+                held_center_offset,
+                next_hold_age=center_hold_age + 1,
+                max_hold_frames=acceptance_config.max_rejected_center_hold_frames,
+                decay=acceptance_config.rejected_center_hold_decay,
+            )
+            if held_output is None:
+                refined_boxes[frame_index] = np.asarray(base_boxes[frame_index], dtype=float)
+                center_hold_age = 0
+                held_center_offset = None
+            else:
+                refined_boxes[frame_index] = held_output
+                center_hold_age += 1
         frame_record = result.to_dict()
         refiner_output_bbox = frame_record.get("output_bbox")
         frame_record.update(
@@ -512,6 +538,15 @@ def refine_sequence(
                 "quadratic_form_per_active_measurement": (
                     decision.quadratic_form_per_active_measurement
                 ),
+                "held_rejected_center_correction": held_output is not None,
+                "rejected_center_hold_age": int(center_hold_age)
+                if held_output is not None
+                else 0,
+                "rejected_center_hold_decay": float(
+                    acceptance_config.rejected_center_hold_decay
+                )
+                if held_output is not None
+                else 1.0,
                 "refiner_output_bbox": refiner_output_bbox,
                 "refiner_output_xywh": refiner_output.astype(float).tolist(),
                 "output_bbox": xywh_to_diagnostic_bbox(refined_boxes[frame_index]),
@@ -535,6 +570,9 @@ def refine_sequence(
         1 for frame in frames if frame["fallback_reason"] is None
     )
     accepted_refinement_count = sum(1 for frame in frames if frame["accept_refinement"])
+    held_rejected_center_count = sum(
+        1 for frame in frames if frame.get("held_rejected_center_correction")
+    )
     used_event_counts = [int(frame["used_event_count"]) for frame in frames[1:]]
     return {
         "sequence": sequence_name,
@@ -545,6 +583,7 @@ def refine_sequence(
         "frame_count": frame_count,
         "refined_frame_count": int(accepted_refinement_count),
         "accepted_refinement_count": int(accepted_refinement_count),
+        "held_rejected_center_count": int(held_rejected_center_count),
         "refiner_success_frame_count": int(refiner_success_frame_count),
         "fallback_counts": dict(sorted(fallback_counts.items())),
         "acceptance_counts": dict(sorted(acceptance_counts.items())),
@@ -582,6 +621,7 @@ def summarize_skipped_sequence(
         "frame_count": frame_count,
         "refined_frame_count": changed_frame_count,
         "accepted_refinement_count": changed_frame_count,
+        "held_rejected_center_count": 0,
         "refiner_success_frame_count": 0,
         "fallback_counts": {"skipped_existing_output": frame_count},
         "acceptance_counts": {"skipped_existing_output": frame_count},
@@ -691,6 +731,10 @@ def summarize_sequence_results(sequence_summaries: Iterable[dict[str, Any]]) -> 
     accepted_refinement_count = sum(
         int(summary["accepted_refinement_count"]) for summary in sequence_summaries
     )
+    held_rejected_center_count = sum(
+        int(summary.get("held_rejected_center_count", 0))
+        for summary in sequence_summaries
+    )
     refiner_success_frame_count = sum(
         int(summary["refiner_success_frame_count"]) for summary in sequence_summaries
     )
@@ -702,6 +746,7 @@ def summarize_sequence_results(sequence_summaries: Iterable[dict[str, Any]]) -> 
         "frame_count": int(frame_count),
         "refined_frame_count": int(refined_frame_count),
         "accepted_refinement_count": int(accepted_refinement_count),
+        "held_rejected_center_count": int(held_rejected_center_count),
         "refiner_success_frame_count": int(refiner_success_frame_count),
         "skipped_existing_output_count": int(skipped_existing_output_count),
         "fallback_counts": dict(sorted(fallback_counts.items())),
@@ -953,6 +998,52 @@ def motion_prediction_error_ratio_xywh(
     proposed_center = proposed[:2] + 0.5 * proposed[2:]
     predicted_center = previous_output_center + candidate_center - previous_candidate_center
     return float(np.linalg.norm(proposed_center - predicted_center) / candidate_diagonal)
+
+
+def center_offset_xywh(candidate_xywh: np.ndarray, output_xywh: np.ndarray) -> np.ndarray:
+    """Return output-center offset from the base tracker candidate center."""
+    candidate = np.asarray(candidate_xywh, dtype=float)
+    output = np.asarray(output_xywh, dtype=float)
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    output_center = output[:2] + 0.5 * output[2:]
+    return np.asarray(output_center - candidate_center, dtype=float)
+
+
+def rejected_center_hold_output_xywh(
+    candidate_xywh: np.ndarray,
+    center_offset: np.ndarray | None,
+    *,
+    next_hold_age: int,
+    max_hold_frames: int,
+    decay: float,
+) -> np.ndarray | None:
+    """Return a conservative held center correction for a rejected frame."""
+    validate_rejected_center_hold_config(max_hold_frames, decay)
+    if center_offset is None:
+        return None
+    hold_frames = int(max_hold_frames)
+    age = int(next_hold_age)
+    if hold_frames <= 0 or age <= 0 or age > hold_frames:
+        return None
+
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    offset = np.asarray(center_offset, dtype=float).reshape(2)
+    if not np.all(np.isfinite(offset)):
+        return None
+    strength = float(decay) ** age
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    held_center = candidate_center + strength * offset
+    output = np.array(candidate, dtype=float, copy=True)
+    output[:2] = held_center - 0.5 * output[2:]
+    return output
+
+
+def validate_rejected_center_hold_config(max_hold_frames: int, decay: float) -> None:
+    """Raise ValueError for invalid rejected-frame center-hold settings."""
+    if int(max_hold_frames) < 0:
+        raise ValueError("max_rejected_center_hold_frames must be non-negative")
+    if not np.isfinite(float(decay)) or not 0.0 <= float(decay) <= 1.0:
+        raise ValueError("rejected_center_hold_decay must be between 0 and 1")
 
 
 def bbox_dict_to_xywh(bbox: dict[str, Any]) -> np.ndarray:
@@ -1489,6 +1580,8 @@ def add_acceptance_arguments(
     parser.add_argument("--max-temporal-center-shift-ratio", type=float)
     parser.add_argument("--max-temporal-size-change-ratio", type=float)
     parser.add_argument("--max-motion-prediction-error-ratio", type=float)
+    parser.add_argument("--max-rejected-center-hold-frames", type=int, default=0)
+    parser.add_argument("--rejected-center-hold-decay", type=float, default=1.0)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1533,6 +1626,8 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
         max_temporal_center_shift_ratio=args.max_temporal_center_shift_ratio,
         max_temporal_size_change_ratio=args.max_temporal_size_change_ratio,
         max_motion_prediction_error_ratio=args.max_motion_prediction_error_ratio,
+        max_rejected_center_hold_frames=args.max_rejected_center_hold_frames,
+        rejected_center_hold_decay=args.rejected_center_hold_decay,
     )
 
 

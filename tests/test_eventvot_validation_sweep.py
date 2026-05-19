@@ -144,14 +144,18 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         "none 0.75",
         "--max-motion-prediction-error-ratio",
         "none 0.50",
+        "--max-rejected-center-hold-frames",
+        "0 2",
+        "--rejected-center-hold-decay",
+        "1.0 0.50",
         "--dry-run",
     )
 
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 16
-    assert payload["summary"]["config_count"] == 16
+    assert len(grid) == 64
+    assert payload["summary"]["config_count"] == 64
     assert sorted({config["min_accept_used_events"] for config in grid}) == [10, 20]
     assert sorted({config["min_accept_candidate_iou"] for config in grid}) == [
         0.85,
@@ -172,6 +176,14 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
             if config["max_motion_prediction_error_ratio"] is not None
         }
     ) == [0.50]
+    assert sorted({config["max_rejected_center_hold_frames"] for config in grid}) == [
+        0,
+        2,
+    ]
+    assert sorted({config["rejected_center_hold_decay"] for config in grid}) == [
+        0.50,
+        1.0,
+    ]
     assert all(config["refinement_mode"] == "box" for config in grid)
 
 
@@ -319,6 +331,8 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert config["max_temporal_center_shift_ratio"] is None
     assert config["max_temporal_size_change_ratio"] is None
     assert config["max_motion_prediction_error_ratio"] is None
+    assert config["max_rejected_center_hold_frames"] == 0
+    assert config["rejected_center_hold_decay"] == 1.0
     assert acceptance.min_raw_candidate_iou is None
     assert acceptance.min_raw_candidate_area_ratio is None
     assert acceptance.max_raw_candidate_area_ratio is None
@@ -330,6 +344,8 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert acceptance.max_temporal_center_shift_ratio is None
     assert acceptance.max_temporal_size_change_ratio is None
     assert acceptance.max_motion_prediction_error_ratio is None
+    assert acceptance.max_rejected_center_hold_frames == 0
+    assert acceptance.rejected_center_hold_decay == 1.0
 
 
 def test_validation_sweep_optional_none_token_can_be_swept_with_values(monkeypatch):
@@ -434,6 +450,8 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         "max_temporal_center_shift_ratio": 0.75,
         "max_temporal_size_change_ratio": 0.50,
         "max_motion_prediction_error_ratio": 0.40,
+        "max_rejected_center_hold_frames": 2,
+        "rejected_center_hold_decay": 0.75,
     }
 
     acceptance = module.acceptance_config_from_config(config)
@@ -456,6 +474,8 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.max_temporal_center_shift_ratio == 0.75
     assert acceptance.max_temporal_size_change_ratio == 0.50
     assert acceptance.max_motion_prediction_error_ratio == 0.40
+    assert acceptance.max_rejected_center_hold_frames == 2
+    assert acceptance.rejected_center_hold_decay == 0.75
 
 
 def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypatch):

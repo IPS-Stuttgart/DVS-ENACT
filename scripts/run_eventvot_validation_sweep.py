@@ -23,6 +23,7 @@ from run_eventvot_refinement import (
     resolve_output_results_root,
     resolve_sequence_names,
     run as run_eventvot_refinement,
+    validate_rejected_center_hold_config,
 )
 from run_eventvot_refinement_modes import (
     PROJECTION_CONFIDENCE_FIELDS,
@@ -89,6 +90,8 @@ ACCEPTANCE_GRID_KEYS = (
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
     "max_motion_prediction_error_ratio",
+    "max_rejected_center_hold_frames",
+    "rejected_center_hold_decay",
 )
 OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_raw_candidate_iou",
@@ -127,6 +130,7 @@ INT_GRID_KEYS = {
     "min_events",
     "min_accept_used_events",
     "min_accept_active_measurements",
+    "max_rejected_center_hold_frames",
 }
 CONFIG_ID_KEYS = REFINER_GRID_KEYS + PROJECTION_GRID_KEYS + ACCEPTANCE_GRID_KEYS
 
@@ -471,6 +475,24 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Acceptance sweep values for max error from previous output plus "
             "base-tracker motion; use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--max-rejected-center-hold-frames",
+        nargs="+",
+        default=("0",),
+        help=(
+            "Output-policy sweep values for how many rejected frames may reuse "
+            "the last accepted center correction. 0 disables the hold."
+        ),
+    )
+    parser.add_argument(
+        "--rejected-center-hold-decay",
+        nargs="+",
+        default=("1.0",),
+        help=(
+            "Output-policy sweep values for the per-frame center-hold decay. "
+            "1 keeps the full offset; 0 drops it immediately."
         ),
     )
 
@@ -836,6 +858,16 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--max-motion-prediction-error-ratio",
             allow_none=True,
         ),
+        "max_rejected_center_hold_frames": parse_sweep_values(
+            args.max_rejected_center_hold_frames,
+            cast=int,
+            argument_name="--max-rejected-center-hold-frames",
+        ),
+        "rejected_center_hold_decay": parse_sweep_values(
+            args.rejected_center_hold_decay,
+            cast=float,
+            argument_name="--rejected-center-hold-decay",
+        ),
     }
 
 
@@ -1015,6 +1047,10 @@ def make_refiner(
 
 
 def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcceptanceConfig:
+    validate_rejected_center_hold_config(
+        int(config["max_rejected_center_hold_frames"]),
+        float(config["rejected_center_hold_decay"]),
+    )
     return EventVOTAcceptanceConfig(
         min_used_event_count=int(config["min_accept_used_events"]),
         min_active_measurement_count=int(config["min_accept_active_measurements"]),
@@ -1064,6 +1100,8 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
             config,
             "max_motion_prediction_error_ratio",
         ),
+        max_rejected_center_hold_frames=int(config["max_rejected_center_hold_frames"]),
+        rejected_center_hold_decay=float(config["rejected_center_hold_decay"]),
     )
 
 
