@@ -87,6 +87,7 @@ ACCEPTANCE_GRID_KEYS = (
     "min_mean_event_polarity_weight",
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
+    "min_event_support_score",
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
     "max_motion_prediction_error_ratio",
@@ -103,6 +104,7 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_mean_event_polarity_weight",
     "max_quadratic_form_per_active_measurement",
     "min_active_fraction",
+    "min_event_support_score",
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
     "max_motion_prediction_error_ratio",
@@ -451,6 +453,15 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         default=("none",),
         help="Acceptance sweep values for minimum active fraction; use 'none' to disable.",
+    )
+    parser.add_argument(
+        "--min-event-support-score",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Acceptance sweep values for minimum composite event-support score; "
+            "use 'none' to disable."
+        ),
     )
     parser.add_argument(
         "--max-temporal-center-shift-ratio",
@@ -852,6 +863,12 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             argument_name="--min-active-fraction",
             allow_none=True,
         ),
+        "min_event_support_score": parse_sweep_values(
+            args.min_event_support_score,
+            cast=float,
+            argument_name="--min-event-support-score",
+            allow_none=True,
+        ),
         "max_temporal_center_shift_ratio": parse_sweep_values(
             args.max_temporal_center_shift_ratio,
             cast=float,
@@ -1108,6 +1125,10 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
             "max_quadratic_form_per_active_measurement",
         ),
         min_active_fraction=optional_float_config_value(config, "min_active_fraction"),
+        min_event_support_score=optional_float_config_value(
+            config,
+            "min_event_support_score",
+        ),
         max_temporal_center_shift_ratio=optional_float_config_value(
             config,
             "max_temporal_center_shift_ratio",

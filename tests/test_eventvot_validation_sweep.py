@@ -171,6 +171,8 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         "none 0.75",
         "--max-motion-prediction-error-ratio",
         "none 0.50",
+        "--min-event-support-score",
+        "none 0.40",
         "--max-rejected-center-hold-frames",
         "0 2",
         "--rejected-center-hold-decay",
@@ -183,8 +185,8 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 128
-    assert payload["summary"]["config_count"] == 128
+    assert len(grid) == 256
+    assert payload["summary"]["config_count"] == 256
     assert sorted({config["min_accept_used_events"] for config in grid}) == [10, 20]
     assert sorted({config["min_accept_candidate_iou"] for config in grid}) == [
         0.85,
@@ -205,6 +207,13 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
             if config["max_motion_prediction_error_ratio"] is not None
         }
     ) == [0.50]
+    assert sorted(
+        {
+            config["min_event_support_score"]
+            for config in grid
+            if config["min_event_support_score"] is not None
+        }
+    ) == [0.40]
     assert sorted({config["max_rejected_center_hold_frames"] for config in grid}) == [
         0,
         2,
@@ -364,6 +373,7 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert config["min_mean_event_polarity_weight"] is None
     assert config["max_quadratic_form_per_active_measurement"] is None
     assert config["min_active_fraction"] is None
+    assert config["min_event_support_score"] is None
     assert config["max_temporal_center_shift_ratio"] is None
     assert config["max_temporal_size_change_ratio"] is None
     assert config["max_motion_prediction_error_ratio"] is None
@@ -378,6 +388,7 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert acceptance.min_mean_event_polarity_weight is None
     assert acceptance.max_quadratic_form_per_active_measurement is None
     assert acceptance.min_active_fraction is None
+    assert acceptance.min_event_support_score is None
     assert acceptance.max_temporal_center_shift_ratio is None
     assert acceptance.max_temporal_size_change_ratio is None
     assert acceptance.max_motion_prediction_error_ratio is None
@@ -476,7 +487,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         min_raw_candidate_area_ratio max_raw_candidate_area_ratio
         max_raw_center_shift_ratio min_polarity_consistency_fraction
         min_mean_event_polarity_weight max_quadratic_form_per_active_measurement
-        min_active_fraction max_temporal_center_shift_ratio
+        min_active_fraction min_event_support_score max_temporal_center_shift_ratio
         max_temporal_size_change_ratio max_motion_prediction_error_ratio
         max_rejected_center_hold_frames rejected_center_hold_decay
         max_rejected_center_hold_support_score
@@ -497,6 +508,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         0.10,
         2.0,
         0.50,
+        0.40,
         0.75,
         0.50,
         0.40,
@@ -523,6 +535,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.min_mean_event_polarity_weight == 0.10
     assert acceptance.max_quadratic_form_per_active_measurement == 2.0
     assert acceptance.min_active_fraction == 0.50
+    assert acceptance.min_event_support_score == 0.40
     assert acceptance.max_temporal_center_shift_ratio == 0.75
     assert acceptance.max_temporal_size_change_ratio == 0.50
     assert acceptance.max_motion_prediction_error_ratio == 0.40

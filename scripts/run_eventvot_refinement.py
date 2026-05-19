@@ -55,6 +55,7 @@ class EventVOTAcceptanceConfig:
     min_mean_event_polarity_weight: float | None = None
     max_quadratic_form_per_active_measurement: float | None = None
     min_active_fraction: float | None = None
+    min_event_support_score: float | None = None
     max_temporal_center_shift_ratio: float | None = None
     max_temporal_size_change_ratio: float | None = None
     max_motion_prediction_error_ratio: float | None = None
@@ -1039,6 +1040,7 @@ def evaluate_refinement_acceptance(
         result.quadratic_form,
         int(result.active_measurement_count),
     )
+    support_score = event_support_score(result)
     if not config.enabled:
         rejection_reasons = () if result.fallback_reason is None else ("fallback_reason",)
         return EventVOTAcceptanceDecision(
@@ -1127,6 +1129,12 @@ def evaluate_refinement_acceptance(
         active_fraction,
         config.min_active_fraction,
         missing_reason="active_fraction_missing",
+    )
+    _append_min_float_gate(
+        rejection_reasons,
+        "event_support_score",
+        support_score,
+        config.min_event_support_score,
     )
     _append_max_float_gate(
         rejection_reasons,
@@ -1837,6 +1845,7 @@ def add_acceptance_arguments(
     parser.add_argument("--min-mean-event-polarity-weight", type=float)
     parser.add_argument("--max-quadratic-form-per-active-measurement", type=float)
     parser.add_argument("--min-active-fraction", type=float)
+    parser.add_argument("--min-event-support-score", type=float)
     parser.add_argument("--max-temporal-center-shift-ratio", type=float)
     parser.add_argument("--max-temporal-size-change-ratio", type=float)
     parser.add_argument("--max-motion-prediction-error-ratio", type=float)
@@ -1885,6 +1894,7 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
             args.max_quadratic_form_per_active_measurement
         ),
         min_active_fraction=args.min_active_fraction,
+        min_event_support_score=args.min_event_support_score,
         max_temporal_center_shift_ratio=args.max_temporal_center_shift_ratio,
         max_temporal_size_change_ratio=args.max_temporal_size_change_ratio,
         max_motion_prediction_error_ratio=args.max_motion_prediction_error_ratio,

@@ -128,6 +128,7 @@ def test_replay_projection_sweep_help_runs_as_script():
     assert "--replay-output-confidence-field" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
+    assert "--min-event-support-score" in help_text
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
     assert "--max-motion-prediction-error-ratio" in help_text
@@ -203,6 +204,8 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
             "diagnostic 0.75",
             "--max-motion-prediction-error-ratio",
             "diagnostic 0.50",
+            "--min-event-support-score",
+            "diagnostic 0.40",
             "--max-rejected-center-hold-frames",
             "diagnostic 2",
             "--rejected-center-hold-decay",
@@ -214,7 +217,7 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
 
     configs = module.iter_sweep_grid(args)
 
-    assert len(configs) == 384
+    assert len(configs) == 768
     assert sorted({config.output_projection.mode for config in configs}) == [
         "box",
         "center-only",
@@ -230,6 +233,7 @@ def test_replay_projection_sweep_acceptance_grid_parses_dispatch_strings(
     } in overrides
     assert {"max_temporal_center_shift_ratio": 0.75} in overrides
     assert {"max_motion_prediction_error_ratio": 0.50} in overrides
+    assert {"min_event_support_score": 0.40} in overrides
     assert {"max_rejected_center_hold_frames": 2} in overrides
     assert {"rejected_center_hold_decay": 0.50} in overrides
     assert {"max_rejected_center_hold_support_score": 0.25} in overrides

@@ -529,6 +529,18 @@ def test_eventvot_acceptance_rejects_base_motion_inconsistent_update():
     assert decision.motion_prediction_error_ratio > 0.50
 
 
+def test_eventvot_acceptance_rejects_low_event_support_score():
+    module = _load_module()
+    decision = module.evaluate_refinement_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _FakeResult([10.0, 10.0, 20.0, 20.0]),
+        module.EventVOTAcceptanceConfig(min_event_support_score=0.50),
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reasons == ("event_support_score",)
+
+
 def test_eventvot_refinement_can_hold_rejected_center_correction(tmp_path):
     module = _load_module()
     split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
@@ -701,6 +713,7 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--max-accept-center-shift-ratio" in help_text
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-active-fraction" in help_text
+    assert "--min-event-support-score" in help_text
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
     assert "--max-motion-prediction-error-ratio" in help_text

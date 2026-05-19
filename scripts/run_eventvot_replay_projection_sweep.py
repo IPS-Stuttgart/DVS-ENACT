@@ -237,6 +237,11 @@ def add_acceptance_grid_arguments(parser: argparse.ArgumentParser) -> None:
         default=("diagnostic",),
     )
     parser.add_argument(
+        "--min-event-support-score",
+        nargs="+",
+        default=("diagnostic",),
+    )
+    parser.add_argument(
         "--max-temporal-center-shift-ratio",
         nargs="+",
         default=("diagnostic",),
@@ -556,6 +561,7 @@ ACCEPTANCE_GRID_SPECS = (
         float,
     ),
     ("min_active_fraction", "--min-active-fraction", float),
+    ("min_event_support_score", "--min-event-support-score", float),
     ("max_temporal_center_shift_ratio", "--max-temporal-center-shift-ratio", float),
     ("max_temporal_size_change_ratio", "--max-temporal-size-change-ratio", float),
     ("max_motion_prediction_error_ratio", "--max-motion-prediction-error-ratio", float),

@@ -197,6 +197,7 @@ def test_confidence_gate_replay_help_mentions_gate_options(monkeypatch):
 
     assert "confidence/memory" in help_text
     assert "--confidence-only" in help_text
+    assert "--min-event-support-score" in help_text
     assert "--gate-motion-model" in help_text
     assert "--gate-rejection-reason" in help_text
     assert "--max-consecutive-memory-frames" in help_text

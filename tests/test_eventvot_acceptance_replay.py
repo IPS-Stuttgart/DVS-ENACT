@@ -132,6 +132,23 @@ def test_acceptance_replay_raw_gate_rejects_bad_unblended_update():
     assert rejected_with_raw_gate.raw_candidate_iou == 0.0
 
 
+def test_acceptance_replay_event_support_score_gate_rejects_weak_support():
+    module = _load_module()
+    decision = module.evaluate_frame_acceptance(
+        np.array([10.0, 10.0, 20.0, 20.0]),
+        _diagnostic_frame(
+            [10.0, 10.0, 20.0, 20.0],
+            used_event_count=64,
+            active_measurement_count=3,
+            mean_event_activity=0.20,
+        ),
+        module.ReplayAcceptanceConfig(min_event_support_score=0.50),
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reasons == ("event_support_score",)
+
+
 def test_acceptance_replay_can_reblend_raw_refinement_before_gating():
     module = _load_module()
     frame = {
@@ -724,6 +741,7 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--min-raw-candidate-iou" in help_text
     assert "--min-polarity-consistency-fraction" in help_text
     assert "--max-quadratic-form-per-active-measurement" in help_text
+    assert "--min-event-support-score" in help_text
     assert "--max-temporal-center-shift-ratio" in help_text
     assert "--max-temporal-size-change-ratio" in help_text
     assert "--max-motion-prediction-error-ratio" in help_text

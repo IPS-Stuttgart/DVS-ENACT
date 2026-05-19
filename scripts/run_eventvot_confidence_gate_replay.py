@@ -177,6 +177,7 @@ def _add_policy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-mean-event-polarity-weight", type=float)
     parser.add_argument("--max-quadratic-form-per-active-measurement", type=float)
     parser.add_argument("--min-active-fraction", type=float)
+    parser.add_argument("--min-event-support-score", type=float)
 
 
 def _add_gate_arguments(parser: argparse.ArgumentParser) -> None:
