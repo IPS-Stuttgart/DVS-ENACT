@@ -431,28 +431,40 @@ def test_validation_sweep_config_id_changes_for_every_grid_key(tmp_path, monkeyp
 
 def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     module = _load_module(monkeypatch)
-    config = {
-        "min_accept_used_events": 40,
-        "min_accept_active_measurements": 8,
-        "min_accept_mean_activity": 0.30,
-        "min_accept_candidate_iou": 0.95,
-        "min_accept_area_ratio": 0.80,
-        "max_accept_area_ratio": 1.10,
-        "max_accept_center_shift_ratio": 0.05,
-        "min_raw_candidate_iou": 0.40,
-        "min_raw_candidate_area_ratio": 0.60,
-        "max_raw_candidate_area_ratio": 1.40,
-        "max_raw_center_shift_ratio": 0.20,
-        "min_polarity_consistency_fraction": 0.75,
-        "min_mean_event_polarity_weight": 0.10,
-        "max_quadratic_form_per_active_measurement": 2.0,
-        "min_active_fraction": 0.50,
-        "max_temporal_center_shift_ratio": 0.75,
-        "max_temporal_size_change_ratio": 0.50,
-        "max_motion_prediction_error_ratio": 0.40,
-        "max_rejected_center_hold_frames": 2,
-        "rejected_center_hold_decay": 0.75,
-    }
+    acceptance_keys = """
+        min_accept_used_events min_accept_active_measurements
+        min_accept_mean_activity min_accept_candidate_iou min_accept_area_ratio
+        max_accept_area_ratio max_accept_center_shift_ratio min_raw_candidate_iou
+        min_raw_candidate_area_ratio max_raw_candidate_area_ratio
+        max_raw_center_shift_ratio min_polarity_consistency_fraction
+        min_mean_event_polarity_weight max_quadratic_form_per_active_measurement
+        min_active_fraction max_temporal_center_shift_ratio
+        max_temporal_size_change_ratio max_motion_prediction_error_ratio
+        max_rejected_center_hold_frames rejected_center_hold_decay
+    """.split()
+    acceptance_values = (
+        40,
+        8,
+        0.30,
+        0.95,
+        0.80,
+        1.10,
+        0.05,
+        0.40,
+        0.60,
+        1.40,
+        0.20,
+        0.75,
+        0.10,
+        2.0,
+        0.50,
+        0.75,
+        0.50,
+        0.40,
+        2,
+        0.75,
+    )
+    config = dict(zip(acceptance_keys, acceptance_values, strict=True))
 
     acceptance = module.acceptance_config_from_config(config)
 

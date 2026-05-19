@@ -24,6 +24,48 @@ def _load_module():
     return module
 
 
+def _diagnostic_frame(output_xywh, *, frame_index=1, mean_event_activity=0.8):
+    x, y, width, height = (float(value) for value in output_xywh)
+    return {
+        "frame_index": frame_index,
+        "fallback_reason": None,
+        "refiner_output_xywh": [x, y, width, height],
+        "refined_bbox": {
+            "x_min": x,
+            "y_min": y,
+            "x_max": x + width,
+            "y_max": y + height,
+        },
+        "used_event_count": 32,
+        "active_measurement_count": 16,
+        "mean_event_activity": mean_event_activity,
+    }
+
+
+def _write_replay_diagnostics(
+    path: Path,
+    base_result_file: Path,
+    frames: list[dict],
+    *,
+    acceptance_config: dict | None = None,
+    refiner_config: dict | None = None,
+) -> None:
+    payload = {
+        "options": {"split": "test"},
+        "acceptance_config": acceptance_config or {},
+        "sequences": [
+            {
+                "sequence": "recording_0001",
+                "base_result_file": str(base_result_file),
+                "frames": frames,
+            }
+        ],
+    }
+    if refiner_config is not None:
+        payload["refiner_config"] = refiner_config
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def test_acceptance_replay_raw_gate_rejects_bad_unblended_update():
     module = _load_module()
     frame = {
@@ -275,20 +317,7 @@ def test_acceptance_replay_smooths_replayed_center_with_base_motion():
 
 def test_acceptance_replay_confidence_weights_replayed_projection():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [20.0, 10.0, 20.0, 20.0],
-        "refined_bbox": {
-            "x_min": 20.0,
-            "y_min": 10.0,
-            "x_max": 40.0,
-            "y_max": 30.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.25,
-    }
+    frame = _diagnostic_frame([20.0, 10.0, 20.0, 20.0], mean_event_activity=0.25)
 
     projected = module.frame_projected_output_xywh(
         np.array([10.0, 10.0, 20.0, 20.0]),
@@ -306,20 +335,7 @@ def test_acceptance_replay_confidence_weights_replayed_projection():
 
 def test_acceptance_replay_size_deadband_filters_small_size_changes():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [9.0, 15.0, 102.0, 60.0],
-        "refined_bbox": {
-            "x_min": 9.0,
-            "y_min": 15.0,
-            "x_max": 111.0,
-            "y_max": 75.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.8,
-    }
+    frame = _diagnostic_frame([9.0, 15.0, 102.0, 60.0])
 
     projected = module.frame_projected_output_xywh(
         np.array([10.0, 20.0, 100.0, 50.0]),
@@ -335,20 +351,7 @@ def test_acceptance_replay_size_deadband_filters_small_size_changes():
 
 def test_acceptance_replay_center_deadband_filters_small_center_shifts():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [12.0, 21.0, 100.0, 50.0],
-        "refined_bbox": {
-            "x_min": 12.0,
-            "y_min": 21.0,
-            "x_max": 112.0,
-            "y_max": 71.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.8,
-    }
+    frame = _diagnostic_frame([12.0, 21.0, 100.0, 50.0])
 
     projected = module.frame_projected_output_xywh(
         np.array([10.0, 20.0, 100.0, 50.0]),
@@ -364,20 +367,7 @@ def test_acceptance_replay_center_deadband_filters_small_center_shifts():
 
 def test_acceptance_replay_center_clamp_caps_center_shift():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [10.0, 0.0, 3.0, 4.0],
-        "refined_bbox": {
-            "x_min": 10.0,
-            "y_min": 0.0,
-            "x_max": 13.0,
-            "y_max": 4.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.8,
-    }
+    frame = _diagnostic_frame([10.0, 0.0, 3.0, 4.0])
 
     projected = module.frame_projected_output_xywh(
         np.array([0.0, 0.0, 3.0, 4.0]),
@@ -393,20 +383,7 @@ def test_acceptance_replay_center_clamp_caps_center_shift():
 
 def test_acceptance_replay_size_clamp_caps_size_change():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [0.0, 5.0, 140.0, 80.0],
-        "refined_bbox": {
-            "x_min": 0.0,
-            "y_min": 5.0,
-            "x_max": 140.0,
-            "y_max": 85.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.8,
-    }
+    frame = _diagnostic_frame([0.0, 5.0, 140.0, 80.0])
 
     projected = module.frame_projected_output_xywh(
         np.array([10.0, 20.0, 100.0, 50.0]),
@@ -422,43 +399,24 @@ def test_acceptance_replay_size_clamp_caps_size_change():
 
 def test_acceptance_replay_temporal_gates_reject_output_shocks():
     module = _load_module()
-    frame = {
-        "frame_index": 1,
-        "fallback_reason": None,
-        "refiner_output_xywh": [30.0, 10.0, 40.0, 20.0],
-        "refined_bbox": {
-            "x_min": 30.0,
-            "y_min": 10.0,
-            "x_max": 70.0,
-            "y_max": 30.0,
-        },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
-        "mean_event_activity": 0.8,
-    }
+    frame = _diagnostic_frame([30.0, 10.0, 40.0, 20.0])
+    candidate = np.array([30.0, 10.0, 40.0, 20.0])
 
-    jump_decision = module.evaluate_frame_acceptance(
-        np.array([30.0, 10.0, 40.0, 20.0]),
-        frame,
-        module.ReplayAcceptanceConfig(
-            min_candidate_iou=0.0,
-            max_center_shift_ratio=None,
-            max_temporal_center_shift_ratio=0.50,
-            max_temporal_size_change_ratio=2.0,
-        ),
-        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
-    )
-    size_decision = module.evaluate_frame_acceptance(
-        np.array([30.0, 10.0, 40.0, 20.0]),
-        frame,
-        module.ReplayAcceptanceConfig(
-            min_candidate_iou=0.0,
-            max_center_shift_ratio=None,
-            max_temporal_center_shift_ratio=2.0,
-            max_temporal_size_change_ratio=0.50,
-        ),
-        previous_output_xywh=np.array([30.0, 10.0, 20.0, 20.0]),
-    )
+    def decide(previous_output, *, center_gate, size_gate):
+        return module.evaluate_frame_acceptance(
+            candidate,
+            frame,
+            module.ReplayAcceptanceConfig(
+                min_candidate_iou=0.0,
+                max_center_shift_ratio=None,
+                max_temporal_center_shift_ratio=center_gate,
+                max_temporal_size_change_ratio=size_gate,
+            ),
+            previous_output_xywh=np.asarray(previous_output, dtype=float),
+        )
+
+    jump_decision = decide([0.0, 10.0, 20.0, 20.0], center_gate=0.50, size_gate=2.0)
+    size_decision = decide([30.0, 10.0, 20.0, 20.0], center_gate=2.0, size_gate=0.50)
 
     assert not jump_decision.accepted
     assert jump_decision.rejection_reasons == ("temporal_center_shift_ratio",)
@@ -582,64 +540,35 @@ def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
         encoding="utf-8",
     )
     diagnostics_json = tmp_path / "diagnostics.json"
-    diagnostics_json.write_text(
-        json.dumps(
+    _write_replay_diagnostics(
+        diagnostics_json,
+        base_result_file,
+        [
             {
-                "options": {"split": "test"},
-                "acceptance_config": {
-                    "min_used_event_count": 10,
-                    "min_active_measurement_count": 3,
-                    "min_mean_event_activity": 0.1,
-                    "min_candidate_iou": 0.6,
-                    "min_candidate_area_ratio": 0.5,
-                    "max_candidate_area_ratio": 1.5,
-                    "max_center_shift_ratio": 0.25,
-                },
-                "sequences": [
-                    {
-                        "sequence": "recording_0001",
-                        "base_result_file": str(base_result_file),
-                        "frames": [
-                            {
-                                "frame_index": 0,
-                                "fallback_reason": "initial_frame",
-                                "refiner_output_xywh": [10.0, 10.0, 20.0, 20.0],
-                            },
-                            {
-                                "frame_index": 1,
-                                "fallback_reason": None,
-                                "refiner_output_xywh": [11.5, 10.0, 20.0, 20.0],
-                                "refined_bbox": {
-                                    "x_min": 11.5,
-                                    "y_min": 10.0,
-                                    "x_max": 31.5,
-                                    "y_max": 30.0,
-                                },
-                                "used_event_count": 32,
-                                "active_measurement_count": 16,
-                                "mean_event_activity": 0.8,
-                            },
-                            {
-                                "frame_index": 2,
-                                "fallback_reason": None,
-                                "refiner_output_xywh": [12.2, 10.0, 20.0, 20.0],
-                                "refined_bbox": {
-                                    "x_min": 80.0,
-                                    "y_min": 80.0,
-                                    "x_max": 100.0,
-                                    "y_max": 100.0,
-                                },
-                                "used_event_count": 32,
-                                "active_measurement_count": 16,
-                                "mean_event_activity": 0.8,
-                            },
-                        ],
-                    }
-                ],
+                "frame_index": 0,
+                "fallback_reason": "initial_frame",
+                "refiner_output_xywh": [10.0, 10.0, 20.0, 20.0],
             },
-            indent=2,
-        ),
-        encoding="utf-8",
+            _diagnostic_frame([11.5, 10.0, 20.0, 20.0], frame_index=1),
+            {
+                **_diagnostic_frame([12.2, 10.0, 20.0, 20.0], frame_index=2),
+                "refined_bbox": {
+                    "x_min": 80.0,
+                    "y_min": 80.0,
+                    "x_max": 100.0,
+                    "y_max": 100.0,
+                },
+            },
+        ],
+        acceptance_config={
+            "min_used_event_count": 10,
+            "min_active_measurement_count": 3,
+            "min_mean_event_activity": 0.1,
+            "min_candidate_iou": 0.6,
+            "min_candidate_area_ratio": 0.5,
+            "max_candidate_area_ratio": 1.5,
+            "max_center_shift_ratio": 0.25,
+        },
     )
     output_results = tmp_path / "replayed"
 
@@ -682,51 +611,34 @@ def test_acceptance_replay_run_uses_output_projection_config(tmp_path):
         encoding="utf-8",
     )
     diagnostics_json = tmp_path / "diagnostics.json"
-    diagnostics_json.write_text(
-        json.dumps(
+    projected_frame = _diagnostic_frame([12.0, 10.0, 20.0, 20.0])
+    projected_frame["refined_bbox"] = {
+        "x_min": 21.0,
+        "y_min": 10.0,
+        "x_max": 61.0,
+        "y_max": 30.0,
+    }
+    _write_replay_diagnostics(
+        diagnostics_json,
+        base_result_file,
+        [
             {
-                "options": {"split": "test"},
-                "refiner_config": {"image_width": 100, "image_height": 100},
-                "acceptance_config": {
-                    "min_used_event_count": 10,
-                    "min_active_measurement_count": 3,
-                    "min_mean_event_activity": 0.1,
-                    "min_candidate_iou": 0.0,
-                    "min_candidate_area_ratio": 0.0,
-                    "max_candidate_area_ratio": 10.0,
-                    "max_center_shift_ratio": 10.0,
-                },
-                "sequences": [
-                    {
-                        "sequence": "recording_0001",
-                        "base_result_file": str(base_result_file),
-                        "frames": [
-                            {
-                                "frame_index": 0,
-                                "fallback_reason": "initial_frame",
-                                "refiner_output_xywh": [10.0, 10.0, 20.0, 20.0],
-                            },
-                            {
-                                "frame_index": 1,
-                                "fallback_reason": None,
-                                "refiner_output_xywh": [12.0, 10.0, 20.0, 20.0],
-                                "refined_bbox": {
-                                    "x_min": 21.0,
-                                    "y_min": 10.0,
-                                    "x_max": 61.0,
-                                    "y_max": 30.0,
-                                },
-                                "used_event_count": 32,
-                                "active_measurement_count": 16,
-                                "mean_event_activity": 0.8,
-                            },
-                        ],
-                    }
-                ],
+                "frame_index": 0,
+                "fallback_reason": "initial_frame",
+                "refiner_output_xywh": [10.0, 10.0, 20.0, 20.0],
             },
-            indent=2,
-        ),
-        encoding="utf-8",
+            projected_frame,
+        ],
+        acceptance_config={
+            "min_used_event_count": 10,
+            "min_active_measurement_count": 3,
+            "min_mean_event_activity": 0.1,
+            "min_candidate_iou": 0.0,
+            "min_candidate_area_ratio": 0.0,
+            "max_candidate_area_ratio": 10.0,
+            "max_center_shift_ratio": 10.0,
+        },
+        refiner_config={"image_width": 100, "image_height": 100},
     )
     output_results = tmp_path / "replayed"
 

@@ -98,6 +98,19 @@ def _write_eventvot_fixture(root: Path) -> Path:
     return root
 
 
+def _parse_sweep_args(module, diagnostics_json: Path, output_root: Path, *extra):
+    return module.build_parser().parse_args(
+        [
+            "--diagnostics-json",
+            str(diagnostics_json),
+            "--output-root",
+            str(output_root),
+            "--skip-evaluation",
+            *extra,
+        ]
+    )
+
+
 def test_replay_projection_sweep_help_runs_as_script():
     help_text = subprocess.check_output(
         (sys.executable, str(SCRIPT_PATH), "--help"),
@@ -222,18 +235,14 @@ def test_replay_projection_sweep_rewrites_result_files(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     diagnostics_json = _write_replay_fixture(tmp_path)
     output_root = tmp_path / "sweep"
-    args = module.build_parser().parse_args(
-        [
-            "--diagnostics-json",
-            str(diagnostics_json),
-            "--output-root",
-            str(output_root),
-            "--skip-evaluation",
-            "--replay-output-mode",
-            "box center-only",
-            "--replay-output-blend",
-            "1.0",
-        ]
+    args = _parse_sweep_args(
+        module,
+        diagnostics_json,
+        output_root,
+        "--replay-output-mode",
+        "box center-only",
+        "--replay-output-blend",
+        "1.0",
     )
 
     payload = module.run_projection_sweep(args)
@@ -261,20 +270,16 @@ def test_replay_projection_sweep_can_sweep_acceptance_gates(tmp_path, monkeypatc
     module = _load_module(monkeypatch)
     diagnostics_json = _write_replay_fixture(tmp_path)
     output_root = tmp_path / "sweep"
-    args = module.build_parser().parse_args(
-        [
-            "--diagnostics-json",
-            str(diagnostics_json),
-            "--output-root",
-            str(output_root),
-            "--skip-evaluation",
-            "--replay-output-mode",
-            "box",
-            "--replay-output-blend",
-            "1.0",
-            "--min-accept-active-measurements",
-            "diagnostic 999",
-        ]
+    args = _parse_sweep_args(
+        module,
+        diagnostics_json,
+        output_root,
+        "--replay-output-mode",
+        "box",
+        "--replay-output-blend",
+        "1.0",
+        "--min-accept-active-measurements",
+        "diagnostic 999",
     )
 
     payload = module.run_projection_sweep(args)

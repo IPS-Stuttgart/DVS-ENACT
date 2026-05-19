@@ -25,6 +25,14 @@ def _load_module(monkeypatch):
     return module
 
 
+def _project(module, candidate, refiner_output, /, **kwargs):
+    return module.project_refinement_output(
+        np.asarray(candidate, dtype=float),
+        np.asarray(refiner_output, dtype=float),
+        **kwargs,
+    )
+
+
 def test_center_only_projection_keeps_candidate_size(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -113,9 +121,10 @@ def test_size_only_projection_supports_independent_size_blends(monkeypatch):
 def test_size_only_projection_smooths_previous_accepted_size(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 30.0, 40.0]),
-        np.array([0.0, 10.0, 50.0, 60.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 30.0, 40.0],
+        [0.0, 10.0, 50.0, 60.0],
         refinement_mode="size-only",
         previous_projected_size=np.array([20.0, 20.0]),
         projection_size_smoothing=0.5,
@@ -158,9 +167,10 @@ def test_size_deadband_ignores_tiny_axis_changes(monkeypatch):
 def test_box_size_deadband_preserves_projected_center(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 100.0, 50.0]),
-        np.array([20.0, 30.0, 102.0, 51.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 100.0, 50.0],
+        [20.0, 30.0, 102.0, 51.0],
         refinement_mode="box",
         projection_size_deadband_ratio=0.05,
     )
@@ -171,9 +181,10 @@ def test_box_size_deadband_preserves_projected_center(monkeypatch):
 def test_center_deadband_ignores_tiny_center_shift(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 100.0, 50.0]),
-        np.array([12.0, 21.0, 100.0, 50.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 100.0, 50.0],
+        [12.0, 21.0, 100.0, 50.0],
         refinement_mode="box",
         projection_center_deadband_ratio=0.03,
     )
@@ -184,9 +195,10 @@ def test_center_deadband_ignores_tiny_center_shift(monkeypatch):
 def test_center_deadband_keeps_projected_size(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 100.0, 50.0]),
-        np.array([2.0, 16.0, 120.0, 60.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 100.0, 50.0],
+        [2.0, 16.0, 120.0, 60.0],
         refinement_mode="box",
         projection_center_deadband_ratio=0.03,
     )
@@ -197,9 +209,10 @@ def test_center_deadband_keeps_projected_size(monkeypatch):
 def test_center_clamp_caps_projected_center_shift(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([0.0, 0.0, 3.0, 4.0]),
-        np.array([10.0, 0.0, 3.0, 4.0]),
+    projected = _project(
+        module,
+        [0.0, 0.0, 3.0, 4.0],
+        [10.0, 0.0, 3.0, 4.0],
         refinement_mode="box",
         projection_center_clamp_ratio=1.0,
     )
@@ -236,9 +249,10 @@ def test_box_size_clamp_preserves_projected_center(monkeypatch):
 def test_box_projection_smooths_size_around_projected_center(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 30.0, 40.0]),
-        np.array([20.0, 10.0, 50.0, 60.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 30.0, 40.0],
+        [20.0, 10.0, 50.0, 60.0],
         refinement_mode="box",
         previous_projected_size=np.array([30.0, 40.0]),
         projection_size_smoothing=0.5,
@@ -293,9 +307,10 @@ def test_center_only_projection_smooths_center_with_base_motion(monkeypatch):
 def test_size_only_projection_ignores_center_smoothing(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 30.0, 40.0]),
-        np.array([0.0, 10.0, 50.0, 60.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 30.0, 40.0],
+        [0.0, 10.0, 50.0, 60.0],
         refinement_mode="size-only",
         previous_projected_center=np.array([0.0, 0.0]),
         projection_center_smoothing=0.5,
@@ -307,9 +322,10 @@ def test_size_only_projection_ignores_center_smoothing(monkeypatch):
 def test_projection_confidence_weighting_shrinks_update(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 10.0, 20.0, 20.0]),
-        np.array([20.0, 10.0, 20.0, 20.0]),
+    projected = _project(
+        module,
+        [10.0, 10.0, 20.0, 20.0],
+        [20.0, 10.0, 20.0, 20.0],
         refinement_mode="box",
         projection_confidence_value=0.25,
         projection_confidence_floor=0.0,
@@ -322,9 +338,10 @@ def test_projection_confidence_weighting_shrinks_update(monkeypatch):
 def test_projection_confidence_weighting_missing_value_keeps_candidate(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 10.0, 20.0, 20.0]),
-        np.array([20.0, 10.0, 20.0, 20.0]),
+    projected = _project(
+        module,
+        [10.0, 10.0, 20.0, 20.0],
+        [20.0, 10.0, 20.0, 20.0],
         refinement_mode="box",
         projection_confidence_value=None,
         projection_confidence_floor=0.0,
@@ -337,9 +354,10 @@ def test_projection_confidence_weighting_missing_value_keeps_candidate(monkeypat
 def test_box_projection_preserves_refiner_output(monkeypatch):
     module = _load_module(monkeypatch)
 
-    projected = module.project_refinement_output(
-        np.array([10.0, 20.0, 30.0, 40.0]),
-        np.array([20.0, 10.0, 50.0, 60.0]),
+    projected = _project(
+        module,
+        [10.0, 20.0, 30.0, 40.0],
+        [20.0, 10.0, 50.0, 60.0],
         refinement_mode="box",
     )
 

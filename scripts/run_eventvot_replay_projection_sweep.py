@@ -684,11 +684,7 @@ def make_result_row(
     return {
         "config_id": config_id,
         "output_results": str(result_dir),
-        "acceptance_overrides": json.dumps(
-            config.acceptance_overrides,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
+        "acceptance_overrides": serialized_acceptance_overrides(config),
         **asdict(config.output_projection),
         **{
             f"acceptance_{key}": value
@@ -702,18 +698,7 @@ def make_result_row(
             if refinable_frame_count
             else 0.0
         ),
-        "sr_auc": metrics.get("sr_auc"),
-        "delta_sr_auc": metric_delta(metrics, baseline_metrics, "sr_auc"),
-        "pr_auc": metrics.get("pr_auc"),
-        "delta_pr_auc": metric_delta(metrics, baseline_metrics, "pr_auc"),
-        "pr_20": metrics.get("pr_20"),
-        "delta_pr_20": metric_delta(metrics, baseline_metrics, "pr_20"),
-        "npr_auc": metrics.get("npr_auc"),
-        "delta_npr_auc": metric_delta(metrics, baseline_metrics, "npr_auc"),
-        "npr_020": metrics.get("npr_020"),
-        "delta_npr_020": metric_delta(metrics, baseline_metrics, "npr_020"),
-        "mean_iou": metrics.get("mean_iou"),
-        "delta_mean_iou": metric_delta(metrics, baseline_metrics, "mean_iou"),
+        **metric_and_delta_fields(metrics, baseline_metrics),
     }
 
 
@@ -752,11 +737,7 @@ def make_sequence_result_rows(
                 "config_id": config_id,
                 "sequence": sequence_name,
                 "output_results": str(result_dir),
-                "acceptance_overrides": json.dumps(
-                    config.acceptance_overrides,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+                "acceptance_overrides": serialized_acceptance_overrides(config),
                 **asdict(config.output_projection),
                 "frame_count": frame_count,
                 "accepted_refinement_count": accepted_count,
@@ -770,21 +751,35 @@ def make_sequence_result_rows(
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
-                "sr_auc": metrics.get("sr_auc"),
-                "delta_sr_auc": metric_delta(metrics, baseline_metrics, "sr_auc"),
-                "pr_auc": metrics.get("pr_auc"),
-                "delta_pr_auc": metric_delta(metrics, baseline_metrics, "pr_auc"),
-                "pr_20": metrics.get("pr_20"),
-                "delta_pr_20": metric_delta(metrics, baseline_metrics, "pr_20"),
-                "npr_auc": metrics.get("npr_auc"),
-                "delta_npr_auc": metric_delta(metrics, baseline_metrics, "npr_auc"),
-                "npr_020": metrics.get("npr_020"),
-                "delta_npr_020": metric_delta(metrics, baseline_metrics, "npr_020"),
-                "mean_iou": metrics.get("mean_iou"),
-                "delta_mean_iou": metric_delta(metrics, baseline_metrics, "mean_iou"),
+                **metric_and_delta_fields(metrics, baseline_metrics),
             }
         )
     return rows
+
+
+def serialized_acceptance_overrides(config: ReplaySweepConfig) -> str:
+    """Return compact JSON for acceptance overrides in CSV rows."""
+    return json.dumps(
+        config.acceptance_overrides,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def metric_and_delta_fields(
+    metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return EventVOT metrics and baseline deltas for a sweep row."""
+    fields: dict[str, Any] = {}
+    for metric_name in ("sr_auc", "pr_auc", "pr_20", "npr_auc", "npr_020", "mean_iou"):
+        fields[metric_name] = metrics.get(metric_name)
+        fields[f"delta_{metric_name}"] = metric_delta(
+            metrics,
+            baseline_metrics,
+            metric_name,
+        )
+    return fields
 
 
 def add_sequence_delta_summary(

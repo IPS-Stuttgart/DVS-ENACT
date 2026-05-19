@@ -405,16 +405,22 @@ def test_eventvot_acceptance_rejects_temporal_output_shocks():
 def test_eventvot_acceptance_rejects_base_motion_inconsistent_update():
     module = _load_module()
 
+    config = module.EventVOTAcceptanceConfig(
+        min_candidate_iou=0.0,
+        max_center_shift_ratio=10.0,
+        max_motion_prediction_error_ratio=0.50,
+    )
+    candidate = np.array([10.0, 10.0, 20.0, 20.0])
+    previous_boxes = {
+        "previous_candidate_xywh": np.array([0.0, 10.0, 20.0, 20.0]),
+        "previous_output_xywh": np.array([0.0, 10.0, 20.0, 20.0]),
+    }
+
     decision = module.evaluate_refinement_acceptance(
-        np.array([10.0, 10.0, 20.0, 20.0]),
+        candidate,
         _FakeResult([40.0, 10.0, 20.0, 20.0]),
-        module.EventVOTAcceptanceConfig(
-            min_candidate_iou=0.0,
-            max_center_shift_ratio=10.0,
-            max_motion_prediction_error_ratio=0.50,
-        ),
-        previous_candidate_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
-        previous_output_xywh=np.array([0.0, 10.0, 20.0, 20.0]),
+        config,
+        **previous_boxes,
     )
 
     assert not decision.accepted
