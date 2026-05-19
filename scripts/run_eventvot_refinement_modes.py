@@ -6,7 +6,10 @@ use cases are conservative projection modes for strong trackers such as
 HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
 the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
 while retaining the external tracker's center, and ``width-only``/``height-only``
-let validation sweeps keep just the useful size axis.
+let validation sweeps keep just the useful size axis. ``event-centroid-center``,
+``event-boundary-center``, ``event-edge-center``, and
+``event-paired-edge-center`` keep the external tracker size and center the box
+on robust event-cloud coordinates inside the DVS-ENACT search crop.
 """
 
 from __future__ import annotations
@@ -22,7 +25,23 @@ from dvs_enact import DVSContourRefiner, DVSRefinementResult
 
 import run_eventvot_refinement as base
 
-REFINEMENT_MODES = ("box", "center-only", "size-only", "width-only", "height-only")
+REFINEMENT_MODES = (
+    "box",
+    "center-only",
+    "event-boundary-center",
+    "event-centroid-center",
+    "event-edge-center",
+    "event-paired-edge-center",
+    "size-only",
+    "width-only",
+    "height-only",
+)
+EVENT_CENTER_MODES = {
+    "event-boundary-center",
+    "event-centroid-center",
+    "event-edge-center",
+    "event-paired-edge-center",
+}
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
     "active_fraction",
@@ -50,6 +69,9 @@ class ProjectedOutputRefiner:
         projection_no_clip: bool = False,
         projection_size_smoothing: float | None = None,
         projection_size_deadband_ratio: float | None = None,
+        projection_center_smoothing: float | None = None,
+        projection_center_clamp_ratio: float | None = None,
+        projection_center_deadband_ratio: float | None = None,
         projection_confidence_field: str | None = None,
         projection_confidence_floor: float | None = None,
         projection_confidence_ceiling: float | None = None,
@@ -62,6 +84,9 @@ class ProjectedOutputRefiner:
         validate_projection_blends(projection_width_blend, projection_height_blend)
         validate_projection_size_smoothing(projection_size_smoothing)
         validate_projection_size_deadband(projection_size_deadband_ratio)
+        validate_projection_center_smoothing(projection_center_smoothing)
+        validate_projection_center_clamp(projection_center_clamp_ratio)
+        validate_projection_center_deadband(projection_center_deadband_ratio)
         validate_projection_confidence_weighting(
             projection_confidence_field,
             projection_confidence_floor,
@@ -81,6 +106,9 @@ class ProjectedOutputRefiner:
         self.projection_no_clip = projection_no_clip
         self.projection_size_smoothing = projection_size_smoothing
         self.projection_size_deadband_ratio = projection_size_deadband_ratio
+        self.projection_center_smoothing = projection_center_smoothing
+        self.projection_center_clamp_ratio = projection_center_clamp_ratio
+        self.projection_center_deadband_ratio = projection_center_deadband_ratio
         self.projection_confidence_field = projection_confidence_field
         self.projection_confidence_floor = projection_confidence_floor
         self.projection_confidence_ceiling = projection_confidence_ceiling
@@ -89,10 +117,12 @@ class ProjectedOutputRefiner:
         self.projection_min_raw_height_ratio = projection_min_raw_height_ratio
         self.projection_max_raw_height_ratio = projection_max_raw_height_ratio
         self._previous_accepted_projected_size: np.ndarray | None = None
+        self._previous_accepted_projected_center: np.ndarray | None = None
 
     def reset_state(self) -> None:
         """Reset temporal projection state at sequence boundaries."""
         self._previous_accepted_projected_size = None
+        self._previous_accepted_projected_center = None
 
     def refine(self, candidate_bbox: Any, events: Any, **kwargs: Any) -> DVSRefinementResult:
         result = self.refiner.refine(candidate_bbox, events, **kwargs)
@@ -100,6 +130,9 @@ class ProjectedOutputRefiner:
             self.refinement_mode == "box"
             and self.projection_size_smoothing is None
             and self.projection_size_deadband_ratio is None
+            and self.projection_center_smoothing is None
+            and self.projection_center_clamp_ratio is None
+            and self.projection_center_deadband_ratio is None
             and self.projection_confidence_field is None
         ) or result.fallback_reason is not None:
             return result
@@ -107,16 +140,43 @@ class ProjectedOutputRefiner:
         candidate_xywh = bbox_dict_to_xywh(result.candidate_bbox)
         refiner_xywh = np.asarray(result.as_xywh(), dtype=float)
         raw_refined_xywh = bbox_dict_to_xywh(result.refined_bbox)
+        event_center_xywh = None
+        if self.refinement_mode in EVENT_CENTER_MODES:
+            event_center_xywh = event_center_box(
+                candidate_xywh,
+                events,
+                result.search_bbox,
+                boundary_weighted=self.refinement_mode
+                in {
+                    "event-boundary-center",
+                    "event-edge-center",
+                    "event-paired-edge-center",
+                },
+                edge_inferred=self.refinement_mode
+                in {"event-edge-center", "event-paired-edge-center"},
+                require_paired_edges=self.refinement_mode
+                == "event-paired-edge-center",
+            )
+            if event_center_xywh is None:
+                return replace(
+                    result,
+                    fallback_reason="projection:event_center_missing",
+                )
         unclipped_projected_xywh = project_refinement_output(
             candidate_xywh,
             refiner_xywh,
             refinement_mode=self.refinement_mode,
             raw_refined_xywh=raw_refined_xywh,
+            event_center_xywh=event_center_xywh,
             projection_width_blend=self.projection_width_blend,
             projection_height_blend=self.projection_height_blend,
             previous_projected_size=self._previous_accepted_projected_size,
             projection_size_smoothing=self.projection_size_smoothing,
             projection_size_deadband_ratio=self.projection_size_deadband_ratio,
+            previous_projected_center=self._previous_accepted_projected_center,
+            projection_center_smoothing=self.projection_center_smoothing,
+            projection_center_clamp_ratio=self.projection_center_clamp_ratio,
+            projection_center_deadband_ratio=self.projection_center_deadband_ratio,
             projection_confidence_value=projection_confidence_value(
                 result,
                 self.projection_confidence_field,
@@ -161,18 +221,22 @@ class ProjectedOutputRefiner:
         result: DVSRefinementResult,
         accepted: bool,
     ) -> None:
-        """Record accepted projected size for the next frame."""
-        if (
-            not accepted
-            or self.projection_size_smoothing is None
-            or self.refinement_mode == "center-only"
-            or result.fallback_reason is not None
-        ):
+        """Record accepted projected geometry for the next frame."""
+        if not accepted or result.fallback_reason is not None:
             return
-        self._previous_accepted_projected_size = np.asarray(
-            result.as_xywh(),
-            dtype=float,
-        )[2:].copy()
+        output = np.asarray(result.as_xywh(), dtype=float)
+        if (
+            self.projection_size_smoothing is not None
+            and self.refinement_mode not in {"center-only", *EVENT_CENTER_MODES}
+        ):
+            self._previous_accepted_projected_size = output[2:].copy()
+        if (
+            self.projection_center_smoothing is not None
+            and refinement_mode_updates_center(self.refinement_mode)
+        ):
+            self._previous_accepted_projected_center = (
+                output[:2] + 0.5 * output[2:]
+            ).copy()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -192,7 +256,10 @@ def build_parser() -> argparse.ArgumentParser:
             "and transfers only the DVS-ENACT center correction. 'size-only' "
             "keeps the base-track center and transfers only the DVS-ENACT "
             "width/height correction. 'width-only' and 'height-only' transfer "
-            "only one DVS-ENACT size axis."
+            "only one DVS-ENACT size axis. 'event-centroid-center' and "
+            "'event-boundary-center' use robust event-cloud centers. "
+            "'event-edge-center' infers the center from nearby candidate edges; "
+            "'event-paired-edge-center' only updates axes with opposite-edge evidence."
         ),
     )
     parser.add_argument(
@@ -233,6 +300,32 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional per-axis size deadband relative to the base width/height. "
             "Projected size changes smaller than this ratio are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-smoothing",
+        type=float,
+        help=(
+            "Optional temporal center smoothing for center-moving projected "
+            "outputs. The value is the weight of the previous accepted "
+            "projected center; 0 uses the current projection and 1 holds the "
+            "previous center."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-clamp-ratio",
+        type=float,
+        help=(
+            "Optional center-shift clamp relative to the base-box diagonal. "
+            "Projected center corrections larger than this ratio are capped."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-deadband-ratio",
+        type=float,
+        help=(
+            "Optional center-shift deadband relative to the base-box diagonal. "
+            "Projected center corrections smaller than this ratio are ignored."
         ),
     )
     parser.add_argument(
@@ -278,6 +371,9 @@ def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         projection_no_clip=args.projection_no_clip,
         projection_size_smoothing=args.projection_size_smoothing,
         projection_size_deadband_ratio=args.projection_size_deadband_ratio,
+        projection_center_smoothing=args.projection_center_smoothing,
+        projection_center_clamp_ratio=args.projection_center_clamp_ratio,
+        projection_center_deadband_ratio=args.projection_center_deadband_ratio,
         projection_confidence_field=args.projection_confidence_field,
         projection_confidence_floor=args.projection_confidence_floor,
         projection_confidence_ceiling=args.projection_confidence_ceiling,
@@ -317,11 +413,16 @@ def project_refinement_output(
     *,
     refinement_mode: str,
     raw_refined_xywh: np.ndarray | None = None,
+    event_center_xywh: np.ndarray | None = None,
     projection_width_blend: float | None = None,
     projection_height_blend: float | None = None,
     previous_projected_size: np.ndarray | None = None,
     projection_size_smoothing: float | None = None,
     projection_size_deadband_ratio: float | None = None,
+    previous_projected_center: np.ndarray | None = None,
+    projection_center_smoothing: float | None = None,
+    projection_center_clamp_ratio: float | None = None,
+    projection_center_deadband_ratio: float | None = None,
     projection_confidence_value: float | None = None,
     projection_confidence_floor: float | None = None,
     projection_confidence_ceiling: float | None = None,
@@ -333,6 +434,9 @@ def project_refinement_output(
     validate_projection_blends(projection_width_blend, projection_height_blend)
     validate_projection_size_smoothing(projection_size_smoothing)
     validate_projection_size_deadband(projection_size_deadband_ratio)
+    validate_projection_center_smoothing(projection_center_smoothing)
+    validate_projection_center_clamp(projection_center_clamp_ratio)
+    validate_projection_center_deadband(projection_center_deadband_ratio)
     validate_projection_confidence_bounds(
         projection_confidence_floor,
         projection_confidence_ceiling,
@@ -353,6 +457,10 @@ def project_refinement_output(
             ],
             dtype=float,
         )
+    elif refinement_mode in EVENT_CENTER_MODES:
+        if event_center_xywh is None:
+            raise ValueError(f"event_center_xywh is required for {refinement_mode}")
+        output = np.asarray(event_center_xywh, dtype=float).reshape(4).copy()
     elif refinement_mode in {"size-only", "width-only", "height-only"}:
         candidate_center = candidate[:2] + 0.5 * candidate[2:]
         if projection_width_blend is not None and projection_height_blend is not None:
@@ -399,6 +507,22 @@ def project_refinement_output(
         confidence_floor=projection_confidence_floor,
         confidence_ceiling=projection_confidence_ceiling,
     )
+    output = smooth_projected_center(
+        output,
+        refinement_mode=refinement_mode,
+        previous_projected_center=previous_projected_center,
+        projection_center_smoothing=projection_center_smoothing,
+    )
+    output = apply_projection_center_clamp(
+        candidate,
+        output,
+        projection_center_clamp_ratio=projection_center_clamp_ratio,
+    )
+    output = apply_projection_center_deadband(
+        candidate,
+        output,
+        projection_center_deadband_ratio=projection_center_deadband_ratio,
+    )
     output = apply_projection_size_deadband(
         candidate,
         output,
@@ -406,6 +530,87 @@ def project_refinement_output(
         projection_size_deadband_ratio=projection_size_deadband_ratio,
     )
     return clip_xywh_box(output, image_width=image_width, image_height=image_height)
+
+
+def smooth_projected_center(
+    projected_xywh: np.ndarray,
+    *,
+    refinement_mode: str,
+    previous_projected_center: np.ndarray | None,
+    projection_center_smoothing: float | None,
+) -> np.ndarray:
+    """Blend projected center toward the previous accepted projected center."""
+    validate_refinement_mode(refinement_mode)
+    validate_projection_center_smoothing(projection_center_smoothing)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if (
+        projection_center_smoothing is None
+        or previous_projected_center is None
+        or not refinement_mode_updates_center(refinement_mode)
+    ):
+        return output
+
+    previous_center = np.asarray(previous_projected_center, dtype=float).reshape(2)
+    current_center = output[:2] + 0.5 * output[2:]
+    smoothing = float(projection_center_smoothing)
+    smoothed_center = (
+        (1.0 - smoothing) * current_center + smoothing * previous_center
+    )
+    output[:2] = smoothed_center - 0.5 * output[2:]
+    return output
+
+
+def apply_projection_center_clamp(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    projection_center_clamp_ratio: float | None,
+) -> np.ndarray:
+    """Cap projected center shifts relative to the base-box diagonal."""
+    validate_projection_center_clamp(projection_center_clamp_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_center_clamp_ratio is None:
+        return output
+
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    output_center = output[:2] + 0.5 * output[2:]
+    diagonal = float(np.linalg.norm(candidate[2:]))
+    if diagonal <= 1e-9:
+        return output
+    shift = output_center - candidate_center
+    shift_norm = float(np.linalg.norm(shift))
+    max_shift = float(projection_center_clamp_ratio) * diagonal
+    if shift_norm <= max_shift or shift_norm <= 1e-9:
+        return output
+    clamped_center = candidate_center + shift * (max_shift / shift_norm)
+    output[:2] = clamped_center - 0.5 * output[2:]
+    return output
+
+
+def apply_projection_center_deadband(
+    candidate_xywh: np.ndarray,
+    projected_xywh: np.ndarray,
+    *,
+    projection_center_deadband_ratio: float | None,
+) -> np.ndarray:
+    """Ignore projected center shifts that are small relative to base diagonal."""
+    validate_projection_center_deadband(projection_center_deadband_ratio)
+    output = np.asarray(projected_xywh, dtype=float).reshape(4).copy()
+    if projection_center_deadband_ratio is None:
+        return output
+
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    candidate_center = candidate[:2] + 0.5 * candidate[2:]
+    output_center = output[:2] + 0.5 * output[2:]
+    diagonal = float(np.linalg.norm(candidate[2:]))
+    if diagonal <= 1e-9:
+        return output
+    center_shift_ratio = float(np.linalg.norm(output_center - candidate_center) / diagonal)
+    if center_shift_ratio >= float(projection_center_deadband_ratio):
+        return output
+    output[:2] = candidate_center - 0.5 * output[2:]
+    return output
 
 
 def apply_projection_size_deadband(
@@ -509,6 +714,190 @@ def projection_confidence_value(result: Any, field: str | None) -> float | None:
     return numeric if np.isfinite(numeric) else None
 
 
+def event_center_box(
+    candidate_xywh: np.ndarray,
+    events: Any,
+    search_bbox: dict[str, float] | None = None,
+    *,
+    boundary_weighted: bool = False,
+    edge_inferred: bool = False,
+    require_paired_edges: bool = False,
+) -> np.ndarray | None:
+    """Return candidate-sized xywh centered on robust event-cloud coordinates."""
+    if int(getattr(events, "count", 0)) <= 0:
+        return None
+    x = np.asarray(getattr(events, "x"), dtype=float)
+    y = np.asarray(getattr(events, "y"), dtype=float)
+    if x.shape != y.shape:
+        raise ValueError("event x/y coordinate arrays must have matching shape")
+
+    mask = np.isfinite(x) & np.isfinite(y)
+    if search_bbox is not None:
+        mask &= x >= float(search_bbox["x_min"])
+        mask &= x < float(search_bbox["x_max"])
+        mask &= y >= float(search_bbox["y_min"])
+        mask &= y < float(search_bbox["y_max"])
+    if not np.any(mask):
+        return None
+
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    weights = (
+        _boundary_event_weights(candidate, x[mask], y[mask])
+        if boundary_weighted
+        else None
+    )
+    if boundary_weighted and weights is None:
+        return None
+    if edge_inferred:
+        centroid = edge_inferred_center(
+            candidate,
+            x[mask],
+            y[mask],
+            weights,
+            require_paired_edges=require_paired_edges,
+        )
+        if centroid is None:
+            return None
+    else:
+        centroid = np.array(
+            [
+                weighted_median(x[mask], weights),
+                weighted_median(y[mask], weights),
+            ],
+            dtype=float,
+        )
+    output = np.array(candidate, dtype=float, copy=True)
+    output[:2] = centroid - 0.5 * output[2:]
+    return output
+
+
+def edge_inferred_center(
+    candidate_xywh: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    weights: np.ndarray | None,
+    *,
+    require_paired_edges: bool = False,
+) -> np.ndarray | None:
+    """Infer object center by projecting events from their nearest box edge."""
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    x_min, y_min, width, height = candidate.tolist()
+    center = candidate[:2] + 0.5 * candidate[2:]
+    distances = np.vstack(
+        (
+            np.abs(x - x_min),
+            np.abs(x - (x_min + width)),
+            np.abs(y - y_min),
+            np.abs(y - (y_min + height)),
+        )
+    )
+    nearest_side = np.argmin(distances, axis=0)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        valid &= np.isfinite(weights) & (weights > 0.0)
+    if not np.any(valid):
+        return None
+
+    result = np.array(center, dtype=float, copy=True)
+    x_estimates = np.concatenate(
+        (
+            x[valid & (nearest_side == 0)] + 0.5 * width,
+            x[valid & (nearest_side == 1)] - 0.5 * width,
+        )
+    )
+    y_estimates = np.concatenate(
+        (
+            y[valid & (nearest_side == 2)] + 0.5 * height,
+            y[valid & (nearest_side == 3)] - 0.5 * height,
+        )
+    )
+    x_weights = _edge_estimate_weights(weights, valid, nearest_side, (0, 1))
+    y_weights = _edge_estimate_weights(weights, valid, nearest_side, (2, 3))
+    if x_estimates.size == 0 and y_estimates.size == 0:
+        return None
+    has_left = bool(np.any(valid & (nearest_side == 0)))
+    has_right = bool(np.any(valid & (nearest_side == 1)))
+    has_top = bool(np.any(valid & (nearest_side == 2)))
+    has_bottom = bool(np.any(valid & (nearest_side == 3)))
+    update_x = x_estimates.size > 0 and (
+        not require_paired_edges or (has_left and has_right)
+    )
+    update_y = y_estimates.size > 0 and (
+        not require_paired_edges or (has_top and has_bottom)
+    )
+    if require_paired_edges and not (update_x or update_y):
+        return None
+    if update_x:
+        result[0] = weighted_median(x_estimates, x_weights)
+    if update_y:
+        result[1] = weighted_median(y_estimates, y_weights)
+    return result
+
+
+def _edge_estimate_weights(
+    weights: np.ndarray | None,
+    valid: np.ndarray,
+    nearest_side: np.ndarray,
+    sides: tuple[int, int],
+) -> np.ndarray | None:
+    if weights is None:
+        return None
+    return np.concatenate(
+        (
+            weights[valid & (nearest_side == sides[0])],
+            weights[valid & (nearest_side == sides[1])],
+        )
+    )
+
+
+def _boundary_event_weights(
+    candidate_xywh: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray | None:
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    x_min, y_min, width, height = candidate.tolist()
+    x_max = x_min + width
+    y_max = y_min + height
+    boundary_band = max(2.0, 0.10 * min(max(width, 0.0), max(height, 0.0)))
+    boundary_distance = np.minimum.reduce(
+        (
+            np.abs(x - x_min),
+            np.abs(x - x_max),
+            np.abs(y - y_min),
+            np.abs(y - y_max),
+        )
+    )
+    mask = boundary_distance <= boundary_band
+    if not np.any(mask):
+        return None
+    weights = np.zeros_like(boundary_distance, dtype=float)
+    weights[mask] = np.maximum(
+        1e-6,
+        1.0 - boundary_distance[mask] / max(boundary_band, 1e-9),
+    )
+    return weights
+
+
+def weighted_median(values: np.ndarray, weights: np.ndarray | None = None) -> float:
+    """Return a finite median, optionally weighted by non-negative weights."""
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    if weights is None:
+        return float(np.median(values[finite]))
+    weights = np.asarray(weights, dtype=float)
+    finite &= np.isfinite(weights) & (weights > 0.0)
+    if not np.any(finite):
+        return float("nan")
+    ordered = np.argsort(values[finite])
+    sorted_values = values[finite][ordered]
+    sorted_weights = weights[finite][ordered]
+    cumulative = np.cumsum(sorted_weights)
+    cutoff = 0.5 * float(cumulative[-1])
+    return float(sorted_values[np.searchsorted(cumulative, cutoff, side="left")])
+
+
 def smooth_projected_size(
     candidate_xywh: np.ndarray,
     projected_xywh: np.ndarray,
@@ -524,7 +913,7 @@ def smooth_projected_size(
     if (
         projection_size_smoothing is None
         or previous_projected_size is None
-        or refinement_mode == "center-only"
+        or refinement_mode in {"center-only", "event-centroid-center"}
     ):
         return output
 
@@ -576,6 +965,12 @@ def projected_size_axes(refinement_mode: str) -> np.ndarray:
     if refinement_mode == "height-only":
         return np.array([1], dtype=int)
     return np.array([], dtype=int)
+
+
+def refinement_mode_updates_center(refinement_mode: str) -> bool:
+    """Return whether a projection mode is allowed to change box center."""
+    validate_refinement_mode(refinement_mode)
+    return refinement_mode in {"box", "center-only", *EVENT_CENTER_MODES}
 
 
 def clip_xywh_box(
@@ -763,6 +1158,36 @@ def validate_projection_size_deadband(
         return
     if float(projection_size_deadband_ratio) < 0.0:
         raise ValueError("projection_size_deadband_ratio must be non-negative")
+
+
+def validate_projection_center_smoothing(
+    projection_center_smoothing: float | None,
+) -> None:
+    """Raise ValueError for invalid temporal center smoothing factors."""
+    if projection_center_smoothing is None:
+        return
+    if not 0.0 <= float(projection_center_smoothing) <= 1.0:
+        raise ValueError("projection_center_smoothing must be between 0 and 1")
+
+
+def validate_projection_center_clamp(
+    projection_center_clamp_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection center clamp ratios."""
+    if projection_center_clamp_ratio is None:
+        return
+    if float(projection_center_clamp_ratio) < 0.0:
+        raise ValueError("projection_center_clamp_ratio must be non-negative")
+
+
+def validate_projection_center_deadband(
+    projection_center_deadband_ratio: float | None,
+) -> None:
+    """Raise ValueError for invalid projection center deadband ratios."""
+    if projection_center_deadband_ratio is None:
+        return
+    if float(projection_center_deadband_ratio) < 0.0:
+        raise ValueError("projection_center_deadband_ratio must be non-negative")
 
 
 def validate_projection_confidence_field(field: str | None) -> None:

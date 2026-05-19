@@ -40,6 +40,7 @@ from run_eventvot_refinement import (  # noqa: E402
     save_xywh_result_file,
 )
 from run_eventvot_refinement_modes import (  # noqa: E402
+    EVENT_CENTER_MODES,
     PROJECTION_CONFIDENCE_FIELDS,
     REFINEMENT_MODES,
     project_refinement_output,
@@ -47,7 +48,10 @@ from run_eventvot_refinement_modes import (  # noqa: E402
 )
 from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
 
-REPLAY_OUTPUT_MODES = ("diagnostic", *REFINEMENT_MODES)
+REPLAYABLE_REFINEMENT_MODES = tuple(
+    mode for mode in REFINEMENT_MODES if mode not in EVENT_CENTER_MODES
+)
+REPLAY_OUTPUT_MODES = ("diagnostic", *REPLAYABLE_REFINEMENT_MODES)
 
 
 @dataclass(frozen=True)

@@ -227,6 +227,24 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     assert all(config["projection_no_clip"] for config in grid)
 
 
+def test_validation_sweep_accepts_event_centroid_refinement_mode(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    values = module.parse_refinement_mode_values(
+        (
+            "event-boundary-center event-centroid-center "
+            "event-edge-center event-paired-edge-center",
+        )
+    )
+
+    assert values == [
+        "event-boundary-center",
+        "event-centroid-center",
+        "event-edge-center",
+        "event-paired-edge-center",
+    ]
+
+
 def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     tmp_path,
     monkeypatch,
@@ -400,6 +418,12 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
         "0.50",
         "--projection-size-deadband-ratio",
         "0.05",
+        "--projection-center-smoothing",
+        "0.30",
+        "--projection-center-clamp-ratio",
+        "0.04",
+        "--projection-center-deadband-ratio",
+        "0.02",
         "--projection-confidence-field",
         "mean_event_activity",
         "--projection-confidence-floor",
@@ -416,6 +440,9 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
     assert refiner.projection_height_blend == 0.10
     assert refiner.projection_size_smoothing == 0.50
     assert refiner.projection_size_deadband_ratio == 0.05
+    assert refiner.projection_center_smoothing == 0.30
+    assert refiner.projection_center_clamp_ratio == 0.04
+    assert refiner.projection_center_deadband_ratio == 0.02
     assert refiner.projection_confidence_field == "mean_event_activity"
     assert refiner.projection_confidence_floor == 0.10
     assert refiner.projection_confidence_ceiling == 0.50

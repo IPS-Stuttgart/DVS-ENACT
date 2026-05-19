@@ -24,6 +24,15 @@ def _load_module():
     return module
 
 
+def test_acceptance_replay_excludes_raw_event_projection_modes():
+    module = _load_module()
+
+    assert "event-boundary-center" not in module.REPLAY_OUTPUT_MODES
+    assert "event-centroid-center" not in module.REPLAY_OUTPUT_MODES
+    assert "event-edge-center" not in module.REPLAY_OUTPUT_MODES
+    assert "event-paired-edge-center" not in module.REPLAY_OUTPUT_MODES
+
+
 def test_acceptance_replay_raw_gate_rejects_bad_unblended_update():
     module = _load_module()
     frame = {

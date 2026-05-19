@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,6 +38,117 @@ def test_center_only_projection_keeps_candidate_size(monkeypatch):
     )
 
     np.testing.assert_allclose(projected, np.array([30.0, 20.0, 30.0, 40.0]))
+
+
+def test_event_centroid_center_projection_uses_median_event_center(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=3,
+        x=np.array([30.0, 40.0, 1000.0]),
+        y=np.array([50.0, 70.0, 1000.0]),
+    )
+
+    centroid_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-centroid-center",
+        event_center_xywh=centroid_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([20.0, 40.0, 30.0, 40.0]))
+
+
+def test_event_boundary_center_projection_ignores_interior_events(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=5,
+        x=np.array([12.0, 42.0, 26.0, 25.0, 1000.0]),
+        y=np.array([38.0, 42.0, 22.0, 40.0, 1000.0]),
+    )
+
+    center_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-boundary-center",
+        event_center_xywh=center_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([11.0, 18.0, 30.0, 40.0]))
+
+
+def test_event_edge_center_projects_boundary_events_to_box_center(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=4,
+        x=np.array([41.0, 42.0, 26.0, 25.0]),
+        y=np.array([44.0, 45.0, 62.0, 62.0]),
+    )
+
+    center_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+        edge_inferred=True,
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-edge-center",
+        event_center_xywh=center_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([11.0, 22.0, 30.0, 40.0]))
+
+
+def test_event_paired_edge_center_requires_opposite_edge_evidence(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=3,
+        x=np.array([41.0, 26.0, 25.0]),
+        y=np.array([44.0, 22.0, 62.0]),
+    )
+
+    single_axis_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+        edge_inferred=True,
+        require_paired_edges=True,
+    )
+    no_pair_box = module.event_center_box(
+        candidate,
+        SimpleNamespace(count=1, x=np.array([41.0]), y=np.array([44.0])),
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+        edge_inferred=True,
+        require_paired_edges=True,
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-paired-edge-center",
+        event_center_xywh=single_axis_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 22.0, 30.0, 40.0]))
+    assert no_pair_box is None
 
 
 def test_size_only_projection_keeps_candidate_center(monkeypatch):
@@ -154,6 +266,59 @@ def test_box_size_deadband_preserves_projected_center(monkeypatch):
     )
 
     np.testing.assert_allclose(projected, np.array([21.0, 30.5, 100.0, 50.0]))
+
+
+def test_center_smoothing_blends_toward_previous_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([0.0, 0.0, 10.0, 10.0]),
+        np.array([10.0, 0.0, 10.0, 10.0]),
+        refinement_mode="box",
+        previous_projected_center=np.array([5.0, 5.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 0.0, 10.0, 10.0]))
+
+
+def test_center_smoothing_does_not_move_size_only_projection(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.smooth_projected_center(
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        previous_projected_center=np.array([100.0, 100.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
+
+
+def test_center_clamp_caps_projected_center_shift(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([0.0, 0.0, 3.0, 4.0]),
+        np.array([10.0, 0.0, 3.0, 4.0]),
+        refinement_mode="box",
+        projection_center_clamp_ratio=1.0,
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 0.0, 3.0, 4.0]))
+
+
+def test_center_deadband_ignores_tiny_center_shift(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 20.0, 100.0, 50.0]),
+        np.array([12.0, 21.0, 100.0, 50.0]),
+        refinement_mode="box",
+        projection_center_deadband_ratio=0.03,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 20.0, 100.0, 50.0]))
 
 
 def test_box_projection_smooths_size_around_projected_center(monkeypatch):
@@ -286,6 +451,10 @@ def test_help_exposes_refinement_mode(monkeypatch):
 
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
+    assert "event-boundary-center" in help_text
+    assert "event-centroid-center" in help_text
+    assert "event-edge-center" in help_text
+    assert "event-paired-edge-center" in help_text
     assert "size-only" in help_text
     assert "width-only" in help_text
     assert "height-only" in help_text
@@ -294,5 +463,8 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
     assert "--projection-size-deadband-ratio" in help_text
+    assert "--projection-center-smoothing" in help_text
+    assert "--projection-center-clamp-ratio" in help_text
+    assert "--projection-center-deadband-ratio" in help_text
     assert "--projection-confidence-field" in help_text
     assert "--projection-min-raw-height-ratio" in help_text
