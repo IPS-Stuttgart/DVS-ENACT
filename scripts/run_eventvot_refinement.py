@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -22,6 +23,9 @@ from dvs_enact import (
     EventBatch,
     empty_event_batch,
 )
+
+
+OUTPUT_MANIFEST_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -124,8 +128,10 @@ def save_xywh_result_file(path: Path, boxes: np.ndarray) -> None:
 def existing_output_result_is_complete(
     output_result_file: Path,
     base_boxes: np.ndarray,
+    *,
+    expected_manifest: dict[str, Any] | None = None,
 ) -> tuple[bool, np.ndarray | None]:
-    """Return whether an existing result file is complete enough to resume."""
+    """Return whether an existing result file is complete and config-compatible."""
     if not output_result_file.exists():
         return False, None
     try:
@@ -140,7 +146,96 @@ def existing_output_result_is_complete(
         return False, None
     if np.any(output_boxes[:, 2:] <= 0.0):
         return False, None
+    if expected_manifest is not None and not output_result_manifest_matches(
+        output_result_file,
+        expected_manifest,
+    ):
+        return False, None
     return True, output_boxes
+
+
+def build_output_result_manifest(
+    *,
+    sequence_name: str,
+    base_result_file: Path,
+    refiner_config: Any,
+    event_column_order: str,
+    acceptance_config: EventVOTAcceptanceConfig,
+) -> dict[str, Any]:
+    """Return the resume manifest that must match a reusable output file."""
+    return {
+        "schema_version": OUTPUT_MANIFEST_SCHEMA_VERSION,
+        "generator": "scripts/run_eventvot_refinement.py",
+        "sequence": sequence_name,
+        "base_result_file": {
+            "path": str(base_result_file),
+            "sha256": _sha256_file(base_result_file),
+        },
+        "event_column_order": event_column_order,
+        "refiner_config": _json_ready(asdict(refiner_config)),
+        "acceptance_config": _json_ready(asdict(acceptance_config)),
+    }
+
+
+def output_result_manifest_file(output_result_file: Path) -> Path:
+    """Return the sidecar manifest path for a refined EventVOT result file."""
+    return output_result_file.with_name(f"{output_result_file.stem}_manifest.json")
+
+
+def load_output_result_manifest(output_result_file: Path) -> dict[str, Any] | None:
+    """Load a refined-result sidecar manifest, returning ``None`` if unusable."""
+    manifest_file = output_result_manifest_file(output_result_file)
+    if not manifest_file.exists():
+        return None
+    try:
+        payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def write_output_result_manifest(
+    output_result_file: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Write a stable sidecar manifest next to a refined EventVOT result file."""
+    manifest_file = output_result_manifest_file(output_result_file)
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+    manifest_file.write_text(
+        json.dumps(_json_ready(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def output_result_manifest_matches(
+    output_result_file: Path,
+    expected_manifest: dict[str, Any],
+) -> bool:
+    """Return whether an existing result file was produced by this configuration."""
+    actual_manifest = load_output_result_manifest(output_result_file)
+    return actual_manifest == _json_ready(expected_manifest)
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
 
 
 def read_eventvot_event_time_span(
@@ -402,10 +497,18 @@ def refine_sequence(
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
+    expected_manifest = build_output_result_manifest(
+        sequence_name=sequence_name,
+        base_result_file=base_result_file,
+        refiner_config=refiner.config,
+        event_column_order=event_column_order,
+        acceptance_config=acceptance_config,
+    )
     if skip_existing:
         complete, output_boxes = existing_output_result_is_complete(
             output_result_file,
             base_boxes,
+            expected_manifest=expected_manifest,
         )
         if complete and output_boxes is not None:
             return summarize_skipped_sequence(
@@ -507,6 +610,7 @@ def refine_sequence(
 
     save_xywh_result_file(output_result_file, refined_boxes)
     _save_timing_file(output_result_file, timings)
+    write_output_result_manifest(output_result_file, expected_manifest)
     fallback_counts = Counter(
         "refined" if frame["fallback_reason"] is None else frame["fallback_reason"]
         for frame in frames
@@ -525,6 +629,7 @@ def refine_sequence(
         "sequence_dir": str(sequence_dir),
         "event_csv": str(event_csv),
         "base_result_file": str(base_result_file),
+        "output_manifest_file": str(output_result_manifest_file(output_result_file)),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
         "refined_frame_count": int(accepted_refinement_count),
@@ -562,6 +667,7 @@ def summarize_skipped_sequence(
         "sequence_dir": str(sequence_dir),
         "event_csv": None,
         "base_result_file": str(base_result_file),
+        "output_manifest_file": str(output_result_manifest_file(output_result_file)),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
         "refined_frame_count": changed_frame_count,

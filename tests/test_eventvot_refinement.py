@@ -179,6 +179,17 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
         "8\t8\t10\t10\n9.5\t8\t10\t10\n10\t8\t10\t10\n",
         encoding="utf-8",
     )
+    failing_refiner = _FailingRefiner(module)
+    module.write_output_result_manifest(
+        output_results / "recording_0001.txt",
+        module.build_output_result_manifest(
+            sequence_name="recording_0001",
+            base_result_file=base_results / "recording_0001.txt",
+            refiner_config=failing_refiner.config,
+            event_column_order="auto",
+            acceptance_config=module.EventVOTAcceptanceConfig(),
+        ),
+    )
 
     payload = module.run(
         module.EventVOTRefinementOptions(
@@ -187,7 +198,7 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
             output_results=output_results,
             split="test",
         ),
-        refiner=_FailingRefiner(module),
+        refiner=failing_refiner,
     )
 
     summary = payload["summary"]
@@ -198,6 +209,60 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
     assert sequence["accepted_refinement_count"] == 1
     assert sequence["frames"] == []
     assert (output_results / "recording_0001_time.txt").exists()
+
+
+def test_eventvot_refinement_recomputes_existing_result_when_manifest_differs(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    output_results.mkdir()
+    output_file = output_results / "recording_0001.txt"
+    output_file.write_text(
+        "8\t8\t10\t10\n9.5\t8\t10\t10\n10\t8\t10\t10\n",
+        encoding="utf-8",
+    )
+
+    refiner = _FakeRefiner(
+        module,
+        [
+            _FakeResult([9.25, 8.0, 10.0, 10.0]),
+            _FakeResult([10.25, 8.0, 10.0, 10.0]),
+        ],
+    )
+    module.write_output_result_manifest(
+        output_file,
+        module.build_output_result_manifest(
+            sequence_name="recording_0001",
+            base_result_file=base_results / "recording_0001.txt",
+            refiner_config=refiner.config,
+            event_column_order="auto",
+            acceptance_config=module.EventVOTAcceptanceConfig(min_candidate_iou=0.0),
+        ),
+    )
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=refiner,
+    )
+
+    refined = np.loadtxt(output_file)
+    np.testing.assert_allclose(
+        refined,
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [9.25, 8.0, 10.0, 10.0],
+                [10.25, 8.0, 10.0, 10.0],
+            ]
+        ),
+    )
+    assert payload["summary"]["skipped_existing_output_count"] == 0
+    manifest = module.load_output_result_manifest(output_file)
+    assert manifest["acceptance_config"]["min_candidate_iou"] == 0.6
 
 
 def test_eventvot_refinement_selects_sequence_chunk(tmp_path):
