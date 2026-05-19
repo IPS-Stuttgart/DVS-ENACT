@@ -230,9 +230,11 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
 def test_validation_sweep_accepts_event_centroid_refinement_mode(monkeypatch):
     module = _load_module(monkeypatch)
 
-    values = module.parse_refinement_mode_values(("event-centroid-center",))
+    values = module.parse_refinement_mode_values(
+        ("event-boundary-center event-centroid-center",)
+    )
 
-    assert values == ["event-centroid-center"]
+    assert values == ["event-boundary-center", "event-centroid-center"]
 
 
 def test_validation_sweep_optional_acceptance_defaults_disable_gates(

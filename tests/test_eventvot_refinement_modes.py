@@ -49,7 +49,7 @@ def test_event_centroid_center_projection_uses_median_event_center(monkeypatch):
         y=np.array([50.0, 70.0, 1000.0]),
     )
 
-    centroid_box = module.event_centroid_center_box(
+    centroid_box = module.event_center_box(
         candidate,
         events,
         {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
@@ -58,10 +58,35 @@ def test_event_centroid_center_projection_uses_median_event_center(monkeypatch):
         candidate,
         np.array([99.0, 99.0, 10.0, 10.0]),
         refinement_mode="event-centroid-center",
-        event_centroid_xywh=centroid_box,
+        event_center_xywh=centroid_box,
     )
 
     np.testing.assert_allclose(projected, np.array([20.0, 40.0, 30.0, 40.0]))
+
+
+def test_event_boundary_center_projection_ignores_interior_events(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=5,
+        x=np.array([12.0, 42.0, 26.0, 25.0, 1000.0]),
+        y=np.array([38.0, 42.0, 22.0, 40.0, 1000.0]),
+    )
+
+    center_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-boundary-center",
+        event_center_xywh=center_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([11.0, 18.0, 30.0, 40.0]))
 
 
 def test_size_only_projection_keeps_candidate_center(monkeypatch):
@@ -311,6 +336,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
 
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
+    assert "event-boundary-center" in help_text
     assert "event-centroid-center" in help_text
     assert "size-only" in help_text
     assert "width-only" in help_text

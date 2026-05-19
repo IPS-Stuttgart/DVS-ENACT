@@ -27,6 +27,7 @@ def _load_module():
 def test_acceptance_replay_excludes_raw_event_projection_modes():
     module = _load_module()
 
+    assert "event-boundary-center" not in module.REPLAY_OUTPUT_MODES
     assert "event-centroid-center" not in module.REPLAY_OUTPUT_MODES
 
 

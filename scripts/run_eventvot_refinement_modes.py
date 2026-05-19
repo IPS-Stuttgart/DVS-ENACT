@@ -7,8 +7,8 @@ HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retainin
 the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
 while retaining the external tracker's center, and ``width-only``/``height-only``
 let validation sweeps keep just the useful size axis. ``event-centroid-center``
-keeps the external tracker size and centers the box on the median event
-coordinate inside the DVS-ENACT search crop.
+and ``event-boundary-center`` keep the external tracker size and center the box
+on robust event-cloud coordinates inside the DVS-ENACT search crop.
 """
 
 from __future__ import annotations
@@ -27,11 +27,13 @@ import run_eventvot_refinement as base
 REFINEMENT_MODES = (
     "box",
     "center-only",
+    "event-boundary-center",
     "event-centroid-center",
     "size-only",
     "width-only",
     "height-only",
 )
+EVENT_CENTER_MODES = {"event-boundary-center", "event-centroid-center"}
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
     "active_fraction",
@@ -116,24 +118,25 @@ class ProjectedOutputRefiner:
         candidate_xywh = bbox_dict_to_xywh(result.candidate_bbox)
         refiner_xywh = np.asarray(result.as_xywh(), dtype=float)
         raw_refined_xywh = bbox_dict_to_xywh(result.refined_bbox)
-        event_centroid_xywh = None
-        if self.refinement_mode == "event-centroid-center":
-            event_centroid_xywh = event_centroid_center_box(
+        event_center_xywh = None
+        if self.refinement_mode in EVENT_CENTER_MODES:
+            event_center_xywh = event_center_box(
                 candidate_xywh,
                 events,
                 result.search_bbox,
+                boundary_weighted=self.refinement_mode == "event-boundary-center",
             )
-            if event_centroid_xywh is None:
+            if event_center_xywh is None:
                 return replace(
                     result,
-                    fallback_reason="projection:event_centroid_missing",
+                    fallback_reason="projection:event_center_missing",
                 )
         unclipped_projected_xywh = project_refinement_output(
             candidate_xywh,
             refiner_xywh,
             refinement_mode=self.refinement_mode,
             raw_refined_xywh=raw_refined_xywh,
-            event_centroid_xywh=event_centroid_xywh,
+            event_center_xywh=event_center_xywh,
             projection_width_blend=self.projection_width_blend,
             projection_height_blend=self.projection_height_blend,
             previous_projected_size=self._previous_accepted_projected_size,
@@ -187,7 +190,7 @@ class ProjectedOutputRefiner:
         if (
             not accepted
             or self.projection_size_smoothing is None
-            or self.refinement_mode in {"center-only", "event-centroid-center"}
+            or self.refinement_mode in {"center-only", *EVENT_CENTER_MODES}
             or result.fallback_reason is not None
         ):
             return
@@ -214,8 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
             "and transfers only the DVS-ENACT center correction. 'size-only' "
             "keeps the base-track center and transfers only the DVS-ENACT "
             "width/height correction. 'width-only' and 'height-only' transfer "
-            "only one DVS-ENACT size axis. 'event-centroid-center' keeps the "
-            "base-track size and centers the box on the median event cloud."
+            "only one DVS-ENACT size axis. 'event-centroid-center' and "
+            "'event-boundary-center' keep the base-track size and use robust "
+            "event-cloud centers."
         ),
     )
     parser.add_argument(
@@ -340,7 +344,7 @@ def project_refinement_output(
     *,
     refinement_mode: str,
     raw_refined_xywh: np.ndarray | None = None,
-    event_centroid_xywh: np.ndarray | None = None,
+    event_center_xywh: np.ndarray | None = None,
     projection_width_blend: float | None = None,
     projection_height_blend: float | None = None,
     previous_projected_size: np.ndarray | None = None,
@@ -377,12 +381,10 @@ def project_refinement_output(
             ],
             dtype=float,
         )
-    elif refinement_mode == "event-centroid-center":
-        if event_centroid_xywh is None:
-            raise ValueError(
-                "event_centroid_xywh is required for event-centroid-center"
-            )
-        output = np.asarray(event_centroid_xywh, dtype=float).reshape(4).copy()
+    elif refinement_mode in EVENT_CENTER_MODES:
+        if event_center_xywh is None:
+            raise ValueError(f"event_center_xywh is required for {refinement_mode}")
+        output = np.asarray(event_center_xywh, dtype=float).reshape(4).copy()
     elif refinement_mode in {"size-only", "width-only", "height-only"}:
         candidate_center = candidate[:2] + 0.5 * candidate[2:]
         if projection_width_blend is not None and projection_height_blend is not None:
@@ -539,12 +541,14 @@ def projection_confidence_value(result: Any, field: str | None) -> float | None:
     return numeric if np.isfinite(numeric) else None
 
 
-def event_centroid_center_box(
+def event_center_box(
     candidate_xywh: np.ndarray,
     events: Any,
     search_bbox: dict[str, float] | None = None,
+    *,
+    boundary_weighted: bool = False,
 ) -> np.ndarray | None:
-    """Return candidate-sized xywh centered on the median event coordinate."""
+    """Return candidate-sized xywh centered on robust event-cloud coordinates."""
     if int(getattr(events, "count", 0)) <= 0:
         return None
     x = np.asarray(getattr(events, "x"), dtype=float)
@@ -562,10 +566,70 @@ def event_centroid_center_box(
         return None
 
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
-    centroid = np.array([np.median(x[mask]), np.median(y[mask])], dtype=float)
+    weights = (
+        _boundary_event_weights(candidate, x[mask], y[mask])
+        if boundary_weighted
+        else None
+    )
+    if boundary_weighted and weights is None:
+        return None
+    centroid = np.array(
+        [
+            weighted_median(x[mask], weights),
+            weighted_median(y[mask], weights),
+        ],
+        dtype=float,
+    )
     output = np.array(candidate, dtype=float, copy=True)
     output[:2] = centroid - 0.5 * output[2:]
     return output
+
+
+def _boundary_event_weights(
+    candidate_xywh: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray | None:
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    x_min, y_min, width, height = candidate.tolist()
+    x_max = x_min + width
+    y_max = y_min + height
+    boundary_band = max(2.0, 0.10 * min(max(width, 0.0), max(height, 0.0)))
+    boundary_distance = np.minimum.reduce(
+        (
+            np.abs(x - x_min),
+            np.abs(x - x_max),
+            np.abs(y - y_min),
+            np.abs(y - y_max),
+        )
+    )
+    mask = boundary_distance <= boundary_band
+    if not np.any(mask):
+        return None
+    weights = np.zeros_like(boundary_distance, dtype=float)
+    weights[mask] = np.maximum(
+        1e-6,
+        1.0 - boundary_distance[mask] / max(boundary_band, 1e-9),
+    )
+    return weights
+
+
+def weighted_median(values: np.ndarray, weights: np.ndarray | None = None) -> float:
+    """Return a finite median, optionally weighted by non-negative weights."""
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    if weights is None:
+        return float(np.median(values[finite]))
+    weights = np.asarray(weights, dtype=float)
+    finite &= np.isfinite(weights) & (weights > 0.0)
+    if not np.any(finite):
+        return float("nan")
+    ordered = np.argsort(values[finite])
+    sorted_values = values[finite][ordered]
+    sorted_weights = weights[finite][ordered]
+    cumulative = np.cumsum(sorted_weights)
+    cutoff = 0.5 * float(cumulative[-1])
+    return float(sorted_values[np.searchsorted(cumulative, cutoff, side="left")])
 
 
 def smooth_projected_size(
