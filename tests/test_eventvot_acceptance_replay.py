@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,9 +25,17 @@ def _load_module():
     return module
 
 
-def _diagnostic_frame(output_xywh, *, frame_index=1, mean_event_activity=0.8):
+def _diagnostic_frame(
+    output_xywh,
+    *,
+    frame_index=1,
+    mean_event_activity=0.8,
+    used_event_count=32,
+    active_measurement_count=16,
+    polarity_consistency_fraction=None,
+):
     x, y, width, height = (float(value) for value in output_xywh)
-    return {
+    frame = {
         "frame_index": frame_index,
         "fallback_reason": None,
         "refiner_output_xywh": [x, y, width, height],
@@ -36,10 +45,13 @@ def _diagnostic_frame(output_xywh, *, frame_index=1, mean_event_activity=0.8):
             "x_max": x + width,
             "y_max": y + height,
         },
-        "used_event_count": 32,
-        "active_measurement_count": 16,
+        "used_event_count": used_event_count,
+        "active_measurement_count": active_measurement_count,
         "mean_event_activity": mean_event_activity,
     }
+    if polarity_consistency_fraction is not None:
+        frame["polarity_consistency_fraction"] = polarity_consistency_fraction
+    return frame
 
 
 def _write_replay_diagnostics(
@@ -64,6 +76,22 @@ def _write_replay_diagnostics(
     if refiner_config is not None:
         payload["refiner_config"] = refiner_config
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _replay_center_hold_sequence(module, frames, **config_kwargs):
+    base_boxes = np.array(
+        [
+            [8.0, 8.0, 10.0, 10.0],
+            [9.0, 8.0, 10.0, 10.0],
+            [10.0, 8.0, 10.0, 10.0],
+        ]
+    )
+    config = module.ReplayAcceptanceConfig(
+        max_rejected_center_hold_frames=1,
+        rejected_center_hold_decay=1.0,
+        **config_kwargs,
+    )
+    return module.replay_sequence_boxes("seq1", base_boxes, frames, config)
 
 
 def test_acceptance_replay_raw_gate_rejects_bad_unblended_update():
@@ -468,51 +496,17 @@ def test_acceptance_replay_can_hold_rejected_center_correction():
             "fallback_reason": "initial_frame",
             "refiner_output_xywh": [8.0, 8.0, 10.0, 10.0],
         },
-        {
-            "frame_index": 1,
-            "fallback_reason": None,
-            "refiner_output_xywh": [11.0, 8.0, 10.0, 10.0],
-            "refined_bbox": {
-                "x_min": 11.0,
-                "y_min": 8.0,
-                "x_max": 21.0,
-                "y_max": 18.0,
-            },
-            "used_event_count": 32,
-            "active_measurement_count": 16,
-            "mean_event_activity": 0.8,
-        },
-        {
-            "frame_index": 2,
-            "fallback_reason": None,
-            "refiner_output_xywh": [99.0, 99.0, 10.0, 10.0],
-            "refined_bbox": {
-                "x_min": 99.0,
-                "y_min": 99.0,
-                "x_max": 109.0,
-                "y_max": 109.0,
-            },
-            "used_event_count": 0,
-            "active_measurement_count": 0,
-            "mean_event_activity": 0.0,
-        },
+        _diagnostic_frame([11.0, 8.0, 10.0, 10.0], frame_index=1),
+        _diagnostic_frame(
+            [99.0, 99.0, 10.0, 10.0],
+            frame_index=2,
+            mean_event_activity=0.0,
+            used_event_count=0,
+            active_measurement_count=0,
+        ),
     ]
 
-    replayed, counts, decisions = module.replay_sequence_boxes(
-        "seq1",
-        np.array(
-            [
-                [8.0, 8.0, 10.0, 10.0],
-                [9.0, 8.0, 10.0, 10.0],
-                [10.0, 8.0, 10.0, 10.0],
-            ]
-        ),
-        frames,
-        module.ReplayAcceptanceConfig(
-            max_rejected_center_hold_frames=1,
-            rejected_center_hold_decay=1.0,
-        ),
-    )
+    replayed, counts, decisions = _replay_center_hold_sequence(module, frames)
 
     np.testing.assert_allclose(
         replayed,
@@ -528,6 +522,41 @@ def test_acceptance_replay_can_hold_rejected_center_correction():
     assert counts["held_rejected_center"] == 1
     assert decisions[1]["held_rejected_center_correction"]
     assert decisions[1]["rejected_center_hold_age"] == 1
+
+
+def test_acceptance_replay_support_gate_blocks_center_hold():
+    module = _load_module()
+    frames = [
+        {"frame_index": 0},
+        _diagnostic_frame(
+            [11.0, 8.0, 10.0, 10.0],
+            frame_index=1,
+            mean_event_activity=1.0,
+            used_event_count=64,
+            active_measurement_count=64,
+            polarity_consistency_fraction=1.0,
+        ),
+        _diagnostic_frame(
+            [99.0, 99.0, 10.0, 10.0],
+            frame_index=2,
+            mean_event_activity=1.0,
+            used_event_count=64,
+            active_measurement_count=64,
+            polarity_consistency_fraction=1.0,
+        ),
+    ]
+
+    replayed, counts, decisions = _replay_center_hold_sequence(
+        module,
+        frames,
+        max_rejected_center_hold_support_score=0.25,
+    )
+
+    np.testing.assert_allclose(replayed[2], np.array([10.0, 8.0, 10.0, 10.0]))
+    assert counts["accepted"] == 1
+    assert counts["held_rejected_center"] == 0
+    assert not decisions[1]["held_rejected_center_correction"]
+    assert decisions[1]["event_support_score"] == pytest.approx(1.0)
 
 
 def test_acceptance_replay_rewrites_result_file_from_diagnostics(tmp_path):
@@ -700,6 +729,7 @@ def test_acceptance_replay_help_runs_as_script():
     assert "--max-motion-prediction-error-ratio" in help_text
     assert "--max-rejected-center-hold-frames" in help_text
     assert "--rejected-center-hold-decay" in help_text
+    assert "--max-rejected-center-hold-support-score" in help_text
     assert "--replay-output-mode" in help_text
     assert "--replay-output-blend" in help_text
     assert "--replay-output-size-smoothing" in help_text

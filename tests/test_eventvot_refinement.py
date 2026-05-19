@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -573,6 +574,46 @@ def test_eventvot_refinement_can_hold_rejected_center_correction(tmp_path):
     assert summary["frames"][2]["rejected_center_hold_age"] == 1
 
 
+def test_eventvot_refinement_support_gate_blocks_center_hold(tmp_path):
+    module = _load_module()
+    split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    sequence_dir = split_root / "recording_0001"
+    output_file = output_results / "recording_0001.txt"
+    strong_rejected = _FakeResult([99.0, 99.0, 10.0, 10.0])
+    strong_rejected.used_event_count = 64
+    strong_rejected.active_measurement_count = 64
+    strong_rejected.mean_event_activity = 1.0
+    strong_rejected.polarity_consistency_fraction = 1.0
+
+    summary = module.refine_sequence(
+        "recording_0001",
+        sequence_dir,
+        base_results / "recording_0001.txt",
+        output_file,
+        _FakeRefiner(
+            module,
+            [
+                _FakeResult([11.0, 8.0, 10.0, 10.0]),
+                strong_rejected,
+            ],
+        ),
+        event_column_order="xypt",
+        acceptance_config=module.EventVOTAcceptanceConfig(
+            max_rejected_center_hold_frames=1,
+            rejected_center_hold_decay=1.0,
+            max_rejected_center_hold_support_score=0.25,
+        ),
+    )
+
+    refined = np.loadtxt(output_file)
+
+    np.testing.assert_allclose(refined[2], np.array([10.0, 8.0, 10.0, 10.0]))
+    assert summary["accepted_refinement_count"] == 1
+    assert summary["held_rejected_center_count"] == 0
+    assert not summary["frames"][2]["held_rejected_center_correction"]
+    assert summary["frames"][2]["event_support_score"] == pytest.approx(1.0)
+
+
 def test_eventvot_event_window_iterator_uses_between_frame_intervals(tmp_path):
     module = _load_module()
     _split_root, _base_results, _output_results = _write_eventvot_fixture(tmp_path)
@@ -665,6 +706,7 @@ def test_eventvot_refinement_help_runs_as_script():
     assert "--max-motion-prediction-error-ratio" in help_text
     assert "--max-rejected-center-hold-frames" in help_text
     assert "--rejected-center-hold-decay" in help_text
+    assert "--max-rejected-center-hold-support-score" in help_text
 
 
 class _FakeRefiner:

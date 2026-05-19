@@ -175,14 +175,16 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         "0 2",
         "--rejected-center-hold-decay",
         "1.0 0.50",
+        "--max-rejected-center-hold-support-score",
+        "none 0.25",
         "--dry-run",
     )
 
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 64
-    assert payload["summary"]["config_count"] == 64
+    assert len(grid) == 128
+    assert payload["summary"]["config_count"] == 128
     assert sorted({config["min_accept_used_events"] for config in grid}) == [10, 20]
     assert sorted({config["min_accept_candidate_iou"] for config in grid}) == [
         0.85,
@@ -211,6 +213,13 @@ def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monk
         0.50,
         1.0,
     ]
+    assert sorted(
+        {
+            config["max_rejected_center_hold_support_score"]
+            for config in grid
+            if config["max_rejected_center_hold_support_score"] is not None
+        }
+    ) == [0.25]
     assert all(config["refinement_mode"] == "box" for config in grid)
 
 
@@ -360,6 +369,7 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert config["max_motion_prediction_error_ratio"] is None
     assert config["max_rejected_center_hold_frames"] == 0
     assert config["rejected_center_hold_decay"] == 1.0
+    assert config["max_rejected_center_hold_support_score"] is None
     assert acceptance.min_raw_candidate_iou is None
     assert acceptance.min_raw_candidate_area_ratio is None
     assert acceptance.max_raw_candidate_area_ratio is None
@@ -373,6 +383,7 @@ def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     assert acceptance.max_motion_prediction_error_ratio is None
     assert acceptance.max_rejected_center_hold_frames == 0
     assert acceptance.rejected_center_hold_decay == 1.0
+    assert acceptance.max_rejected_center_hold_support_score is None
 
 
 def test_validation_sweep_optional_none_token_can_be_swept_with_values(monkeypatch):
@@ -468,6 +479,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         min_active_fraction max_temporal_center_shift_ratio
         max_temporal_size_change_ratio max_motion_prediction_error_ratio
         max_rejected_center_hold_frames rejected_center_hold_decay
+        max_rejected_center_hold_support_score
     """.split()
     acceptance_values = (
         40,
@@ -490,6 +502,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
         0.40,
         2,
         0.75,
+        0.25,
     )
     config = dict(zip(acceptance_keys, acceptance_values, strict=True))
 
@@ -515,6 +528,7 @@ def test_validation_sweep_acceptance_config_comes_from_grid(monkeypatch):
     assert acceptance.max_motion_prediction_error_ratio == 0.40
     assert acceptance.max_rejected_center_hold_frames == 2
     assert acceptance.rejected_center_hold_decay == 0.75
+    assert acceptance.max_rejected_center_hold_support_score == 0.25
 
 
 def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypatch):

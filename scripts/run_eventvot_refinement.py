@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
@@ -23,6 +24,12 @@ from dvs_enact import (
     EventBatch,
     empty_event_batch,
 )
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from eventvot_support_score import event_support_score  # noqa: E402
 
 CACHE_CHUNK_SIZE = 1024 * 1024
 REFINEMENT_RESUME_SCHEMA_VERSION = 1
@@ -53,6 +60,7 @@ class EventVOTAcceptanceConfig:
     max_motion_prediction_error_ratio: float | None = None
     max_rejected_center_hold_frames: int = 0
     rejected_center_hold_decay: float = 1.0
+    max_rejected_center_hold_support_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -582,6 +590,7 @@ def refine_sequence(
     validate_rejected_center_hold_config(
         acceptance_config.max_rejected_center_hold_frames,
         acceptance_config.rejected_center_hold_decay,
+        acceptance_config.max_rejected_center_hold_support_score,
     )
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
@@ -685,11 +694,15 @@ def refine_sequence(
         if observe_refinement_decision is not None:
             observe_refinement_decision(base_boxes[frame_index], result, decision.accepted)
         held_output = None
+        support_score = event_support_score(result)
         if decision.accepted:
             refined_boxes[frame_index] = refiner_output
             held_center_offset = center_offset_xywh(base_boxes[frame_index], refiner_output)
             center_hold_age = 0
-        else:
+        elif rejected_center_hold_support_allowed(
+            support_score,
+            acceptance_config.max_rejected_center_hold_support_score,
+        ):
             held_output = rejected_center_hold_output_xywh(
                 base_boxes[frame_index],
                 held_center_offset,
@@ -704,6 +717,10 @@ def refine_sequence(
             else:
                 refined_boxes[frame_index] = held_output
                 center_hold_age += 1
+        else:
+            refined_boxes[frame_index] = np.asarray(base_boxes[frame_index], dtype=float)
+            center_hold_age = 0
+            held_center_offset = None
         frame_record = result.to_dict()
         refiner_output_bbox = frame_record.get("output_bbox")
         frame_record.update(
@@ -726,6 +743,7 @@ def refine_sequence(
                 "quadratic_form_per_active_measurement": (
                     decision.quadratic_form_per_active_measurement
                 ),
+                "event_support_score": float(support_score),
                 "held_rejected_center_correction": held_output is not None,
                 "rejected_center_hold_age": int(center_hold_age)
                 if held_output is not None
@@ -1259,12 +1277,33 @@ def rejected_center_hold_output_xywh(
     return output
 
 
-def validate_rejected_center_hold_config(max_hold_frames: int, decay: float) -> None:
+def rejected_center_hold_support_allowed(
+    support_score: float,
+    max_support_score: float | None,
+) -> bool:
+    """Return whether current DVS support is weak enough to reuse old center."""
+    if max_support_score is None:
+        return True
+    return float(support_score) <= float(max_support_score)
+
+
+def validate_rejected_center_hold_config(
+    max_hold_frames: int,
+    decay: float,
+    max_support_score: float | None = None,
+) -> None:
     """Raise ValueError for invalid rejected-frame center-hold settings."""
     if int(max_hold_frames) < 0:
         raise ValueError("max_rejected_center_hold_frames must be non-negative")
     if not np.isfinite(float(decay)) or not 0.0 <= float(decay) <= 1.0:
         raise ValueError("rejected_center_hold_decay must be between 0 and 1")
+    if max_support_score is not None and (
+        not np.isfinite(float(max_support_score))
+        or not 0.0 <= float(max_support_score) <= 1.0
+    ):
+        raise ValueError(
+            "max_rejected_center_hold_support_score must be between 0 and 1"
+        )
 
 
 def bbox_dict_to_xywh(bbox: dict[str, Any]) -> np.ndarray:
@@ -1803,6 +1842,7 @@ def add_acceptance_arguments(
     parser.add_argument("--max-motion-prediction-error-ratio", type=float)
     parser.add_argument("--max-rejected-center-hold-frames", type=int, default=0)
     parser.add_argument("--rejected-center-hold-decay", type=float, default=1.0)
+    parser.add_argument("--max-rejected-center-hold-support-score", type=float)
 
 
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
@@ -1850,6 +1890,9 @@ def _acceptance_config_from_args(args: argparse.Namespace) -> EventVOTAcceptance
         max_motion_prediction_error_ratio=args.max_motion_prediction_error_ratio,
         max_rejected_center_hold_frames=args.max_rejected_center_hold_frames,
         rejected_center_hold_decay=args.rejected_center_hold_decay,
+        max_rejected_center_hold_support_score=(
+            args.max_rejected_center_hold_support_score
+        ),
     )
 
 

@@ -92,6 +92,7 @@ ACCEPTANCE_GRID_KEYS = (
     "max_motion_prediction_error_ratio",
     "max_rejected_center_hold_frames",
     "rejected_center_hold_decay",
+    "max_rejected_center_hold_support_score",
 )
 OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "min_raw_candidate_iou",
@@ -105,6 +106,7 @@ OPTIONAL_ACCEPTANCE_GRID_KEYS = {
     "max_temporal_center_shift_ratio",
     "max_temporal_size_change_ratio",
     "max_motion_prediction_error_ratio",
+    "max_rejected_center_hold_support_score",
 }
 STRING_GRID_KEYS = {"refinement_mode", "projection_confidence_field"}
 BOOL_GRID_KEYS = {"projection_no_clip"}
@@ -495,6 +497,16 @@ def add_acceptance_sweep_arguments(parser: argparse.ArgumentParser) -> None:
             "1 keeps the full offset; 0 drops it immediately."
         ),
     )
+    parser.add_argument(
+        "--max-rejected-center-hold-support-score",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional event-support ceiling for rejected-frame center hold. "
+            "When set, the previous accepted DVS center correction is reused "
+            "only on rejected frames with support at or below this score."
+        ),
+    )
 
 
 def main() -> int:
@@ -868,6 +880,12 @@ def acceptance_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             cast=float,
             argument_name="--rejected-center-hold-decay",
         ),
+        "max_rejected_center_hold_support_score": parse_sweep_values(
+            args.max_rejected_center_hold_support_score,
+            cast=float,
+            argument_name="--max-rejected-center-hold-support-score",
+            allow_none=True,
+        ),
     }
 
 
@@ -1051,6 +1069,7 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
     validate_rejected_center_hold_config(
         int(config["max_rejected_center_hold_frames"]),
         float(config["rejected_center_hold_decay"]),
+        optional_float_config_value(config, "max_rejected_center_hold_support_score"),
     )
     return EventVOTAcceptanceConfig(
         min_used_event_count=int(config["min_accept_used_events"]),
@@ -1103,6 +1122,10 @@ def acceptance_config_from_config(config: dict[str, SweepValue]) -> EventVOTAcce
         ),
         max_rejected_center_hold_frames=int(config["max_rejected_center_hold_frames"]),
         rejected_center_hold_decay=float(config["rejected_center_hold_decay"]),
+        max_rejected_center_hold_support_score=optional_float_config_value(
+            config,
+            "max_rejected_center_hold_support_score",
+        ),
     )
 
 

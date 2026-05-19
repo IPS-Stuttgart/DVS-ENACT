@@ -39,6 +39,7 @@ from run_eventvot_refinement import (  # noqa: E402
     resolve_base_result_file,
     resolve_eventvot_split_root,
     rejected_center_hold_output_xywh,
+    rejected_center_hold_support_allowed,
     save_xywh_result_file,
     motion_prediction_error_ratio_xywh,
     size_change_ratio_xywh,
@@ -50,6 +51,7 @@ from run_eventvot_refinement_modes import (  # noqa: E402
     project_refinement_output,
     validate_projection_confidence_weighting,
 )
+from eventvot_support_score import event_support_score  # noqa: E402
 from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
 
 REPLAY_OUTPUT_MODES = ("diagnostic", *REFINEMENT_MODES)
@@ -86,6 +88,7 @@ class ReplayAcceptanceConfig:
     max_motion_prediction_error_ratio: float | None = None
     max_rejected_center_hold_frames: int = 0
     rejected_center_hold_decay: float = 1.0
+    max_rejected_center_hold_support_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -329,6 +332,7 @@ def _add_policy_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-motion-prediction-error-ratio", type=float)
     parser.add_argument("--max-rejected-center-hold-frames", type=int)
     parser.add_argument("--rejected-center-hold-decay", type=float)
+    parser.add_argument("--max-rejected-center-hold-support-score", type=float)
 
 
 def options_from_args(args: argparse.Namespace) -> EventVOTAcceptanceReplayOptions:
@@ -366,6 +370,7 @@ def run(options: EventVOTAcceptanceReplayOptions) -> dict[str, Any]:
     validate_rejected_center_hold_config(
         config.max_rejected_center_hold_frames,
         config.rejected_center_hold_decay,
+        config.max_rejected_center_hold_support_score,
     )
     output_projection = output_projection_config_from_diagnostics(
         options.output_projection_config,
@@ -715,13 +720,20 @@ def replay_sequence_boxes(
                 ):
                     previous_accepted_projected_size = replayed_output[2:].copy()
         else:
-            held_output = rejected_center_hold_output_xywh(
-                base_boxes[frame_index],
-                held_center_offset,
-                next_hold_age=center_hold_age + 1,
-                max_hold_frames=config.max_rejected_center_hold_frames,
-                decay=config.rejected_center_hold_decay,
-            )
+            support_score = event_support_score(frame)
+            if rejected_center_hold_support_allowed(
+                support_score,
+                config.max_rejected_center_hold_support_score,
+            ):
+                held_output = rejected_center_hold_output_xywh(
+                    base_boxes[frame_index],
+                    held_center_offset,
+                    next_hold_age=center_hold_age + 1,
+                    max_hold_frames=config.max_rejected_center_hold_frames,
+                    decay=config.rejected_center_hold_decay,
+                )
+            else:
+                held_output = None
             if held_output is None:
                 held_center_offset = None
                 center_hold_age = 0
@@ -736,6 +748,7 @@ def replay_sequence_boxes(
                 "sequence": sequence_name,
                 "frame_index": frame_index,
                 **decision_to_dict(decision),
+                "event_support_score": event_support_score(frame),
                 "held_rejected_center_correction": held_rejected_center,
                 "rejected_center_hold_age": rejected_center_hold_age,
                 "output_xywh": replayed_boxes[frame_index].astype(float).tolist(),
