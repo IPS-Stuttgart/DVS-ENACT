@@ -43,6 +43,39 @@ class TestDVSContourRefiner(unittest.TestCase):
         self.assertEqual(expanded["width"], 60.0)
         self.assertEqual(expanded["height"], 80.0)
 
+    def test_bbox_helpers_support_eventvot_inclusive_xywh(self):
+        bbox = refiner_bbox_to_dict(
+            (20.0, 30.0, 30.0, 40.0),
+            bbox_format="xywh_inclusive",
+        )
+
+        self.assertEqual(bbox["x_min"], 20.0)
+        self.assertEqual(bbox["x_max"], 49.0)
+        self.assertEqual(bbox["width"], 29.0)
+
+    def test_inclusive_xywh_refiner_crop_matches_eventvot_pixels(self):
+        events = EventBatch(
+            ts=np.array([0, 1, 2], dtype=np.int64),
+            x=np.array([10, 12, 13], dtype=np.int32),
+            y=np.array([10, 12, 13], dtype=np.int32),
+            p=np.array([1, 1, 1], dtype=np.int8),
+        )
+        refiner = DVSContourRefiner(
+            DVSContourRefinerConfig(
+                input_bbox_format="xywh_inclusive",
+                output_bbox_format="xywh_inclusive",
+                search_expansion_factor=1.0,
+                min_events=10,
+                min_event_velocity=0.0,
+            )
+        )
+
+        result = refiner.refine((10.0, 10.0, 3.0, 3.0), events)
+
+        self.assertEqual(result.fallback_reason, "low_event_count")
+        self.assertEqual(result.event_count, 2)
+        self.assertEqual(result.as_xywh(), (10.0, 10.0, 3.0, 3.0))
+
     def test_crop_events_to_candidate_search_region(self):
         events = self._events()
 

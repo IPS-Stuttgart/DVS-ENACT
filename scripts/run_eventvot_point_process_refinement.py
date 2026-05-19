@@ -452,7 +452,7 @@ def _score_point_process_refinement(
         score_events,
         result.event_velocity,
         gate.likelihood_config(),
-        bbox_format="xywh",
+        bbox_format="xywh_inclusive",
         image_area=_bbox_area(result.search_bbox),
     )
 

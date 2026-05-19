@@ -251,7 +251,7 @@ class DVSContourRefiner:
         return DVSRefinementResult(
             candidate_bbox=candidate,
             search_bbox=search_bbox,
-            refined_bbox=refined,
+            refined_bbox=format_bbox_dict(refined, self.config.output_bbox_format),
             output_bbox=format_bbox_dict(output, self.config.output_bbox_format),
             event_velocity=velocity.astype(float).tolist(),
             event_count=int(cropped.count),
@@ -334,7 +334,7 @@ class DVSContourRefiner:
         return DVSRefinementResult(
             candidate_bbox=candidate,
             search_bbox=search_bbox,
-            refined_bbox=candidate,
+            refined_bbox=format_bbox_dict(candidate, self.config.output_bbox_format),
             output_bbox=format_bbox_dict(candidate, self.config.output_bbox_format),
             event_velocity=velocity.astype(float).tolist(),
             event_count=event_count,
@@ -350,7 +350,12 @@ class DVSContourRefiner:
 
 
 def bbox_to_dict(bbox: BBoxInput, *, bbox_format: str = "xyxy") -> dict[str, float]:
-    """Normalize a bounding box into xyxy, size, and center fields."""
+    """Normalize a bounding box into xyxy, size, and center fields.
+
+    ``xywh`` is interpreted as a continuous or half-open extent. Use
+    ``xywh_inclusive`` for EventVOT-style pixel boxes, where ``width`` and
+    ``height`` include both boundary pixels.
+    """
     if isinstance(bbox, BoundingBox):
         x_min, y_min, x_max, y_max = bbox.x_min, bbox.y_min, bbox.x_max, bbox.y_max
     elif isinstance(bbox, Mapping):
@@ -364,7 +369,13 @@ def bbox_to_dict(bbox: BBoxInput, *, bbox_format: str = "xyxy") -> dict[str, flo
             )
         elif {"x", "y", "width", "height"}.issubset(lower):
             x_min, y_min = lower["x"], lower["y"]
-            x_max, y_max = x_min + lower["width"], y_min + lower["height"]
+            x_max, y_max = _xywh_max_coordinates(
+                x_min,
+                y_min,
+                lower["width"],
+                lower["height"],
+                bbox_format="xywh" if bbox_format == "xyxy" else bbox_format,
+            )
         else:
             raise ValueError("bbox mapping must contain xyxy or xywh fields")
     else:
@@ -375,9 +386,24 @@ def bbox_to_dict(bbox: BBoxInput, *, bbox_format: str = "xyxy") -> dict[str, flo
             x_min, y_min, x_max, y_max = values.tolist()
         elif bbox_format == "xywh":
             x_min, y_min, width, height = values.tolist()
-            x_max, y_max = x_min + width, y_min + height
+            x_max, y_max = _xywh_max_coordinates(
+                x_min,
+                y_min,
+                width,
+                height,
+                bbox_format=bbox_format,
+            )
+        elif bbox_format == "xywh_inclusive":
+            x_min, y_min, width, height = values.tolist()
+            x_max, y_max = _xywh_max_coordinates(
+                x_min,
+                y_min,
+                width,
+                height,
+                bbox_format=bbox_format,
+            )
         else:
-            raise ValueError("bbox_format must be 'xyxy' or 'xywh'")
+            raise ValueError("bbox_format must be 'xyxy', 'xywh', or 'xywh_inclusive'")
     if x_max < x_min or y_max < y_min:
         raise ValueError("bbox must have non-negative width and height")
     width = float(x_max - x_min)
@@ -395,6 +421,23 @@ def bbox_to_dict(bbox: BBoxInput, *, bbox_format: str = "xyxy") -> dict[str, flo
     }
 
 
+def _xywh_max_coordinates(
+    x_min: float,
+    y_min: float,
+    width: float,
+    height: float,
+    *,
+    bbox_format: str,
+) -> tuple[float, float]:
+    if bbox_format == "xywh":
+        return float(x_min + width), float(y_min + height)
+    if bbox_format == "xywh_inclusive":
+        if width <= 0.0 or height <= 0.0:
+            raise ValueError("inclusive xywh boxes must have positive width and height")
+        return float(x_min + width - 1.0), float(y_min + height - 1.0)
+    raise ValueError("bbox_format must be 'xyxy', 'xywh', or 'xywh_inclusive'")
+
+
 def format_bbox_dict(bbox: dict[str, float], bbox_format: str) -> dict[str, float]:
     """Return bbox dict in the requested external format plus diagnostics."""
     normalized = bbox_to_dict(bbox)
@@ -406,7 +449,18 @@ def format_bbox_dict(bbox: dict[str, float], bbox_format: str) -> dict[str, floa
             "x": normalized["x_min"],
             "y": normalized["y_min"],
         }
-    raise ValueError("bbox_format must be 'xyxy' or 'xywh'")
+    if bbox_format == "xywh_inclusive":
+        external_width = max(0.0, normalized["x_max"] - normalized["x_min"] + 1.0)
+        external_height = max(0.0, normalized["y_max"] - normalized["y_min"] + 1.0)
+        return {
+            **normalized,
+            "x": normalized["x_min"],
+            "y": normalized["y_min"],
+            "width": external_width,
+            "height": external_height,
+            "area": external_width * external_height,
+        }
+    raise ValueError("bbox_format must be 'xyxy', 'xywh', or 'xywh_inclusive'")
 
 
 def expand_bbox(

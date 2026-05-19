@@ -171,7 +171,7 @@ def test_eventvot_refinement_writes_official_tracker_result_layout(tmp_path):
     assert config_tracker.read_text(encoding="utf-8").count("HDETrackV2_DVSENACT") == 1
 
 
-def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
+def test_eventvot_refinement_recomputes_existing_result_without_matching_cache(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
     output_results.mkdir()
@@ -187,15 +187,73 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
             output_results=output_results,
             split="test",
         ),
+        refiner=_FakeRefiner(
+            module,
+            [
+                _FakeResult([9.25, 8.0, 10.0, 10.0]),
+                _FakeResult([10.25, 8.0, 10.0, 10.0]),
+            ],
+        ),
+    )
+
+    refined = np.loadtxt(output_results / "recording_0001.txt")
+    np.testing.assert_allclose(
+        refined,
+        np.array(
+            [
+                [8.0, 8.0, 10.0, 10.0],
+                [9.25, 8.0, 10.0, 10.0],
+                [10.25, 8.0, 10.0, 10.0],
+            ]
+        ),
+    )
+    summary = payload["summary"]
+    sequence = payload["sequences"][0]
+    assert summary["skipped_existing_output_count"] == 0
+    assert not sequence.get("skipped_existing_output", False)
+    assert sequence["accepted_refinement_count"] == 2
+    assert (output_results / "recording_0001_cache_metadata.json").exists()
+
+
+def test_eventvot_refinement_skips_matching_cached_result(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+
+    first_payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FakeRefiner(
+            module,
+            [
+                _FakeResult([9.0, 8.0, 10.0, 10.0]),
+                _FakeResult([10.25, 8.0, 10.0, 10.0]),
+            ],
+        ),
+    )
+    first_sequence = first_payload["sequences"][0]
+
+    second_payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
         refiner=_FailingRefiner(module),
     )
 
-    summary = payload["summary"]
-    sequence = payload["sequences"][0]
+    summary = second_payload["summary"]
+    sequence = second_payload["sequences"][0]
     assert summary["skipped_existing_output_count"] == 1
-    assert summary["fallback_counts"]["skipped_existing_output"] == 3
     assert sequence["skipped_existing_output"]
-    assert sequence["accepted_refinement_count"] == 1
+    assert sequence["cache_reused"]
+    assert sequence["cache_fingerprint"]
+    assert sequence["accepted_refinement_count"] == first_sequence["accepted_refinement_count"]
+    assert sequence["refined_frame_count"] == first_sequence["refined_frame_count"]
     assert sequence["frames"] == []
     assert (output_results / "recording_0001_time.txt").exists()
 

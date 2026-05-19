@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
 import time
+import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
@@ -21,6 +23,29 @@ from dvs_enact import (
     DVSContourRefinerConfig,
     EventBatch,
     empty_event_batch,
+)
+
+OUTPUT_CACHE_SCHEMA_VERSION = 1
+OUTPUT_CACHE_ALGORITHM_VERSION = "eventvot-refinement-v1"
+
+
+_IMAGE_FRAME_SUFFIXES = {".png", ".bmp", ".jpg", ".jpeg"}
+_FRAME_TIMESTAMP_FILENAMES = (
+    "frame_timestamps.txt",
+    "frame_timestamps.csv",
+    "frame_times.txt",
+    "frame_times.csv",
+    "frames_timestamps.txt",
+    "frames_timestamps.csv",
+    "image_timestamps.txt",
+    "image_timestamps.csv",
+    "img_timestamps.txt",
+    "img_timestamps.csv",
+    "timestamps.txt",
+    "timestamps.csv",
+)
+_NUMERIC_VALUE_PATTERN = re.compile(
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 )
 
 
@@ -76,6 +101,7 @@ class EventVOTRefinementOptions:
     tracker_name: str | None = None
     skip_existing: bool = True
     event_column_order: str = "auto"
+    frame_timestamps_root: Path | None = None
     diagnostics_json: Path | None = None
     config_tracker_path: Path | None = None
     acceptance_config: EventVOTAcceptanceConfig = field(
@@ -87,8 +113,8 @@ def default_eventvot_refiner() -> DVSContourRefiner:
     """Return the recommended EventVOT refiner configuration."""
     return DVSContourRefiner(
         DVSContourRefinerConfig(
-            input_bbox_format="xywh",
-            output_bbox_format="xywh",
+            input_bbox_format="xywh_inclusive",
+            output_bbox_format="xywh_inclusive",
             image_width=1280,
             image_height=720,
             search_expansion_factor=1.25,
@@ -141,6 +167,168 @@ def existing_output_result_is_complete(
     if np.any(output_boxes[:, 2:] <= 0.0):
         return False, None
     return True, output_boxes
+
+
+def existing_output_result_is_reusable(
+    output_result_file: Path,
+    base_boxes: np.ndarray,
+    cache_fingerprint: str,
+) -> tuple[bool, np.ndarray | None, dict[str, Any] | None]:
+    """Return whether an existing result has a matching cache fingerprint."""
+    complete, output_boxes = existing_output_result_is_complete(
+        output_result_file,
+        base_boxes,
+    )
+    if not complete or output_boxes is None:
+        return False, None, None
+    metadata = load_output_cache_metadata(output_result_file)
+    if metadata is None:
+        return False, None, None
+    if metadata.get("cache_fingerprint") != cache_fingerprint:
+        return False, None, None
+    if not isinstance(metadata.get("sequence_summary"), dict):
+        return False, None, None
+    timings = load_timing_file(output_result_file, int(base_boxes.shape[0]))
+    if timings is None:
+        return False, None, None
+    timing_file = timing_file_for_result(output_result_file)
+    try:
+        output_hash = _file_sha256(output_result_file)
+        timing_hash = _file_sha256(timing_file)
+    except OSError:
+        return False, None, None
+    if metadata.get("output_result_sha256") != output_hash:
+        return False, None, None
+    if metadata.get("timing_file_sha256") != timing_hash:
+        return False, None, None
+    return True, output_boxes, metadata
+
+
+def build_output_cache_metadata(
+    *,
+    sequence_name: str,
+    split: str,
+    base_result_file: Path,
+    event_csv: Path,
+    frame_count: int,
+    refiner_config: dict[str, Any],
+    acceptance_config: EventVOTAcceptanceConfig,
+    event_column_order: str,
+) -> dict[str, Any]:
+    """Build deterministic metadata that identifies one refinement run."""
+    cache_inputs = _json_ready(
+        {
+            "cache_schema_version": OUTPUT_CACHE_SCHEMA_VERSION,
+            "cache_algorithm_version": OUTPUT_CACHE_ALGORITHM_VERSION,
+            "sequence": sequence_name,
+            "split": split,
+            "frame_count": int(frame_count),
+            "event_column_order": event_column_order,
+            "base_result_file_name": base_result_file.name,
+            "base_result_sha256": _file_sha256(base_result_file),
+            "event_csv_name": event_csv.name,
+            "event_csv_sha256": _file_sha256(event_csv),
+            "refiner_config": refiner_config,
+            "acceptance_config": asdict(acceptance_config),
+        }
+    )
+    encoded = json.dumps(
+        cache_inputs,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        "schema_version": OUTPUT_CACHE_SCHEMA_VERSION,
+        "cache_algorithm_version": OUTPUT_CACHE_ALGORITHM_VERSION,
+        "cache_fingerprint": hashlib.sha256(encoded).hexdigest(),
+        "cache_inputs": cache_inputs,
+    }
+
+
+def load_output_cache_metadata(output_result_file: Path) -> dict[str, Any] | None:
+    """Load cache metadata for one output result file, if it is valid JSON."""
+    metadata_path = output_cache_metadata_path(output_result_file)
+    if not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("schema_version") != OUTPUT_CACHE_SCHEMA_VERSION:
+        return None
+    if metadata.get("cache_algorithm_version") != OUTPUT_CACHE_ALGORITHM_VERSION:
+        return None
+    return metadata
+
+
+def write_output_cache_metadata(
+    output_result_file: Path,
+    cache_metadata: dict[str, Any],
+    sequence_summary: dict[str, Any],
+) -> None:
+    """Write a sidecar that makes later --skip-existing reuse provenance-safe."""
+    metadata = dict(cache_metadata)
+    metadata["output_result_sha256"] = _file_sha256(output_result_file)
+    timing_file = timing_file_for_result(output_result_file)
+    metadata["timing_file_sha256"] = _file_sha256(timing_file)
+    metadata["sequence_summary"] = _cacheable_sequence_summary(sequence_summary)
+    metadata_path = output_cache_metadata_path(output_result_file)
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def output_cache_metadata_path(output_result_file: Path) -> Path:
+    """Return the sidecar metadata path for a per-sequence result file."""
+    return output_result_file.with_name(
+        f"{output_result_file.stem}_cache_metadata.json"
+    )
+
+
+def timing_file_for_result(result_file: Path) -> Path:
+    """Return the EventVOT timing sidecar path for a result file."""
+    return result_file.with_name(f"{result_file.stem}_time.txt")
+
+
+def _cacheable_sequence_summary(sequence_summary: dict[str, Any]) -> dict[str, Any]:
+    excluded_keys = {
+        "cache_fingerprint",
+        "cache_metadata_file",
+        "cache_reused",
+        "frames",
+        "skipped_existing_output",
+    }
+    return _json_ready(
+        {
+            key: value
+            for key, value in sequence_summary.items()
+            if key not in excluded_keys
+        }
+    )
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_eventvot_event_time_span(
@@ -236,20 +424,25 @@ def iter_eventvot_frame_windows(
     frame_count: int,
     *,
     event_column_order: str = "auto",
+    frame_timestamps: np.ndarray | None = None,
 ) -> Iterator[tuple[int, EventBatch]]:
     """Yield raw events between frame ``k - 1`` and frame ``k``.
 
-    EventVOT raw CSVs do not ship with a separate timestamp file in the expected
-    benchmark layout. The official conversion scripts split each sequence-long
-    stream into evenly spaced temporal bins, so this adapter reconstructs frame
-    timestamps by linearly spacing the raw event time range over the result
-    length. Frame 0 is the external tracker's initialization and is not yielded.
+    When per-frame capture timestamps are available, they define the event
+    windows exactly. Uniform splitting over the event span is only a documented
+    fallback for incomplete EventVOT extracts that do not include frame timing
+    metadata. Frame 0 is the external tracker's initialization and is not yielded.
     """
     if frame_count <= 1:
         return
     schema = infer_eventvot_event_schema(event_csv, event_column_order)
     try:
-        yield from _iter_eventvot_frame_windows_numpy(event_csv, frame_count, schema)
+        yield from _iter_eventvot_frame_windows_numpy(
+            event_csv,
+            frame_count,
+            schema,
+            frame_timestamps=frame_timestamps,
+        )
         return
     except ValueError:
         pass
@@ -269,6 +462,7 @@ def iter_eventvot_frame_windows(
         ys,
         polarities,
         frame_count,
+        frame_timestamps=frame_timestamps,
     )
 
 
@@ -276,6 +470,8 @@ def _iter_eventvot_frame_windows_numpy(
     event_csv: Path,
     frame_count: int,
     schema: str,
+    *,
+    frame_timestamps: np.ndarray | None = None,
 ) -> Iterator[tuple[int, EventBatch]]:
     data = np.loadtxt(event_csv, delimiter=",", dtype=np.int64, ndmin=2)
     if data.size == 0:
@@ -289,6 +485,7 @@ def _iter_eventvot_frame_windows_numpy(
         ys,
         polarities,
         frame_count,
+        frame_timestamps=frame_timestamps,
     )
 
 
@@ -298,6 +495,8 @@ def _iter_eventvot_frame_windows_from_arrays(
     ys: np.ndarray,
     polarities: np.ndarray,
     frame_count: int,
+    *,
+    frame_timestamps: np.ndarray | None = None,
 ) -> Iterator[tuple[int, EventBatch]]:
     timestamps = np.asarray(timestamps, dtype=np.int64)
     xs = np.asarray(xs, dtype=np.int32)
@@ -321,7 +520,13 @@ def _iter_eventvot_frame_windows_from_arrays(
             yield frame_index, empty_event_batch()
         return
 
-    frame_times = np.linspace(float(first_ts), float(last_ts), frame_count)
+    frame_times = _validated_event_window_frame_timestamps(
+        frame_timestamps,
+        frame_count,
+        fallback_first_ts=first_ts,
+        fallback_last_ts=last_ts,
+        fallback_timestamps=timestamps,
+    )
     for frame_index in range(1, frame_count):
         start = int(np.searchsorted(timestamps, frame_times[frame_index - 1], side="left"))
         end_side = "right" if frame_index == frame_count - 1 else "left"
@@ -335,6 +540,41 @@ def _iter_eventvot_frame_windows_from_arrays(
             y=np.asarray(ys[start:end], dtype=np.int32),
             p=np.asarray(polarities[start:end], dtype=np.int8),
         )
+
+
+def _validated_event_window_frame_timestamps(
+    frame_timestamps: np.ndarray | None,
+    frame_count: int,
+    *,
+    fallback_first_ts: int,
+    fallback_last_ts: int,
+    fallback_timestamps: np.ndarray | None = None,
+) -> np.ndarray:
+    if frame_timestamps is None:
+        warnings.warn(
+            "No EventVOT frame timestamps were found; falling back to uniform "
+            "event-span bins. Supply real frame timestamps for result-critical "
+            "runs when capture times are not uniformly spaced.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        if fallback_timestamps is not None:
+            timestamps = np.asarray(fallback_timestamps, dtype=np.float64).reshape(-1)
+            if timestamps.size:
+                quantiles = np.linspace(0.0, 1.0, frame_count)
+                return np.quantile(timestamps, quantiles)
+        return np.linspace(float(fallback_first_ts), float(fallback_last_ts), frame_count)
+
+    frame_times = np.asarray(frame_timestamps, dtype=np.float64).reshape(-1)
+    if frame_times.shape[0] != frame_count:
+        raise ValueError(
+            f"Expected {frame_count} frame timestamps, got {frame_times.shape[0]}"
+        )
+    if not np.all(np.isfinite(frame_times)):
+        raise ValueError("Frame timestamps must be finite")
+    if np.any(frame_times[:-1] > frame_times[1:]):
+        raise ValueError("Frame timestamps must be sorted in nondecreasing order")
+    return frame_times
 
 
 def _sort_event_arrays_by_timestamp(
@@ -393,31 +633,52 @@ def refine_sequence(
     output_result_file: Path,
     refiner: DVSContourRefiner,
     *,
+    split: str = "test",
     event_column_order: str = "auto",
     acceptance_config: EventVOTAcceptanceConfig | None = None,
     skip_existing: bool = True,
+    frame_timestamps_root: Path | None = None,
 ) -> dict[str, Any]:
     """Refine one EventVOT sequence result file."""
     acceptance_config = acceptance_config or EventVOTAcceptanceConfig()
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
+    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    cache_metadata = build_output_cache_metadata(
+        sequence_name=sequence_name,
+        split=split,
+        base_result_file=base_result_file,
+        event_csv=event_csv,
+        frame_count=frame_count,
+        refiner_config=asdict(refiner.config),
+        acceptance_config=acceptance_config,
+        event_column_order=event_column_order,
+    )
+    cache_fingerprint = str(cache_metadata["cache_fingerprint"])
     if skip_existing:
-        complete, output_boxes = existing_output_result_is_complete(
+        reusable, output_boxes, existing_metadata = existing_output_result_is_reusable(
             output_result_file,
             base_boxes,
+            cache_fingerprint,
         )
-        if complete and output_boxes is not None:
+        if reusable and output_boxes is not None and existing_metadata is not None:
             return summarize_skipped_sequence(
                 sequence_name,
                 sequence_dir,
                 base_result_file,
                 output_result_file,
-                base_boxes,
                 output_boxes,
+                event_csv,
+                existing_metadata,
             )
 
-    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    frame_timestamps, frame_timestamp_source = resolve_eventvot_frame_timestamps(
+        sequence_dir,
+        sequence_name,
+        frame_count,
+        frame_timestamps_root=frame_timestamps_root,
+    )
     reset_refiner_state = getattr(refiner, "reset_state", None)
     if reset_refiner_state is not None:
         reset_refiner_state()
@@ -453,6 +714,7 @@ def refine_sequence(
         event_csv,
         frame_count,
         event_column_order=event_column_order,
+        frame_timestamps=frame_timestamps,
     ):
         started = time.perf_counter()
         result = refiner.refine(
@@ -520,10 +782,11 @@ def refine_sequence(
     )
     accepted_refinement_count = sum(1 for frame in frames if frame["accept_refinement"])
     used_event_counts = [int(frame["used_event_count"]) for frame in frames[1:]]
-    return {
+    sequence_summary = {
         "sequence": sequence_name,
         "sequence_dir": str(sequence_dir),
         "event_csv": str(event_csv),
+        "frame_timestamp_source": frame_timestamp_source,
         "base_result_file": str(base_result_file),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
@@ -538,6 +801,12 @@ def refine_sequence(
         "total_refinement_seconds": float(np.sum(timings)),
         "frames": frames,
     }
+    write_output_cache_metadata(
+        output_result_file,
+        cache_metadata,
+        sequence_summary,
+    )
+    return sequence_summary
 
 
 def summarize_skipped_sequence(
@@ -545,35 +814,38 @@ def summarize_skipped_sequence(
     sequence_dir: Path,
     base_result_file: Path,
     output_result_file: Path,
-    base_boxes: np.ndarray,
     output_boxes: np.ndarray,
+    event_csv: Path,
+    cache_metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a diagnostics summary for a complete result reused during resume."""
+    """Build diagnostics for a result reused from a matching cache sidecar."""
     frame_count = int(output_boxes.shape[0])
-    changed_frame_count = int(
-        np.any(~np.isclose(output_boxes, base_boxes, rtol=1e-6, atol=1e-6), axis=1).sum()
+    cached_summary = cache_metadata.get("sequence_summary")
+    summary = dict(cached_summary) if isinstance(cached_summary, dict) else {}
+    summary.update(
+        {
+            "sequence": sequence_name,
+            "sequence_dir": str(sequence_dir),
+            "event_csv": str(event_csv),
+            "base_result_file": str(base_result_file),
+            "output_result_file": str(output_result_file),
+            "frame_count": frame_count,
+            "skipped_existing_output": True,
+            "cache_reused": True,
+            "cache_fingerprint": str(cache_metadata.get("cache_fingerprint", "")),
+            "cache_metadata_file": str(output_cache_metadata_path(output_result_file)),
+            "frames": [],
+        }
     )
-    timings = load_timing_file(output_result_file, frame_count)
-    if timings is None:
-        timings = np.zeros(frame_count, dtype=float)
-        _save_timing_file(output_result_file, timings)
-    return {
-        "sequence": sequence_name,
-        "sequence_dir": str(sequence_dir),
-        "event_csv": None,
-        "base_result_file": str(base_result_file),
-        "output_result_file": str(output_result_file),
-        "frame_count": frame_count,
-        "refined_frame_count": changed_frame_count,
-        "accepted_refinement_count": changed_frame_count,
-        "refiner_success_frame_count": 0,
-        "fallback_counts": {"skipped_existing_output": frame_count},
-        "acceptance_counts": {"skipped_existing_output": frame_count},
-        "mean_used_event_count": 0.0,
-        "total_refinement_seconds": float(np.sum(timings)),
-        "skipped_existing_output": True,
-        "frames": [],
-    }
+    summary.setdefault("frame_timestamp_source", "cached_output")
+    summary.setdefault("refined_frame_count", 0)
+    summary.setdefault("accepted_refinement_count", 0)
+    summary.setdefault("refiner_success_frame_count", 0)
+    summary.setdefault("fallback_counts", {"skipped_existing_output": frame_count})
+    summary.setdefault("acceptance_counts", {"skipped_existing_output": frame_count})
+    summary.setdefault("mean_used_event_count", 0.0)
+    summary.setdefault("total_refinement_seconds", 0.0)
+    return summary
 
 
 def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = None) -> dict:
@@ -610,9 +882,11 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
                 base_result_file,
                 output_result_file,
                 refiner,
+                split=options.split,
                 event_column_order=options.event_column_order,
                 acceptance_config=options.acceptance_config,
                 skip_existing=options.skip_existing,
+                frame_timestamps_root=options.frame_timestamps_root,
             )
         )
 
@@ -640,6 +914,9 @@ def run(options: EventVOTRefinementOptions, refiner: DVSContourRefiner | None = 
             "resolved_output_results": str(output_root),
             "diagnostics_json": str(options.diagnostics_json)
             if options.diagnostics_json is not None
+            else None,
+            "frame_timestamps_root": str(options.frame_timestamps_root)
+            if options.frame_timestamps_root is not None
             else None,
             "config_tracker_path": str(options.config_tracker_path)
             if options.config_tracker_path is not None
@@ -938,15 +1215,21 @@ def _quadratic_per_active(
 
 
 def xywh_to_diagnostic_bbox(box_xywh: np.ndarray) -> dict[str, float]:
-    """Return a JSON-friendly bbox dictionary for an ``xywh`` box."""
+    """Return a JSON-friendly bbox dictionary for an EventVOT ``xywh`` box.
+
+    EventVOT result files use inclusive pixel rectangles: a row ``x, y, w, h``
+    covers pixels ``x`` through ``x + w - 1`` and ``y`` through ``y + h - 1``.
+    Keeping diagnostics in the same convention avoids one-pixel disagreement
+    between the refiner traces and the official evaluator geometry.
+    """
     box = np.asarray(box_xywh, dtype=float)
     return {
         "x_min": float(box[0]),
         "y_min": float(box[1]),
         "width": float(box[2]),
         "height": float(box[3]),
-        "x_max": float(box[0] + box[2]),
-        "y_max": float(box[1] + box[3]),
+        "x_max": float(box[0] + box[2] - 1.0),
+        "y_max": float(box[1] + box[3] - 1.0),
     }
 
 
@@ -1151,6 +1434,179 @@ def find_sequence_event_csv(sequence_dir: Path, sequence_name: str) -> Path:
     return candidates[0]
 
 
+def resolve_eventvot_frame_timestamps(
+    sequence_dir: Path,
+    sequence_name: str,
+    frame_count: int,
+    *,
+    frame_timestamps_root: Path | None = None,
+) -> tuple[np.ndarray | None, str]:
+    """Return EventVOT frame timestamps and a diagnostic source label.
+
+    The raw event CSV is sequence-long, so windowing it by frame must use the
+    actual capture timestamps whenever the dataset extract provides them.  This
+    resolver first checks explicit sidecar files and a user-supplied timestamp
+    root, then falls back to timestamp-coded image filenames.  Sequential image
+    indices such as ``000001.png`` are deliberately rejected as timestamps.
+    """
+    for candidate in _iter_frame_timestamp_candidates(
+        sequence_dir,
+        sequence_name,
+        frame_timestamps_root=frame_timestamps_root,
+    ):
+        timestamps = _load_frame_timestamp_file(candidate, frame_count)
+        if timestamps is not None:
+            return timestamps, str(candidate)
+
+    timestamps = _load_frame_timestamps_from_image_names(sequence_dir / "img", frame_count)
+    if timestamps is not None:
+        return timestamps, f"image_filenames:{sequence_dir / 'img'}"
+
+    return None, "uniform_event_span_fallback"
+
+
+def _iter_frame_timestamp_candidates(
+    sequence_dir: Path,
+    sequence_name: str,
+    *,
+    frame_timestamps_root: Path | None = None,
+) -> Iterator[Path]:
+    seen: set[Path] = set()
+
+    def emit(path: Path) -> Iterator[Path]:
+        resolved = path.resolve() if path.exists() else path
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        if path.exists() and path.is_file() and _is_frame_timestamp_candidate(path):
+            yield path
+
+    if frame_timestamps_root is not None:
+        root = frame_timestamps_root
+        if not root.exists():
+            raise FileNotFoundError(f"Frame timestamp root does not exist: {root}")
+        if root.is_file():
+            yield from emit(root)
+            return
+        for suffix in (".txt", ".csv"):
+            yield from emit(root / f"{sequence_name}{suffix}")
+            yield from emit(root / f"{sequence_name}_timestamps{suffix}")
+            yield from emit(root / f"{sequence_name}_frame_timestamps{suffix}")
+        for filename in _FRAME_TIMESTAMP_FILENAMES:
+            yield from emit(root / sequence_name / filename)
+
+    for filename in _FRAME_TIMESTAMP_FILENAMES:
+        yield from emit(sequence_dir / filename)
+        yield from emit(sequence_dir / "img" / filename)
+
+    for pattern in ("*timestamp*.txt", "*timestamp*.csv", "*frame*time*.txt", "*frame*time*.csv"):
+        for path in sorted(sequence_dir.glob(pattern)):
+            yield from emit(path)
+
+
+def _is_frame_timestamp_candidate(path: Path) -> bool:
+    stem = path.stem.lower()
+    if path.suffix.lower() not in {".txt", ".csv"}:
+        return False
+    if stem in {"groundtruth", "absent"}:
+        return False
+    if stem.endswith("_time") or stem.endswith("_all_boxes") or stem.endswith("_all_scores"):
+        return False
+    return True
+
+
+def _load_frame_timestamp_file(path: Path, frame_count: int) -> np.ndarray | None:
+    rows: list[list[float]] = []
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        values = _extract_numeric_values(stripped)
+        if values:
+            rows.append(values)
+    if len(rows) != frame_count:
+        return None
+
+    width = max(len(row) for row in rows)
+    data = np.full((len(rows), width), np.nan, dtype=np.float64)
+    for row_index, row in enumerate(rows):
+        data[row_index, : len(row)] = row
+
+    if data.shape[1] >= 2 and _looks_like_frame_indices(data[:, 0], frame_count):
+        timestamps = data[:, 1]
+    else:
+        timestamps = data[:, 0]
+    return _validate_discovered_frame_timestamps(timestamps, frame_count, source=str(path))
+
+
+def _load_frame_timestamps_from_image_names(
+    image_dir: Path,
+    frame_count: int,
+) -> np.ndarray | None:
+    if not image_dir.exists():
+        return None
+    image_paths = sorted(
+        (
+            path
+            for path in image_dir.iterdir()
+            if path.suffix.lower() in _IMAGE_FRAME_SUFFIXES
+        ),
+        key=_natural_path_sort_key,
+    )
+    if len(image_paths) != frame_count:
+        return None
+    timestamps = []
+    for path in image_paths:
+        values = _extract_numeric_values(path.stem)
+        if not values:
+            return None
+        timestamps.append(values[-1])
+    if _looks_like_frame_indices(timestamps, frame_count):
+        return None
+    return _validate_discovered_frame_timestamps(
+        timestamps,
+        frame_count,
+        source=str(image_dir),
+    )
+
+
+def _validate_discovered_frame_timestamps(
+    timestamps: Iterable[float],
+    frame_count: int,
+    *,
+    source: str,
+) -> np.ndarray:
+    frame_times = np.asarray(list(timestamps), dtype=np.float64).reshape(-1)
+    if frame_times.shape[0] != frame_count:
+        raise ValueError(
+            f"{source}: expected {frame_count} frame timestamps, got {frame_times.shape[0]}"
+        )
+    if not np.all(np.isfinite(frame_times)):
+        raise ValueError(f"{source}: frame timestamps must be finite")
+    if np.any(frame_times[:-1] > frame_times[1:]):
+        raise ValueError(f"{source}: frame timestamps must be sorted")
+    return frame_times
+
+
+def _looks_like_frame_indices(values: Iterable[float], frame_count: int) -> bool:
+    frame_values = np.asarray(list(values), dtype=np.float64).reshape(-1)
+    if frame_values.shape[0] != frame_count:
+        return False
+    zero_based = np.arange(frame_count, dtype=np.float64)
+    one_based = zero_based + 1.0
+    return bool(
+        np.allclose(frame_values, zero_based, rtol=0.0, atol=1e-6)
+        or np.allclose(frame_values, one_based, rtol=0.0, atol=1e-6)
+    )
+
+
+def _natural_path_sort_key(path: Path) -> tuple[Any, ...]:
+    key: list[Any] = []
+    for part in re.split(r"(\d+)", path.name):
+        key.append(int(part) if part.isdigit() else part.lower())
+    return tuple(key)
+
+
 def default_diagnostics_path(output_results: Path) -> Path:
     if output_results.suffix:
         return output_results.with_name(output_results.stem + "_diagnostics.json")
@@ -1283,6 +1739,14 @@ def build_parser() -> argparse.ArgumentParser:
             "script conventions."
         ),
     )
+    parser.add_argument(
+        "--frame-timestamps-root",
+        type=Path,
+        help=(
+            "Optional file or directory containing per-frame timestamps. A directory "
+            "may contain <sequence>.txt/csv or <sequence>/frame_timestamps.txt."
+        ),
+    )
     parser.add_argument("--diagnostics-json", type=Path)
     _add_refiner_arguments(parser)
     return parser
@@ -1310,6 +1774,7 @@ def main() -> int:
             tracker_name=args.tracker_name,
             skip_existing=not args.no_skip_existing,
             event_column_order=args.event_column_order,
+            frame_timestamps_root=args.frame_timestamps_root,
             diagnostics_json=args.diagnostics_json,
             config_tracker_path=config_tracker_path,
             acceptance_config=_acceptance_config_from_args(args),
@@ -1393,8 +1858,8 @@ def add_acceptance_arguments(
 def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
     return DVSContourRefiner(
         DVSContourRefinerConfig(
-            input_bbox_format="xywh",
-            output_bbox_format="xywh",
+            input_bbox_format="xywh_inclusive",
+            output_bbox_format="xywh_inclusive",
             image_width=args.image_width,
             image_height=args.image_height,
             search_expansion_factor=args.search_expansion_factor,
@@ -1458,9 +1923,7 @@ def _validate_sequence_frame_count(
         return
     image_count = len(
         [
-            path
-            for path in image_dir.iterdir()
-            if path.suffix.lower() in {".png", ".bmp", ".jpg", ".jpeg"}
+            path for path in image_dir.iterdir() if path.suffix.lower() in _IMAGE_FRAME_SUFFIXES
         ]
     )
     if image_count != result_frame_count:
@@ -1471,12 +1934,12 @@ def _validate_sequence_frame_count(
 
 
 def _save_timing_file(result_file: Path, timings: np.ndarray) -> None:
-    timing_file = result_file.with_name(f"{result_file.stem}_time.txt")
+    timing_file = timing_file_for_result(result_file)
     np.savetxt(timing_file, np.asarray(timings, dtype=float), delimiter="\t", fmt="%.9f")
 
 
 def load_timing_file(result_file: Path, expected_frame_count: int) -> np.ndarray | None:
-    timing_file = result_file.with_name(f"{result_file.stem}_time.txt")
+    timing_file = timing_file_for_result(result_file)
     if not timing_file.exists():
         return None
     try:
@@ -1547,6 +2010,10 @@ def _numeric_row(row: list[str]) -> list[float] | None:
         return [float(token) for token in tokens]
     except ValueError:
         return None
+
+
+def _extract_numeric_values(text: str) -> list[float]:
+    return [float(match.group(0)) for match in _NUMERIC_VALUE_PATTERN.finditer(text)]
 
 
 def _parse_numeric_tokens(line: str) -> list[float]:

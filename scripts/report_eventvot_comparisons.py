@@ -14,7 +14,7 @@ from report_utils import write_csv
 from run_eventvot_refinement import resolve_eventvot_split_root, resolve_sequence_names
 from run_eventvot_validation_sweep import (
     evaluate_eventvot_sequence,
-    mean_nonzero_curves,
+    mean_curves,
     summarize_eventvot_curves,
 )
 
@@ -95,6 +95,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Optional FPS override as Tracker Name=value.",
     )
+    parser.add_argument(
+        "--auto-fps-from-timing-files",
+        action="store_true",
+        help=(
+            "Estimate FPS from per-sequence <sequence>_time.txt files. These "
+            "files are produced by the DVS-ENACT refinement pass and therefore "
+            "measure refinement-only throughput, not end-to-end tracker-plus-"
+            "refinement throughput. Prefer explicit --fps overrides for paper "
+            "tables."
+        ),
+    )
     parser.add_argument("--attribute-root", type=Path)
     parser.add_argument("--eventvot-toolkit-root", type=Path)
     parser.add_argument("--allow-missing", action="store_true")
@@ -152,6 +163,9 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
         requested_sequences=tuple(args.sequence),
     )
     fps_overrides = parse_fps_overrides(args.fps)
+    auto_fps_from_timing_files = bool(
+        getattr(args, "auto_fps_from_timing_files", False),
+    )
     attribute_root = resolve_attribute_root(args)
     attribute_map = (
         load_attribute_map(attribute_root, sequence_names)
@@ -169,10 +183,15 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
             attribute_map,
             args.min_attribute_sequences,
         )
-        fps = fps_overrides.get(spec.name)
-        if fps is None:
-            fps = estimate_fps(spec.result_dir, sequence_names)
+        fps, fps_source, fps_note = resolve_tracker_fps(
+            spec,
+            sequence_names,
+            fps_overrides,
+            auto_fps_from_timing_files,
+        )
         tracker_payload["fps"] = fps
+        tracker_payload["fps_source"] = fps_source
+        tracker_payload["fps_note"] = fps_note
         tracker_payloads[spec.name] = tracker_payload
         table_rows.append(make_table_row(spec.name, tracker_payload))
 
@@ -199,7 +218,8 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
             "EventVOT comparison report. Table columns SR, PR, and NPR are AUC "
             "scores over the official success, precision, and normalized "
             "precision curves. Pairwise gains isolate the post-hoc DVS-ENACT "
-            "physics layer."
+            "physics layer. FPS values are explicit overrides unless fps_source "
+            "states refinement_time_files."
         ),
         "summary": {
             "split": args.split,
@@ -210,6 +230,14 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
             "pairwise_csv": str(pairwise_csv),
             "attribute_csv": str(attribute_csv),
             "attribute_root": str(attribute_root) if attribute_root is not None else None,
+            "fps_reporting": {
+                "explicit_override_trackers": sorted(fps_overrides),
+                "auto_fps_from_timing_files": auto_fps_from_timing_files,
+                "timing_file_warning": (
+                    "Per-sequence *_time.txt files produced by DVS-ENACT "
+                    "refinement are refinement-only timings, not end-to-end FPS."
+                ),
+            },
         },
         "claim_support": make_claim_support(
             pairwise_rows,
@@ -306,9 +334,9 @@ def aggregate_sequence_metrics(
     evaluated_frame_count = sum(
         int(sequence_metrics[name]["evaluated_frame_count"]) for name in selected_sequences
     )
-    success_curve = mean_nonzero_curves(success_curves)
-    precision_curve = mean_nonzero_curves(precision_curves)
-    normalized_precision_curve = mean_nonzero_curves(normalized_precision_curves)
+    success_curve = mean_curves(success_curves)
+    precision_curve = mean_curves(precision_curves)
+    normalized_precision_curve = mean_curves(normalized_precision_curves)
     return summarize_eventvot_curves(
         sequence_count=len(selected_sequences),
         evaluated_frame_count=evaluated_frame_count,
@@ -353,6 +381,8 @@ def make_table_row(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         "pr": overall["pr_auc"],
         "npr": overall["npr_auc"],
         "fps": payload["fps"],
+        "fps_source": payload.get("fps_source", "unknown"),
+        "fps_note": payload.get("fps_note", ""),
         "pr_20": overall["pr_20"],
         "npr_020": overall["npr_020"],
         "mean_iou": overall["mean_iou"],
@@ -479,6 +509,44 @@ def load_attribute_map(attribute_root: Path, sequence_names: list[str]) -> dict[
     return attributes
 
 
+def resolve_tracker_fps(
+    spec: TrackerSpec,
+    sequence_names: list[str],
+    fps_overrides: dict[str, float],
+    use_timing_files: bool,
+) -> tuple[float | None, str, str]:
+    """Resolve FPS and its provenance for one tracker row.
+
+    DVS-ENACT refinement writes ``<sequence>_time.txt`` files containing only
+    post-hoc refinement elapsed times. Treating those files as automatic FPS for
+    a row named ``Tracker + DVS-ENACT`` silently reports refinement-only
+    throughput as if it were end-to-end tracker-plus-refinement throughput. The
+    report therefore uses explicit ``--fps`` overrides by default and labels any
+    opt-in timing-file estimate as refinement-only.
+    """
+    if spec.name in fps_overrides:
+        return (
+            float(fps_overrides[spec.name]),
+            "override",
+            "Explicit --fps override; intended for end-to-end paper-table FPS.",
+        )
+    if not use_timing_files:
+        return (
+            None,
+            "not_reported",
+            (
+                "Automatic *_time.txt FPS is disabled because those files are "
+                "DVS-ENACT refinement-only timings; pass --fps for end-to-end "
+                "tracker throughput or --auto-fps-from-timing-files for a "
+                "labeled refinement-only estimate."
+            ),
+        )
+    fps = estimate_fps(spec.result_dir, sequence_names)
+    if fps is None:
+        return None, "missing", "No usable per-sequence *_time.txt files found."
+    return fps, "refinement_time_files", "Computed from refinement-only *_time.txt files."
+
+
 def estimate_fps(result_dir: Path, sequence_names: list[str]) -> float | None:
     total_time = 0.0
     total_frames = 0
@@ -531,8 +599,8 @@ def optional_ratio(first: float | None, second: float | None) -> float | None:
 def write_markdown_table(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "| Tracker | SR | PR | NPR | FPS |",
-        "|---|---:|---:|---:|---:|",
+        "| Tracker | SR | PR | NPR | FPS | FPS source |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         lines.append(
@@ -541,7 +609,8 @@ def write_markdown_table(path: Path, rows: list[dict[str, Any]]) -> None:
             f"{format_metric(row['sr'])} | "
             f"{format_metric(row['pr'])} | "
             f"{format_metric(row['npr'])} | "
-            f"{format_fps(row['fps'])} |"
+            f"{format_fps(row['fps'])} | "
+            f"{format_fps_source(row)} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -552,6 +621,19 @@ def format_metric(value: float) -> str:
 
 def format_fps(value: float | None) -> str:
     return "n/a" if value is None else f"{float(value):.1f}"
+
+
+def format_fps_source(row: dict[str, Any]) -> str:
+    source = str(row.get("fps_source", "unknown"))
+    if source == "override":
+        return "override"
+    if source == "refinement_time_files":
+        return "refinement-only"
+    if source == "not_reported":
+        return "not reported"
+    if source == "missing":
+        return "missing"
+    return source.replace("_", " ")
 
 
 if __name__ == "__main__":

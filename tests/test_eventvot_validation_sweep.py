@@ -94,6 +94,20 @@ def test_eventvot_validation_metrics_match_perfect_boxes(tmp_path, monkeypatch):
     assert metrics["npr_020"] == 1.0
 
 
+def test_eventvot_curve_mean_counts_all_zero_sequences(monkeypatch):
+    module = _load_module(monkeypatch)
+    curves = [
+        np.ones(3, dtype=float),
+        np.zeros(3, dtype=float),
+    ]
+    expected = np.full(3, 0.5, dtype=float)
+
+    np.testing.assert_allclose(module.mean_curves(curves), expected)
+    # Historical symbol kept for compatibility, but it must no longer drop
+    # all-zero sequence curves from EventVOT aggregates.
+    np.testing.assert_allclose(module.mean_nonzero_curves(curves), expected)
+
+
 def test_validation_sweep_refuses_test_split(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     args = argparse.Namespace(
