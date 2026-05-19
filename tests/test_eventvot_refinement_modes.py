@@ -115,6 +115,42 @@ def test_event_edge_center_projects_boundary_events_to_box_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([11.0, 22.0, 30.0, 40.0]))
 
 
+def test_event_paired_edge_center_requires_opposite_edge_evidence(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=3,
+        x=np.array([41.0, 26.0, 25.0]),
+        y=np.array([44.0, 22.0, 62.0]),
+    )
+
+    single_axis_box = module.event_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+        edge_inferred=True,
+        require_paired_edges=True,
+    )
+    no_pair_box = module.event_center_box(
+        candidate,
+        SimpleNamespace(count=1, x=np.array([41.0]), y=np.array([44.0])),
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+        boundary_weighted=True,
+        edge_inferred=True,
+        require_paired_edges=True,
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-paired-edge-center",
+        event_center_xywh=single_axis_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([10.0, 22.0, 30.0, 40.0]))
+    assert no_pair_box is None
+
+
 def test_size_only_projection_keeps_candidate_center(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -365,6 +401,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "event-boundary-center" in help_text
     assert "event-centroid-center" in help_text
     assert "event-edge-center" in help_text
+    assert "event-paired-edge-center" in help_text
     assert "size-only" in help_text
     assert "width-only" in help_text
     assert "height-only" in help_text

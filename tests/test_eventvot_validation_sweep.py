@@ -231,13 +231,17 @@ def test_validation_sweep_accepts_event_centroid_refinement_mode(monkeypatch):
     module = _load_module(monkeypatch)
 
     values = module.parse_refinement_mode_values(
-        ("event-boundary-center event-centroid-center event-edge-center",)
+        (
+            "event-boundary-center event-centroid-center "
+            "event-edge-center event-paired-edge-center",
+        )
     )
 
     assert values == [
         "event-boundary-center",
         "event-centroid-center",
         "event-edge-center",
+        "event-paired-edge-center",
     ]
 
 

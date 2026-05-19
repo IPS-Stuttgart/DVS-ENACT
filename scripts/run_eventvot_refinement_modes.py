@@ -7,9 +7,9 @@ HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retainin
 the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
 while retaining the external tracker's center, and ``width-only``/``height-only``
 let validation sweeps keep just the useful size axis. ``event-centroid-center``,
-``event-boundary-center``, and ``event-edge-center`` keep the external tracker
-size and center the box on robust event-cloud coordinates inside the DVS-ENACT
-search crop.
+``event-boundary-center``, ``event-edge-center``, and
+``event-paired-edge-center`` keep the external tracker size and center the box
+on robust event-cloud coordinates inside the DVS-ENACT search crop.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ REFINEMENT_MODES = (
     "event-boundary-center",
     "event-centroid-center",
     "event-edge-center",
+    "event-paired-edge-center",
     "size-only",
     "width-only",
     "height-only",
@@ -39,6 +40,7 @@ EVENT_CENTER_MODES = {
     "event-boundary-center",
     "event-centroid-center",
     "event-edge-center",
+    "event-paired-edge-center",
 }
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
@@ -131,8 +133,15 @@ class ProjectedOutputRefiner:
                 events,
                 result.search_bbox,
                 boundary_weighted=self.refinement_mode
-                in {"event-boundary-center", "event-edge-center"},
-                edge_inferred=self.refinement_mode == "event-edge-center",
+                in {
+                    "event-boundary-center",
+                    "event-edge-center",
+                    "event-paired-edge-center",
+                },
+                edge_inferred=self.refinement_mode
+                in {"event-edge-center", "event-paired-edge-center"},
+                require_paired_edges=self.refinement_mode
+                == "event-paired-edge-center",
             )
             if event_center_xywh is None:
                 return replace(
@@ -227,7 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
             "width/height correction. 'width-only' and 'height-only' transfer "
             "only one DVS-ENACT size axis. 'event-centroid-center' and "
             "'event-boundary-center' use robust event-cloud centers. "
-            "'event-edge-center' infers the center from nearby candidate edges."
+            "'event-edge-center' infers the center from nearby candidate edges; "
+            "'event-paired-edge-center' only updates axes with opposite-edge evidence."
         ),
     )
     parser.add_argument(
@@ -556,6 +566,7 @@ def event_center_box(
     *,
     boundary_weighted: bool = False,
     edge_inferred: bool = False,
+    require_paired_edges: bool = False,
 ) -> np.ndarray | None:
     """Return candidate-sized xywh centered on robust event-cloud coordinates."""
     if int(getattr(events, "count", 0)) <= 0:
@@ -583,7 +594,13 @@ def event_center_box(
     if boundary_weighted and weights is None:
         return None
     if edge_inferred:
-        centroid = edge_inferred_center(candidate, x[mask], y[mask], weights)
+        centroid = edge_inferred_center(
+            candidate,
+            x[mask],
+            y[mask],
+            weights,
+            require_paired_edges=require_paired_edges,
+        )
         if centroid is None:
             return None
     else:
@@ -604,6 +621,8 @@ def edge_inferred_center(
     x: np.ndarray,
     y: np.ndarray,
     weights: np.ndarray | None,
+    *,
+    require_paired_edges: bool = False,
 ) -> np.ndarray | None:
     """Infer object center by projecting events from their nearest box edge."""
     candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
@@ -642,9 +661,21 @@ def edge_inferred_center(
     y_weights = _edge_estimate_weights(weights, valid, nearest_side, (2, 3))
     if x_estimates.size == 0 and y_estimates.size == 0:
         return None
-    if x_estimates.size > 0:
+    has_left = bool(np.any(valid & (nearest_side == 0)))
+    has_right = bool(np.any(valid & (nearest_side == 1)))
+    has_top = bool(np.any(valid & (nearest_side == 2)))
+    has_bottom = bool(np.any(valid & (nearest_side == 3)))
+    update_x = x_estimates.size > 0 and (
+        not require_paired_edges or (has_left and has_right)
+    )
+    update_y = y_estimates.size > 0 and (
+        not require_paired_edges or (has_top and has_bottom)
+    )
+    if require_paired_edges and not (update_x or update_y):
+        return None
+    if update_x:
         result[0] = weighted_median(x_estimates, x_weights)
-    if y_estimates.size > 0:
+    if update_y:
         result[1] = weighted_median(y_estimates, y_weights)
     return result
 
