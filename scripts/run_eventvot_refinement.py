@@ -24,8 +24,8 @@ from dvs_enact import (
     empty_event_batch,
 )
 
-CACHE_MANIFEST_SCHEMA_VERSION = 1
 CACHE_CHUNK_SIZE = 1024 * 1024
+REFINEMENT_RESUME_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -138,9 +138,9 @@ def existing_output_result_is_complete(
     output_result_file: Path,
     base_boxes: np.ndarray,
     *,
-    expected_cache_key: str | None = None,
+    expected_resume_signature: dict[str, Any] | None = None,
 ) -> tuple[bool, np.ndarray | None]:
-    """Return whether an existing result file is complete enough to resume."""
+    """Return whether an existing result file is safe to reuse during resume."""
     if not output_result_file.exists():
         return False, None
     try:
@@ -155,112 +155,172 @@ def existing_output_result_is_complete(
         return False, None
     if np.any(output_boxes[:, 2:] <= 0.0):
         return False, None
-    if expected_cache_key is not None and not output_cache_manifest_matches(
+    if expected_resume_signature is not None and not output_resume_metadata_matches(
         output_result_file,
-        expected_cache_key,
+        expected_resume_signature,
     ):
         return False, None
     return True, output_boxes
 
 
-def output_cache_manifest_path(output_result_file: Path) -> Path:
-    """Return the per-sequence cache manifest path for an output result file."""
+def output_resume_metadata_path(output_result_file: Path) -> Path:
+    """Return the sidecar metadata path guarding resume reuse."""
     return output_result_file.with_name(
-        f"{output_result_file.stem}_cache_manifest.json"
+        f"{output_result_file.name}.dvs_enact_resume.json"
     )
 
 
-def output_cache_manifest_matches(
-    output_result_file: Path,
-    expected_cache_key: str,
-) -> bool:
-    """Return whether an existing output was produced by the same run settings."""
-    manifest_path = output_cache_manifest_path(output_result_file)
-    if not manifest_path.exists():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return (
-        manifest.get("schema_version") == CACHE_MANIFEST_SCHEMA_VERSION
-        and manifest.get("cache_key") == expected_cache_key
-    )
-
-
-def build_refinement_cache_manifest(
+def build_refinement_resume_signature(
+    sequence_name: str,
+    base_result_file: Path,
+    event_csv: Path,
+    frame_count: int,
     refiner: DVSContourRefiner,
-    acceptance_config: EventVOTAcceptanceConfig,
     *,
     event_column_order: str,
-    base_boxes: np.ndarray,
-    event_csv: Path,
+    acceptance_config: EventVOTAcceptanceConfig,
+    pipeline_name: str = "dvs_enact_contour_refinement",
+    extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the per-sequence cache manifest used to validate resume outputs."""
-    payload: dict[str, Any] = {
-        "schema_version": CACHE_MANIFEST_SCHEMA_VERSION,
+    """Build a deterministic signature for safe ``--skip-existing`` reuse.
+
+    Shape/finite-value checks only show that an output file can be parsed. They
+    do not show that it was produced from the same base boxes, raw event stream,
+    event-column interpretation, refiner configuration, and acceptance gates.
+    The resume signature intentionally includes those result-changing inputs so
+    stale outputs from older validation sweeps are recomputed instead of reused.
+    """
+    signature: dict[str, Any] = {
+        "schema_version": REFINEMENT_RESUME_SCHEMA_VERSION,
+        "pipeline": pipeline_name,
+        "sequence": sequence_name,
+        "frame_count": int(frame_count),
+        "base_result_sha256": sha256_file(base_result_file),
+        "event_csv_sha256": sha256_file(event_csv),
         "event_column_order": event_column_order,
-        "refiner_config": _json_cache_value(asdict(refiner.config)),
-        "acceptance_config": _json_cache_value(asdict(acceptance_config)),
-        "base_result_digest": _array_sha256(base_boxes),
-        "event_csv_digest": _file_sha256(event_csv),
+        "resolved_event_column_order": infer_eventvot_event_schema(
+            event_csv,
+            event_column_order,
+        ),
+        "refiner_class": f"{type(refiner).__module__}.{type(refiner).__qualname__}",
+        "refiner_config": _json_ready(asdict(refiner.config)),
+        "acceptance_config": _json_ready(asdict(acceptance_config)),
     }
-    payload["cache_key"] = _cache_key_for_payload(payload)
-    return payload
+    if extra_config is not None:
+        signature["extra_config"] = _json_ready(extra_config)
+    return _json_ready(signature)
 
 
-def save_output_cache_manifest(
+def save_refinement_resume_metadata(
     output_result_file: Path,
-    manifest: dict[str, Any],
-) -> None:
-    """Write the per-sequence cache manifest next to the output result file."""
-    manifest_path = output_cache_manifest_path(output_result_file)
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+    resume_signature: dict[str, Any],
+    *,
+    base_result_file: Path,
+    event_csv: Path,
+    sequence_summary: dict[str, Any] | None = None,
+) -> Path:
+    """Write sidecar metadata used to validate future resume attempts."""
+    metadata_path = output_resume_metadata_path(output_result_file)
+    metadata = {
+        "schema_version": REFINEMENT_RESUME_SCHEMA_VERSION,
+        "resume_signature": _json_ready(resume_signature),
+        "sources": {
+            "base_result_file": str(base_result_file),
+            "event_csv": str(event_csv),
+            "output_result_file": str(output_result_file),
+        },
+    }
+    if sequence_summary is not None:
+        metadata["sequence_summary"] = _resume_sequence_summary_for_metadata(
+            sequence_summary,
+        )
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+    return metadata_path
+
+
+def output_resume_metadata_matches(
+    output_result_file: Path,
+    expected_resume_signature: dict[str, Any],
+) -> bool:
+    """Return whether sidecar metadata matches the current run signature."""
+    metadata = load_resume_metadata(output_result_file)
+    if metadata is None:
+        return False
+    if metadata.get("schema_version") != REFINEMENT_RESUME_SCHEMA_VERSION:
+        return False
+    return metadata.get("resume_signature") == _json_ready(
+        expected_resume_signature,
     )
 
 
-def _cache_key_for_payload(payload: dict[str, Any]) -> str:
-    cache_payload = {
-        key: value for key, value in payload.items() if key != "cache_key"
-    }
-    encoded = json.dumps(
-        cache_payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def load_resume_metadata(output_result_file: Path) -> dict[str, Any] | None:
+    """Load resume sidecar metadata if it is present and parseable."""
+    metadata_path = output_resume_metadata_path(output_result_file)
+    if not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
 
 
-def _json_cache_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _json_cache_value(item) for key, item in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_json_cache_value(item) for item in value]
-    if isinstance(value, float):
-        if math.isnan(value):
-            return "nan"
-        if math.isinf(value):
-            return "inf" if value > 0.0 else "-inf"
-    return value
+def load_resume_sequence_summary(output_result_file: Path) -> dict[str, Any] | None:
+    """Return stored diagnostics from the sidecar metadata when available."""
+    metadata = load_resume_metadata(output_result_file)
+    if metadata is None:
+        return None
+    summary = metadata.get("sequence_summary")
+    return summary if isinstance(summary, dict) else None
 
 
-def _array_sha256(array: np.ndarray) -> str:
-    normalized = np.ascontiguousarray(np.asarray(array, dtype="<f8"))
-    digest = hashlib.sha256()
-    digest.update(str(normalized.shape).encode("ascii"))
-    digest.update(normalized.tobytes())
-    return digest.hexdigest()
-
-
-def _file_sha256(path: Path) -> str:
+def sha256_file(path: Path, *, chunk_size: int = CACHE_CHUNK_SIZE) -> str:
+    """Return a SHA-256 digest for a result-changing input file."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(CACHE_CHUNK_SIZE), b""):
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _resume_sequence_summary_for_metadata(summary: dict[str, Any]) -> dict[str, Any]:
+    """Return compact sequence diagnostics to reuse on skip-existing runs."""
+    keys = (
+        "sequence",
+        "sequence_dir",
+        "event_csv",
+        "base_result_file",
+        "output_result_file",
+        "resume_metadata_file",
+        "frame_count",
+        "refined_frame_count",
+        "accepted_refinement_count",
+        "held_rejected_center_count",
+        "refiner_success_frame_count",
+        "fallback_counts",
+        "acceptance_counts",
+        "mean_used_event_count",
+        "total_refinement_seconds",
+    )
+    return {key: _json_ready(summary[key]) for key in keys if key in summary}
+
+
+def _json_ready(value: Any) -> Any:
+    """Return ``value`` converted to deterministic JSON-compatible objects."""
+    if isinstance(value, dict):
+        return {str(key): _json_ready(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
 
 
 def read_eventvot_event_time_span(
@@ -527,28 +587,35 @@ def refine_sequence(
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
     event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
-    cache_manifest = build_refinement_cache_manifest(
+    resume_signature = build_refinement_resume_signature(
+        sequence_name,
+        base_result_file,
+        event_csv,
+        frame_count,
         refiner,
-        acceptance_config,
         event_column_order=event_column_order,
-        base_boxes=base_boxes,
-        event_csv=event_csv,
+        acceptance_config=acceptance_config,
     )
+    resume_metadata_file = output_resume_metadata_path(output_result_file)
     if skip_existing:
         complete, output_boxes = existing_output_result_is_complete(
             output_result_file,
             base_boxes,
-            expected_cache_key=str(cache_manifest["cache_key"]),
+            expected_resume_signature=resume_signature,
         )
         if complete and output_boxes is not None:
             return summarize_skipped_sequence(
                 sequence_name,
                 sequence_dir,
-                cache_manifest,
                 base_result_file,
+                event_csv,
                 output_result_file,
                 base_boxes,
                 output_boxes,
+                resume_metadata_file=resume_metadata_file,
+                stored_sequence_summary=load_resume_sequence_summary(
+                    output_result_file,
+                ),
             )
 
     reset_refiner_state = getattr(refiner, "reset_state", None)
@@ -679,7 +746,6 @@ def refine_sequence(
 
     save_xywh_result_file(output_result_file, refined_boxes)
     _save_timing_file(output_result_file, timings)
-    save_output_cache_manifest(output_result_file, cache_manifest)
     fallback_counts = Counter(
         "refined" if frame["fallback_reason"] is None else frame["fallback_reason"]
         for frame in frames
@@ -696,11 +762,12 @@ def refine_sequence(
         1 for frame in frames if frame.get("held_rejected_center_correction")
     )
     used_event_counts = [int(frame["used_event_count"]) for frame in frames[1:]]
-    return {
+    summary = {
         "sequence": sequence_name,
         "sequence_dir": str(sequence_dir),
         "event_csv": str(event_csv),
         "base_result_file": str(base_result_file),
+        "resume_metadata_file": str(resume_metadata_file),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
         "refined_frame_count": int(accepted_refinement_count),
@@ -712,24 +779,50 @@ def refine_sequence(
         "mean_used_event_count": float(np.mean(used_event_counts))
         if used_event_counts
         else 0.0,
-        "cache_key": cache_manifest["cache_key"],
-        "cache_manifest_path": str(output_cache_manifest_path(output_result_file)),
         "total_refinement_seconds": float(np.sum(timings)),
         "frames": frames,
     }
+    save_refinement_resume_metadata(
+        output_result_file,
+        resume_signature,
+        base_result_file=base_result_file,
+        event_csv=event_csv,
+        sequence_summary=summary,
+    )
+    return summary
 
 
 def summarize_skipped_sequence(
     sequence_name: str,
     sequence_dir: Path,
-    cache_manifest: dict[str, Any] | None,
     base_result_file: Path,
+    event_csv: Path | None,
     output_result_file: Path,
     base_boxes: np.ndarray,
     output_boxes: np.ndarray,
+    *,
+    resume_metadata_file: Path | None = None,
+    stored_sequence_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a diagnostics summary for a complete result reused during resume."""
     frame_count = int(output_boxes.shape[0])
+    if stored_sequence_summary is not None:
+        summary = dict(stored_sequence_summary)
+        summary.update(
+            {
+                "sequence": sequence_name,
+                "sequence_dir": str(sequence_dir),
+                "event_csv": None if event_csv is None else str(event_csv),
+                "base_result_file": str(base_result_file),
+                "resume_metadata_file": None
+                if resume_metadata_file is None
+                else str(resume_metadata_file),
+                "output_result_file": str(output_result_file),
+                "skipped_existing_output": True,
+                "frames": [],
+            }
+        )
+        return summary
     changed_frame_count = int(
         np.any(~np.isclose(output_boxes, base_boxes, rtol=1e-6, atol=1e-6), axis=1).sum()
     )
@@ -740,8 +833,11 @@ def summarize_skipped_sequence(
     return {
         "sequence": sequence_name,
         "sequence_dir": str(sequence_dir),
-        "event_csv": None,
+        "event_csv": None if event_csv is None else str(event_csv),
         "base_result_file": str(base_result_file),
+        "resume_metadata_file": None
+        if resume_metadata_file is None
+        else str(resume_metadata_file),
         "output_result_file": str(output_result_file),
         "frame_count": frame_count,
         "refined_frame_count": changed_frame_count,
@@ -753,8 +849,6 @@ def summarize_skipped_sequence(
         "mean_used_event_count": 0.0,
         "total_refinement_seconds": float(np.sum(timings)),
         "skipped_existing_output": True,
-        "cache_key": cache_manifest["cache_key"] if cache_manifest is not None else None,
-        "cache_manifest_path": str(output_cache_manifest_path(output_result_file)),
         "frames": [],
     }
 

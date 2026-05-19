@@ -159,8 +159,8 @@ def refine_sequence_multihypothesis(
             return summarize_skipped_sequence(
                 sequence_name,
                 sequence_dir,
-                None,
                 base_result_file,
+                None,
                 output_result_file,
                 base_boxes,
                 output_boxes,

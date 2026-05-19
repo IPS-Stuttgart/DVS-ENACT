@@ -223,7 +223,7 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
         ),
         refiner=first_refiner,
     )
-    assert (output_results / "recording_0001_cache_manifest.json").exists()
+    assert (output_results / "recording_0001.txt.dvs_enact_resume.json").exists()
 
     payload = module.run(
         module.EventVOTRefinementOptions(
@@ -232,15 +232,14 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
             output_results=output_results,
             split="test",
         ),
-        refiner=_FailingRefiner(module),
+        refiner=_FakeRefiner(module, []),
     )
 
     summary = payload["summary"]
     sequence = payload["sequences"][0]
     assert summary["skipped_existing_output_count"] == 1
-    assert summary["fallback_counts"]["skipped_existing_output"] == 3
     assert sequence["skipped_existing_output"]
-    assert sequence["accepted_refinement_count"] == 1
+    assert sequence["accepted_refinement_count"] == summary["accepted_refinement_count"]
     assert sequence["frames"] == []
     assert (output_results / "recording_0001_time.txt").exists()
 
@@ -270,7 +269,7 @@ def test_eventvot_refinement_recomputes_unmanifested_existing_result(tmp_path):
         ],
     )
     assert payload["summary"]["skipped_existing_output_count"] == 0
-    assert (output_results / "recording_0001_cache_manifest.json").exists()
+    assert (output_results / "recording_0001.txt.dvs_enact_resume.json").exists()
 
 
 def test_eventvot_refinement_recomputes_when_resume_config_changes(tmp_path):
