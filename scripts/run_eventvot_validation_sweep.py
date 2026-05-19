@@ -1006,9 +1006,9 @@ def evaluate_eventvot_results(
         mean_ious.append(sequence_metrics["mean_iou"])
         evaluated_frame_count += int(sequence_metrics["evaluated_frame_count"])
 
-    success_curve = mean_nonzero_curves(success_curves)
-    precision_curve = mean_nonzero_curves(precision_curves)
-    normalized_precision_curve = mean_nonzero_curves(normalized_precision_curves)
+    success_curve = mean_curves(success_curves)
+    precision_curve = mean_curves(precision_curves)
+    normalized_precision_curve = mean_curves(normalized_precision_curves)
     metrics = summarize_eventvot_curves(
         sequence_count=len(sequence_names),
         evaluated_frame_count=evaluated_frame_count,
@@ -1196,14 +1196,12 @@ def rect_iou_xywh(first: np.ndarray, second: np.ndarray) -> np.ndarray:
     return intersection / (area_first + area_second - intersection)
 
 
-def mean_nonzero_curves(curves: list[np.ndarray]) -> np.ndarray:
+def mean_curves(curves: list[np.ndarray]) -> np.ndarray:
+    """Average sequence curves without dropping all-zero failed sequences."""
     if not curves:
         return np.zeros(1, dtype=float)
     stacked = np.vstack(curves)
-    nonzero = stacked[np.sum(stacked, axis=1) > np.finfo(float).eps, :]
-    if nonzero.size == 0:
-        return np.zeros(stacked.shape[1], dtype=float)
-    return np.mean(nonzero, axis=0)
+    return np.mean(stacked, axis=0)
 
 
 def load_numeric_matrix(path: Path, *, min_columns: int) -> np.ndarray:

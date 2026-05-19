@@ -14,7 +14,7 @@ from report_utils import write_csv
 from run_eventvot_refinement import resolve_eventvot_split_root, resolve_sequence_names
 from run_eventvot_validation_sweep import (
     evaluate_eventvot_sequence,
-    mean_nonzero_curves,
+    mean_curves,
     summarize_eventvot_curves,
 )
 
@@ -93,7 +93,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--fps",
         action="append",
         default=[],
-        help="Optional FPS override as Tracker Name=value.",
+        help=(
+            "Optional end-to-end FPS override as Tracker Name=value. Use this "
+            "for tracker-plus-DVS-ENACT rows because timing files written by "
+            "run_eventvot_refinement.py contain only refinement time."
+        ),
+    )
+    parser.add_argument(
+        "--refinement-only-tracker",
+        action="append",
+        default=[],
+        help=(
+            "Tracker name whose automatic timing files measure only post-hoc "
+            "DVS-ENACT refinement. End-to-end FPS remains n/a unless --fps is "
+            "provided. Default '+ DVS-ENACT' rows are detected automatically."
+        ),
     )
     parser.add_argument("--attribute-root", type=Path)
     parser.add_argument("--eventvot-toolkit-root", type=Path)
@@ -152,6 +166,7 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
         requested_sequences=tuple(args.sequence),
     )
     fps_overrides = parse_fps_overrides(args.fps)
+    refinement_only_trackers = set(args.refinement_only_tracker)
     attribute_root = resolve_attribute_root(args)
     attribute_map = (
         load_attribute_map(attribute_root, sequence_names)
@@ -169,10 +184,13 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
             attribute_map,
             args.min_attribute_sequences,
         )
-        fps = fps_overrides.get(spec.name)
-        if fps is None:
-            fps = estimate_fps(spec.result_dir, sequence_names)
-        tracker_payload["fps"] = fps
+        attach_fps_metrics(
+            tracker_payload,
+            spec,
+            sequence_names,
+            fps_overrides,
+            refinement_only_trackers,
+        )
         tracker_payloads[spec.name] = tracker_payload
         table_rows.append(make_table_row(spec.name, tracker_payload))
 
@@ -194,12 +212,15 @@ def run_report(args: argparse.Namespace) -> dict[str, Any]:
 
     highlights = args.highlight_attribute or list(DEFAULT_HIGHLIGHT_ATTRIBUTES)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "description": (
             "EventVOT comparison report. Table columns SR, PR, and NPR are AUC "
             "scores over the official success, precision, and normalized "
             "precision curves. Pairwise gains isolate the post-hoc DVS-ENACT "
-            "physics layer."
+            "physics layer. FPS denotes end-to-end throughput. Automatic timing "
+            "estimates for post-hoc '+ DVS-ENACT' rows are reported separately "
+            "as refinement_fps because run_eventvot_refinement.py times only "
+            "the refinement loop."
         ),
         "summary": {
             "split": args.split,
@@ -306,9 +327,9 @@ def aggregate_sequence_metrics(
     evaluated_frame_count = sum(
         int(sequence_metrics[name]["evaluated_frame_count"]) for name in selected_sequences
     )
-    success_curve = mean_nonzero_curves(success_curves)
-    precision_curve = mean_nonzero_curves(precision_curves)
-    normalized_precision_curve = mean_nonzero_curves(normalized_precision_curves)
+    success_curve = mean_curves(success_curves)
+    precision_curve = mean_curves(precision_curves)
+    normalized_precision_curve = mean_curves(normalized_precision_curves)
     return summarize_eventvot_curves(
         sequence_count=len(selected_sequences),
         evaluated_frame_count=evaluated_frame_count,
@@ -345,6 +366,58 @@ def evaluate_attributes(
     return attributes
 
 
+def attach_fps_metrics(
+    tracker_payload: dict[str, Any],
+    spec: TrackerSpec,
+    sequence_names: list[str],
+    fps_overrides: dict[str, float],
+    refinement_only_trackers: set[str],
+) -> None:
+    """Attach end-to-end and refinement-only FPS fields to one tracker payload.
+
+    ``run_eventvot_refinement.py`` writes ``*_time.txt`` files that contain the
+    wall-clock time spent inside the DVS-ENACT refinement loop. For rows such as
+    ``HDETrackV2 + DVS-ENACT`` this is not the end-to-end tracker runtime, so it
+    must not be reported in the paper table's FPS column unless the caller
+    provides an explicit end-to-end value via ``--fps``.
+    """
+    timing_fps = estimate_fps(spec.result_dir, sequence_names)
+    fps_override = fps_overrides.get(spec.name)
+    refinement_only = is_refinement_only_timing_row(
+        spec.name,
+        refinement_only_trackers,
+    )
+
+    if fps_override is not None:
+        tracker_payload["fps"] = fps_override
+        tracker_payload["fps_source"] = "override"
+        tracker_payload["fps_scope"] = "end_to_end"
+        tracker_payload["refinement_fps"] = timing_fps if refinement_only else None
+        return
+
+    if refinement_only:
+        tracker_payload["fps"] = None
+        tracker_payload["fps_source"] = None
+        tracker_payload["fps_scope"] = None
+        tracker_payload["refinement_fps"] = timing_fps
+        return
+
+    tracker_payload["fps"] = timing_fps
+    tracker_payload["fps_source"] = "time_file" if timing_fps is not None else None
+    tracker_payload["fps_scope"] = "end_to_end" if timing_fps is not None else None
+    tracker_payload["refinement_fps"] = None
+
+
+def is_refinement_only_timing_row(
+    tracker_name: str,
+    refinement_only_trackers: set[str],
+) -> bool:
+    """Return whether automatic timing files are DVS-ENACT-only timings."""
+    if tracker_name in refinement_only_trackers:
+        return True
+    return "+DVS-ENACT" in tracker_name.replace(" ", "")
+
+
 def make_table_row(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     overall = payload["overall"]
     return {
@@ -353,6 +426,9 @@ def make_table_row(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         "pr": overall["pr_auc"],
         "npr": overall["npr_auc"],
         "fps": payload["fps"],
+        "fps_source": payload["fps_source"],
+        "fps_scope": payload["fps_scope"],
+        "refinement_fps": payload["refinement_fps"],
         "pr_20": overall["pr_20"],
         "npr_020": overall["npr_020"],
         "mean_iou": overall["mean_iou"],
@@ -380,6 +456,7 @@ def make_pairwise_rows(
                 "npr_delta": refined["npr"] - base["npr"],
                 "fps_delta": optional_delta(refined["fps"], base["fps"]),
                 "fps_ratio": optional_ratio(refined["fps"], base["fps"]),
+                "refined_refinement_fps": refined.get("refinement_fps"),
             }
         )
     return gain_rows
@@ -531,8 +608,8 @@ def optional_ratio(first: float | None, second: float | None) -> float | None:
 def write_markdown_table(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "| Tracker | SR | PR | NPR | FPS |",
-        "|---|---:|---:|---:|---:|",
+        "| Tracker | SR | PR | NPR | End-to-end FPS | Refinement FPS |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
@@ -541,7 +618,8 @@ def write_markdown_table(path: Path, rows: list[dict[str, Any]]) -> None:
             f"{format_metric(row['sr'])} | "
             f"{format_metric(row['pr'])} | "
             f"{format_metric(row['npr'])} | "
-            f"{format_fps(row['fps'])} |"
+            f"{format_fps(row['fps'])} | "
+            f"{format_fps(row.get('refinement_fps'))} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

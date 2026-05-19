@@ -94,6 +94,16 @@ def test_eventvot_validation_metrics_match_perfect_boxes(tmp_path, monkeypatch):
     assert metrics["npr_020"] == 1.0
 
 
+def test_eventvot_curve_average_keeps_all_zero_sequences(monkeypatch):
+    module = _load_module(monkeypatch)
+    perfect_curve = np.ones_like(module.OVERLAP_THRESHOLDS, dtype=float)
+    failed_curve = np.zeros_like(module.OVERLAP_THRESHOLDS, dtype=float)
+
+    averaged = module.mean_curves([perfect_curve, failed_curve])
+
+    assert np.allclose(averaged, 0.5)
+
+
 def test_validation_sweep_refuses_test_split(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     args = argparse.Namespace(
