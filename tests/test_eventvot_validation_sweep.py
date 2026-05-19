@@ -193,6 +193,8 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
         "none,0.50",
         "--projection-center-smoothing",
         "none,0.50",
+        "--projection-motion-smoothing",
+        "none,0.25",
         "--projection-center-clamp-ratio",
         "none,0.04",
         "--projection-center-deadband-ratio",
@@ -214,8 +216,8 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     grid = module.iter_parameter_grid(args)
     payload = module.run_sweep(args)
 
-    assert len(grid) == 1280
-    assert payload["summary"]["config_count"] == 1280
+    assert len(grid) == 2560
+    assert payload["summary"]["config_count"] == 2560
     assert sorted({config["refinement_mode"] for config in grid}) == [
         "box",
         "height-only",
@@ -244,6 +246,13 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
             if config["projection_center_smoothing"] is not None
         }
     ) == [0.50]
+    assert sorted(
+        {
+            config["projection_motion_smoothing"]
+            for config in grid
+            if config["projection_motion_smoothing"] is not None
+        }
+    ) == [0.25]
     assert sorted(
         {
             config["projection_size_deadband_ratio"]
@@ -467,6 +476,8 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
         "0.50",
         "--projection-center-smoothing",
         "0.25",
+        "--projection-motion-smoothing",
+        "0.40",
         "--projection-center-clamp-ratio",
         "0.04",
         "--projection-center-deadband-ratio",
@@ -491,6 +502,7 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
     assert refiner.projection_height_blend == 0.10
     assert refiner.projection_size_smoothing == 0.50
     assert refiner.projection_center_smoothing == 0.25
+    assert refiner.projection_motion_smoothing == 0.40
     assert refiner.projection_center_clamp_ratio == 0.04
     assert refiner.projection_center_deadband_ratio == 0.02
     assert refiner.projection_size_clamp_ratio == 0.20

@@ -275,6 +275,21 @@ def test_center_only_projection_smooths_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([20.0, 20.0, 30.0, 40.0]))
 
 
+def test_center_only_projection_smooths_center_with_base_motion(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([10.0, 0.0, 20.0, 20.0]),
+        np.array([30.0, 0.0, 20.0, 20.0]),
+        refinement_mode="center-only",
+        previous_projected_center=np.array([12.0, 10.0]),
+        previous_candidate_center=np.array([10.0, 10.0]),
+        projection_motion_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([21.0, 0.0, 20.0, 20.0]))
+
+
 def test_size_only_projection_ignores_center_smoothing(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -414,6 +429,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
     assert "--projection-center-smoothing" in help_text
+    assert "--projection-motion-smoothing" in help_text
     assert "--projection-center-clamp-ratio" in help_text
     assert "--projection-center-deadband-ratio" in help_text
     assert "--projection-size-clamp-ratio" in help_text
