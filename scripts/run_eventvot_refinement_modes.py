@@ -6,9 +6,10 @@ use cases are conservative projection modes for strong trackers such as
 HDETrackV2: ``center-only`` lets DVS-ENACT correct the box center while retaining
 the external tracker's size, ``size-only`` lets DVS-ENACT correct the box size
 while retaining the external tracker's center, and ``width-only``/``height-only``
-let validation sweeps keep just the useful size axis. ``event-centroid-center``
-and ``event-boundary-center`` keep the external tracker size and center the box
-on robust event-cloud coordinates inside the DVS-ENACT search crop.
+let validation sweeps keep just the useful size axis. ``event-centroid-center``,
+``event-boundary-center``, and ``event-edge-center`` keep the external tracker
+size and center the box on robust event-cloud coordinates inside the DVS-ENACT
+search crop.
 """
 
 from __future__ import annotations
@@ -29,11 +30,16 @@ REFINEMENT_MODES = (
     "center-only",
     "event-boundary-center",
     "event-centroid-center",
+    "event-edge-center",
     "size-only",
     "width-only",
     "height-only",
 )
-EVENT_CENTER_MODES = {"event-boundary-center", "event-centroid-center"}
+EVENT_CENTER_MODES = {
+    "event-boundary-center",
+    "event-centroid-center",
+    "event-edge-center",
+}
 PROJECTION_CONFIDENCE_FIELDS = (
     "mean_event_activity",
     "active_fraction",
@@ -124,7 +130,9 @@ class ProjectedOutputRefiner:
                 candidate_xywh,
                 events,
                 result.search_bbox,
-                boundary_weighted=self.refinement_mode == "event-boundary-center",
+                boundary_weighted=self.refinement_mode
+                in {"event-boundary-center", "event-edge-center"},
+                edge_inferred=self.refinement_mode == "event-edge-center",
             )
             if event_center_xywh is None:
                 return replace(
@@ -218,8 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
             "keeps the base-track center and transfers only the DVS-ENACT "
             "width/height correction. 'width-only' and 'height-only' transfer "
             "only one DVS-ENACT size axis. 'event-centroid-center' and "
-            "'event-boundary-center' keep the base-track size and use robust "
-            "event-cloud centers."
+            "'event-boundary-center' use robust event-cloud centers. "
+            "'event-edge-center' infers the center from nearby candidate edges."
         ),
     )
     parser.add_argument(
@@ -547,6 +555,7 @@ def event_center_box(
     search_bbox: dict[str, float] | None = None,
     *,
     boundary_weighted: bool = False,
+    edge_inferred: bool = False,
 ) -> np.ndarray | None:
     """Return candidate-sized xywh centered on robust event-cloud coordinates."""
     if int(getattr(events, "count", 0)) <= 0:
@@ -573,16 +582,87 @@ def event_center_box(
     )
     if boundary_weighted and weights is None:
         return None
-    centroid = np.array(
-        [
-            weighted_median(x[mask], weights),
-            weighted_median(y[mask], weights),
-        ],
-        dtype=float,
-    )
+    if edge_inferred:
+        centroid = edge_inferred_center(candidate, x[mask], y[mask], weights)
+        if centroid is None:
+            return None
+    else:
+        centroid = np.array(
+            [
+                weighted_median(x[mask], weights),
+                weighted_median(y[mask], weights),
+            ],
+            dtype=float,
+        )
     output = np.array(candidate, dtype=float, copy=True)
     output[:2] = centroid - 0.5 * output[2:]
     return output
+
+
+def edge_inferred_center(
+    candidate_xywh: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    weights: np.ndarray | None,
+) -> np.ndarray | None:
+    """Infer object center by projecting events from their nearest box edge."""
+    candidate = np.asarray(candidate_xywh, dtype=float).reshape(4)
+    x_min, y_min, width, height = candidate.tolist()
+    center = candidate[:2] + 0.5 * candidate[2:]
+    distances = np.vstack(
+        (
+            np.abs(x - x_min),
+            np.abs(x - (x_min + width)),
+            np.abs(y - y_min),
+            np.abs(y - (y_min + height)),
+        )
+    )
+    nearest_side = np.argmin(distances, axis=0)
+    valid = np.isfinite(x) & np.isfinite(y)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=float)
+        valid &= np.isfinite(weights) & (weights > 0.0)
+    if not np.any(valid):
+        return None
+
+    result = np.array(center, dtype=float, copy=True)
+    x_estimates = np.concatenate(
+        (
+            x[valid & (nearest_side == 0)] + 0.5 * width,
+            x[valid & (nearest_side == 1)] - 0.5 * width,
+        )
+    )
+    y_estimates = np.concatenate(
+        (
+            y[valid & (nearest_side == 2)] + 0.5 * height,
+            y[valid & (nearest_side == 3)] - 0.5 * height,
+        )
+    )
+    x_weights = _edge_estimate_weights(weights, valid, nearest_side, (0, 1))
+    y_weights = _edge_estimate_weights(weights, valid, nearest_side, (2, 3))
+    if x_estimates.size == 0 and y_estimates.size == 0:
+        return None
+    if x_estimates.size > 0:
+        result[0] = weighted_median(x_estimates, x_weights)
+    if y_estimates.size > 0:
+        result[1] = weighted_median(y_estimates, y_weights)
+    return result
+
+
+def _edge_estimate_weights(
+    weights: np.ndarray | None,
+    valid: np.ndarray,
+    nearest_side: np.ndarray,
+    sides: tuple[int, int],
+) -> np.ndarray | None:
+    if weights is None:
+        return None
+    return np.concatenate(
+        (
+            weights[valid & (nearest_side == sides[0])],
+            weights[valid & (nearest_side == sides[1])],
+        )
+    )
 
 
 def _boundary_event_weights(
