@@ -348,6 +348,14 @@ def test_validation_sweep_projection_grid_parses_dispatch_strings(tmp_path, monk
     assert all(config["projection_no_clip"] for config in grid)
 
 
+def test_validation_sweep_accepts_event_centroid_refinement_mode(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    values = module.parse_refinement_mode_values(("event-centroid-center",))
+
+    assert values == ["event-centroid-center"]
+
+
 def test_validation_sweep_optional_acceptance_defaults_disable_gates(
     tmp_path,
     monkeypatch,

@@ -54,7 +54,10 @@ from run_eventvot_refinement_modes import (  # noqa: E402
 from eventvot_support_score import event_support_score  # noqa: E402
 from run_eventvot_validation_sweep import evaluate_eventvot_results  # noqa: E402
 
-REPLAY_OUTPUT_MODES = ("diagnostic", *REFINEMENT_MODES)
+REPLAYABLE_REFINEMENT_MODES = tuple(
+    mode for mode in REFINEMENT_MODES if mode != "event-centroid-center"
+)
+REPLAY_OUTPUT_MODES = ("diagnostic", *REPLAYABLE_REFINEMENT_MODES)
 
 
 @dataclass(frozen=True)

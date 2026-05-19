@@ -94,6 +94,12 @@ def _replay_center_hold_sequence(module, frames, **config_kwargs):
     return module.replay_sequence_boxes("seq1", base_boxes, frames, config)
 
 
+def test_acceptance_replay_excludes_raw_event_projection_modes():
+    module = _load_module()
+
+    assert "event-centroid-center" not in module.REPLAY_OUTPUT_MODES
+
+
 def test_acceptance_replay_raw_gate_rejects_bad_unblended_update():
     module = _load_module()
     frame = {
