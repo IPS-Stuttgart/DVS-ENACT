@@ -128,6 +128,33 @@ def test_validation_sweep_dry_run_uses_requested_grid(tmp_path, monkeypatch):
     assert (tmp_path / "out" / "validation_sweep_summary.json").exists()
 
 
+def test_validation_sweep_accepts_event_support_projection_confidence(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_module(monkeypatch)
+    _split_root, result_root = _write_validation_fixture(tmp_path)
+    args = _parse_sweep_args(
+        module,
+        tmp_path,
+        result_root,
+        *_single_config_grid_args(),
+        "--projection-confidence-field",
+        "event_support_score",
+        "--projection-confidence-floor",
+        "0.10",
+        "--projection-confidence-ceiling",
+        "0.50",
+        "--dry-run",
+    )
+
+    grid = module.iter_parameter_grid(args)
+
+    assert grid[0]["projection_confidence_field"] == "event_support_score"
+    assert grid[0]["projection_confidence_floor"] == 0.10
+    assert grid[0]["projection_confidence_ceiling"] == 0.50
+
+
 def test_validation_sweep_acceptance_grid_parses_dispatch_strings(tmp_path, monkeypatch):
     module = _load_module(monkeypatch)
     _split_root, result_root = _write_validation_fixture(tmp_path)

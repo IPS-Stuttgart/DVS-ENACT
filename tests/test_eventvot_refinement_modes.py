@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -351,6 +352,42 @@ def test_projection_confidence_weighting_missing_value_keeps_candidate(monkeypat
     np.testing.assert_allclose(projected, np.array([10.0, 10.0, 20.0, 20.0]))
 
 
+def test_event_support_score_combines_confidence_diagnostics(monkeypatch):
+    module = _load_module(monkeypatch)
+    strong = SimpleNamespace(
+        used_event_count=64,
+        active_measurement_count=48,
+        mean_event_activity=0.60,
+        polarity_consistency_fraction=0.80,
+    )
+    weak = SimpleNamespace(
+        used_event_count=16,
+        active_measurement_count=2,
+        mean_event_activity=0.05,
+        polarity_consistency_fraction=0.55,
+    )
+
+    strong_score = module.projection_confidence_value(strong, "event_support_score")
+    weak_score = module.projection_confidence_value(weak, "event_support_score")
+
+    assert strong_score == pytest.approx((0.60 * 0.75 * 1.0 * 0.80) ** 0.25)
+    assert 0.0 < weak_score < strong_score < 1.0
+
+
+def test_event_support_score_handles_missing_polarity(monkeypatch):
+    module = _load_module(monkeypatch)
+    result = SimpleNamespace(
+        used_event_count=32,
+        active_measurement_count=16,
+        mean_event_activity=0.50,
+        polarity_consistency_fraction=None,
+    )
+
+    score = module.projection_confidence_value(result, "event_support_score")
+
+    assert score == pytest.approx((0.50 * 0.50 * 0.50) ** (1.0 / 3.0))
+
+
 def test_box_projection_preserves_refiner_output(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -453,4 +490,5 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-size-clamp-ratio" in help_text
     assert "--projection-size-deadband-ratio" in help_text
     assert "--projection-confidence-field" in help_text
+    assert "event_support_score" in help_text
     assert "--projection-min-raw-height-ratio" in help_text
