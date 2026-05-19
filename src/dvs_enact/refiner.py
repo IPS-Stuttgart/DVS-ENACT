@@ -56,6 +56,7 @@ class DVSContourRefinerConfig:
     min_event_velocity: float = 1e-6
     input_bbox_format: str = "xyxy"
     output_bbox_format: str = "xyxy"
+    event_crop_coordinate_mode: str = "closed"
     image_width: float | None = None
     image_height: float | None = None
     event_activity_floor: float = 0.05
@@ -98,6 +99,10 @@ class DVSContourRefinerConfig:
             raise ValueError(
                 "event_selection_mode must be 'chronological', 'boundary', "
                 "or 'normal_flow'"
+            )
+        if self.event_crop_coordinate_mode not in {"closed", "half_open"}:
+            raise ValueError(
+                "event_crop_coordinate_mode must be 'closed' or 'half_open'"
             )
         if self.event_selection_angular_bins <= 0:
             raise ValueError("event_selection_angular_bins must be positive")
@@ -190,7 +195,11 @@ class DVSContourRefiner:
             image_width=self.config.image_width,
             image_height=self.config.image_height,
         )
-        cropped = crop_events_to_bbox(events, search_bbox)
+        cropped = crop_events_to_bbox(
+            events,
+            search_bbox,
+            include_upper_bounds=self.config.event_crop_coordinate_mode == "closed",
+        )
         velocity = self._event_velocity(
             candidate,
             previous_candidate_bbox,
@@ -453,23 +462,26 @@ def clip_bbox(
     return bbox_to_dict((x_min, y_min, max(x_min, x_max), max(y_min, y_max)))
 
 
-def crop_events_to_bbox(events: EventBatch, bbox: BBoxInput) -> EventBatch:
+def crop_events_to_bbox(
+    events: EventBatch,
+    bbox: BBoxInput,
+    *,
+    include_upper_bounds: bool = True,
+) -> EventBatch:
     """Return events inside a bbox.
 
-    ``bbox_to_dict`` represents boxes as continuous extents, i.e. ``xywh`` maps
-    to ``[x, x + width) x [y, y + height)``. For integer event coordinates this
-    is equivalent to the EventVOT evaluator's inclusive ``x + width - 1`` /
-    ``y + height - 1`` convention and avoids selecting one extra right/bottom
-    pixel column.
+    Set ``include_upper_bounds=False`` for half-open pixel extents, matching
+    ``xywh`` boxes where valid event pixels satisfy ``x <= px < x + width``.
     """
     normalized = bbox_to_dict(bbox)
     if events.count == 0:
         return empty_event_batch()
+    upper_bound_operator = np.less_equal if include_upper_bounds else np.less
     mask = (
         (events.x >= normalized["x_min"])
-        & (events.x < normalized["x_max"])
+        & upper_bound_operator(events.x, normalized["x_max"])
         & (events.y >= normalized["y_min"])
-        & (events.y < normalized["y_max"])
+        & upper_bound_operator(events.y, normalized["y_max"])
     )
     return EventBatch(
         ts=events.ts[mask],

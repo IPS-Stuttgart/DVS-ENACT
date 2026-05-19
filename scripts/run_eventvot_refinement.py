@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -22,6 +23,9 @@ from dvs_enact import (
     EventBatch,
     empty_event_batch,
 )
+
+CACHE_MANIFEST_SCHEMA_VERSION = 1
+CACHE_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ def default_eventvot_refiner() -> DVSContourRefiner:
         DVSContourRefinerConfig(
             input_bbox_format="xywh",
             output_bbox_format="xywh",
+            event_crop_coordinate_mode="half_open",
             image_width=1280,
             image_height=720,
             search_expansion_factor=1.25,
@@ -132,6 +137,8 @@ def save_xywh_result_file(path: Path, boxes: np.ndarray) -> None:
 def existing_output_result_is_complete(
     output_result_file: Path,
     base_boxes: np.ndarray,
+    *,
+    expected_cache_key: str | None = None,
 ) -> tuple[bool, np.ndarray | None]:
     """Return whether an existing result file is complete enough to resume."""
     if not output_result_file.exists():
@@ -148,7 +155,112 @@ def existing_output_result_is_complete(
         return False, None
     if np.any(output_boxes[:, 2:] <= 0.0):
         return False, None
+    if expected_cache_key is not None and not output_cache_manifest_matches(
+        output_result_file,
+        expected_cache_key,
+    ):
+        return False, None
     return True, output_boxes
+
+
+def output_cache_manifest_path(output_result_file: Path) -> Path:
+    """Return the per-sequence cache manifest path for an output result file."""
+    return output_result_file.with_name(
+        f"{output_result_file.stem}_cache_manifest.json"
+    )
+
+
+def output_cache_manifest_matches(
+    output_result_file: Path,
+    expected_cache_key: str,
+) -> bool:
+    """Return whether an existing output was produced by the same run settings."""
+    manifest_path = output_cache_manifest_path(output_result_file)
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        manifest.get("schema_version") == CACHE_MANIFEST_SCHEMA_VERSION
+        and manifest.get("cache_key") == expected_cache_key
+    )
+
+
+def build_refinement_cache_manifest(
+    refiner: DVSContourRefiner,
+    acceptance_config: EventVOTAcceptanceConfig,
+    *,
+    event_column_order: str,
+    base_boxes: np.ndarray,
+    event_csv: Path,
+) -> dict[str, Any]:
+    """Build the per-sequence cache manifest used to validate resume outputs."""
+    payload: dict[str, Any] = {
+        "schema_version": CACHE_MANIFEST_SCHEMA_VERSION,
+        "event_column_order": event_column_order,
+        "refiner_config": _json_cache_value(asdict(refiner.config)),
+        "acceptance_config": _json_cache_value(asdict(acceptance_config)),
+        "base_result_digest": _array_sha256(base_boxes),
+        "event_csv_digest": _file_sha256(event_csv),
+    }
+    payload["cache_key"] = _cache_key_for_payload(payload)
+    return payload
+
+
+def save_output_cache_manifest(
+    output_result_file: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Write the per-sequence cache manifest next to the output result file."""
+    manifest_path = output_cache_manifest_path(output_result_file)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _cache_key_for_payload(payload: dict[str, Any]) -> str:
+    cache_payload = {
+        key: value for key, value in payload.items() if key != "cache_key"
+    }
+    encoded = json.dumps(
+        cache_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_cache_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_cache_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_json_cache_value(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0.0 else "-inf"
+    return value
+
+
+def _array_sha256(array: np.ndarray) -> str:
+    normalized = np.ascontiguousarray(np.asarray(array, dtype="<f8"))
+    digest = hashlib.sha256()
+    digest.update(str(normalized.shape).encode("ascii"))
+    digest.update(normalized.tobytes())
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(CACHE_CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_eventvot_event_time_span(
@@ -414,22 +526,31 @@ def refine_sequence(
     base_boxes = load_xywh_result_file(base_result_file)
     frame_count = int(base_boxes.shape[0])
     _validate_sequence_frame_count(sequence_dir, sequence_name, frame_count)
+    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
+    cache_manifest = build_refinement_cache_manifest(
+        refiner,
+        acceptance_config,
+        event_column_order=event_column_order,
+        base_boxes=base_boxes,
+        event_csv=event_csv,
+    )
     if skip_existing:
         complete, output_boxes = existing_output_result_is_complete(
             output_result_file,
             base_boxes,
+            expected_cache_key=str(cache_manifest["cache_key"]),
         )
         if complete and output_boxes is not None:
             return summarize_skipped_sequence(
                 sequence_name,
                 sequence_dir,
+                cache_manifest,
                 base_result_file,
                 output_result_file,
                 base_boxes,
                 output_boxes,
             )
 
-    event_csv = find_sequence_event_csv(sequence_dir, sequence_name)
     reset_refiner_state = getattr(refiner, "reset_state", None)
     if reset_refiner_state is not None:
         reset_refiner_state()
@@ -558,6 +679,7 @@ def refine_sequence(
 
     save_xywh_result_file(output_result_file, refined_boxes)
     _save_timing_file(output_result_file, timings)
+    save_output_cache_manifest(output_result_file, cache_manifest)
     fallback_counts = Counter(
         "refined" if frame["fallback_reason"] is None else frame["fallback_reason"]
         for frame in frames
@@ -590,6 +712,8 @@ def refine_sequence(
         "mean_used_event_count": float(np.mean(used_event_counts))
         if used_event_counts
         else 0.0,
+        "cache_key": cache_manifest["cache_key"],
+        "cache_manifest_path": str(output_cache_manifest_path(output_result_file)),
         "total_refinement_seconds": float(np.sum(timings)),
         "frames": frames,
     }
@@ -598,6 +722,7 @@ def refine_sequence(
 def summarize_skipped_sequence(
     sequence_name: str,
     sequence_dir: Path,
+    cache_manifest: dict[str, Any] | None,
     base_result_file: Path,
     output_result_file: Path,
     base_boxes: np.ndarray,
@@ -628,6 +753,8 @@ def summarize_skipped_sequence(
         "mean_used_event_count": 0.0,
         "total_refinement_seconds": float(np.sum(timings)),
         "skipped_existing_output": True,
+        "cache_key": cache_manifest["cache_key"] if cache_manifest is not None else None,
+        "cache_manifest_path": str(output_cache_manifest_path(output_result_file)),
         "frames": [],
     }
 
@@ -1589,6 +1716,7 @@ def _refiner_from_args(args: argparse.Namespace) -> DVSContourRefiner:
         DVSContourRefinerConfig(
             input_bbox_format="xywh",
             output_bbox_format="xywh",
+            event_crop_coordinate_mode="half_open",
             image_width=args.image_width,
             image_height=args.image_height,
             search_expansion_factor=args.search_expansion_factor,

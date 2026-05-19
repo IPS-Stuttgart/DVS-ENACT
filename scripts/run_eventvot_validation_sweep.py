@@ -999,6 +999,7 @@ def make_refiner(
         DVSContourRefinerConfig(
             input_bbox_format="xywh",
             output_bbox_format="xywh",
+            event_crop_coordinate_mode="half_open",
             image_width=args.image_width,
             image_height=args.image_height,
             search_expansion_factor=float(config["search_expansion_factor"]),

@@ -32,6 +32,14 @@ class TestDVSContourRefiner(unittest.TestCase):
             p=np.array([1, 0, 1, 0], dtype=np.int8),
         )
 
+    def _pixel_extent_events(self):
+        return EventBatch(
+            ts=np.array([0, 1, 2], dtype=np.int64),
+            x=np.array([10, 19, 20], dtype=np.int32),
+            y=np.array([10, 19, 20], dtype=np.int32),
+            p=np.array([1, 1, 1], dtype=np.int8),
+        )
+
     def test_bbox_helpers_support_xywh_and_expansion(self):
         bbox = refiner_bbox_to_dict((20.0, 30.0, 30.0, 40.0), bbox_format="xywh")
 
@@ -51,21 +59,33 @@ class TestDVSContourRefiner(unittest.TestCase):
         self.assertEqual(cropped.count, 3)
         np.testing.assert_array_equal(cropped.x, np.array([9, 10, 15]))
 
-    def test_crop_events_uses_half_open_right_and_bottom_edges(self):
-        events = EventBatch(
-            ts=np.array([0, 1, 2, 3], dtype=np.int64),
-            x=np.array([10, 19, 20, 15], dtype=np.int32),
-            y=np.array([10, 15, 15, 20], dtype=np.int32),
-            p=np.array([1, 1, 1, 1], dtype=np.int8),
-        )
-
+    def test_crop_events_supports_half_open_pixel_extents(self):
         cropped = refiner_crop_events_to_bbox(
-            events,
+            self._pixel_extent_events(),
             {"x": 10.0, "y": 10.0, "width": 10.0, "height": 10.0},
+            include_upper_bounds=False,
         )
 
         self.assertEqual(cropped.count, 2)
         np.testing.assert_array_equal(cropped.x, np.array([10, 19]))
+
+    def test_eventvot_xywh_refiner_uses_half_open_event_crop(self):
+        refiner = DVSContourRefiner(
+            DVSContourRefinerConfig(
+                input_bbox_format="xywh",
+                output_bbox_format="xywh",
+                event_crop_coordinate_mode="half_open",
+                search_expansion_factor=1.0,
+                min_events=99,
+            )
+        )
+
+        result = refiner.refine(
+            (10.0, 10.0, 10.0, 10.0),
+            self._pixel_extent_events(),
+        )
+
+        self.assertEqual(result.event_count, 2)
 
     def test_boundary_event_selection_prefers_contour_events(self):
         events = EventBatch(
@@ -148,7 +168,7 @@ class TestDVSContourRefiner(unittest.TestCase):
         )
 
         self.assertIsNone(result.fallback_reason)
-        self.assertEqual(result.used_event_count, 3)
+        self.assertEqual(result.used_event_count, 4)
         self.assertEqual(len(result.as_xyxy()), 4)
         self.assertIsNotNone(result.mean_event_activity)
 

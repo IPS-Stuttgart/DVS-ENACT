@@ -72,6 +72,39 @@ def _write_eventvot_fixture_sequence(
     )
 
 
+def _run_fake_refinement(
+    module,
+    tmp_path: Path,
+    base_results: Path,
+    output_results: Path,
+    result_boxes: list[list[float]],
+    **config_kwargs,
+) -> dict:
+    return module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FakeRefiner(
+            module,
+            [_FakeResult(box) for box in result_boxes],
+            **config_kwargs,
+        ),
+    )
+
+
+def _assert_recording_result(
+    output_results: Path,
+    expected_rows: list[list[float]],
+) -> None:
+    np.testing.assert_allclose(
+        np.loadtxt(output_results / "recording_0001.txt"),
+        np.asarray(expected_rows, dtype=float),
+    )
+
+
 def test_eventvot_refinement_writes_xywh_results_and_diagnostics(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
@@ -174,11 +207,23 @@ def test_eventvot_refinement_writes_official_tracker_result_layout(tmp_path):
 def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
-    output_results.mkdir()
-    (output_results / "recording_0001.txt").write_text(
-        "8\t8\t10\t10\n9.5\t8\t10\t10\n10\t8\t10\t10\n",
-        encoding="utf-8",
+    first_refiner = _FakeRefiner(
+        module,
+        [
+            _FakeResult([9.5, 8.0, 10.0, 10.0]),
+            _FakeResult([10.0, 8.0, 10.0, 10.0]),
+        ],
     )
+    module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=first_refiner,
+    )
+    assert (output_results / "recording_0001_cache_manifest.json").exists()
 
     payload = module.run(
         module.EventVOTRefinementOptions(
@@ -198,6 +243,75 @@ def test_eventvot_refinement_skips_complete_existing_result(tmp_path):
     assert sequence["accepted_refinement_count"] == 1
     assert sequence["frames"] == []
     assert (output_results / "recording_0001_time.txt").exists()
+
+
+def test_eventvot_refinement_recomputes_unmanifested_existing_result(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    output_results.mkdir()
+    (output_results / "recording_0001.txt").write_text(
+        "8\t8\t10\t10\n99\t99\t10\t10\n10\t8\t10\t10\n",
+        encoding="utf-8",
+    )
+    payload = _run_fake_refinement(
+        module,
+        tmp_path,
+        base_results,
+        output_results,
+        [[9.25, 8.0, 10.0, 10.0], [10.0, 8.0, 10.0, 10.0]],
+    )
+
+    _assert_recording_result(
+        output_results,
+        [
+            [8.0, 8.0, 10.0, 10.0],
+            [9.25, 8.0, 10.0, 10.0],
+            [10.0, 8.0, 10.0, 10.0],
+        ],
+    )
+    assert payload["summary"]["skipped_existing_output_count"] == 0
+    assert (output_results / "recording_0001_cache_manifest.json").exists()
+
+
+def test_eventvot_refinement_recomputes_when_resume_config_changes(tmp_path):
+    module = _load_module()
+    _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
+    module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FakeRefiner(
+            module,
+            [
+                _FakeResult([9.25, 8.0, 10.0, 10.0]),
+                _FakeResult([10.0, 8.0, 10.0, 10.0]),
+            ],
+        ),
+    )
+
+    payload = module.run(
+        module.EventVOTRefinementOptions(
+            eventvot_root=tmp_path,
+            base_results=base_results,
+            output_results=output_results,
+            split="test",
+        ),
+        refiner=_FakeRefiner(
+            module,
+            [
+                _FakeResult([9.75, 8.0, 10.0, 10.0]),
+                _FakeResult([10.0, 8.0, 10.0, 10.0]),
+            ],
+            max_events=64,
+        ),
+    )
+
+    refined = np.loadtxt(output_results / "recording_0001.txt")
+    np.testing.assert_allclose(refined[1], np.array([9.75, 8.0, 10.0, 10.0]))
+    assert payload["summary"]["skipped_existing_output_count"] == 0
 
 
 def test_eventvot_refinement_selects_sequence_chunk(tmp_path):
@@ -272,34 +386,21 @@ def test_eventvot_sequence_selection_supports_lists_files_and_shards(tmp_path):
 def test_eventvot_refinement_uses_conservative_acceptance_gates(tmp_path):
     module = _load_module()
     _split_root, base_results, output_results = _write_eventvot_fixture(tmp_path)
-    refiner = _FakeRefiner(
+    payload = _run_fake_refinement(
         module,
+        tmp_path,
+        base_results,
+        output_results,
+        [[9.25, 8.0, 10.0, 10.0], [40.0, 8.0, 10.0, 10.0]],
+    )
+
+    _assert_recording_result(
+        output_results,
         [
-            _FakeResult([9.25, 8.0, 10.0, 10.0]),
-            _FakeResult([40.0, 8.0, 10.0, 10.0]),
+            [8.0, 8.0, 10.0, 10.0],
+            [9.25, 8.0, 10.0, 10.0],
+            [10.0, 8.0, 10.0, 10.0],
         ],
-    )
-
-    payload = module.run(
-        module.EventVOTRefinementOptions(
-            eventvot_root=tmp_path,
-            base_results=base_results,
-            output_results=output_results,
-            split="test",
-        ),
-        refiner=refiner,
-    )
-
-    refined = np.loadtxt(output_results / "recording_0001.txt")
-    np.testing.assert_allclose(
-        refined,
-        np.array(
-            [
-                [8.0, 8.0, 10.0, 10.0],
-                [9.25, 8.0, 10.0, 10.0],
-                [10.0, 8.0, 10.0, 10.0],
-            ]
-        ),
     )
     summary = payload["summary"]
     assert summary["accepted_refinement_count"] == 1
@@ -568,10 +669,11 @@ def test_eventvot_refinement_help_runs_as_script():
 
 
 class _FakeRefiner:
-    def __init__(self, module, results):
+    def __init__(self, module, results, **config_kwargs):
         self.config = module.DVSContourRefinerConfig(
             input_bbox_format="xywh",
             output_bbox_format="xywh",
+            **config_kwargs,
         )
         self._results = list(results)
 
