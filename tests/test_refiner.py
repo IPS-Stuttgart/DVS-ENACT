@@ -51,6 +51,22 @@ class TestDVSContourRefiner(unittest.TestCase):
         self.assertEqual(cropped.count, 3)
         np.testing.assert_array_equal(cropped.x, np.array([9, 10, 15]))
 
+    def test_crop_events_uses_half_open_right_and_bottom_edges(self):
+        events = EventBatch(
+            ts=np.array([0, 1, 2, 3], dtype=np.int64),
+            x=np.array([10, 19, 20, 15], dtype=np.int32),
+            y=np.array([10, 15, 15, 20], dtype=np.int32),
+            p=np.array([1, 1, 1, 1], dtype=np.int8),
+        )
+
+        cropped = refiner_crop_events_to_bbox(
+            events,
+            {"x": 10.0, "y": 10.0, "width": 10.0, "height": 10.0},
+        )
+
+        self.assertEqual(cropped.count, 2)
+        np.testing.assert_array_equal(cropped.x, np.array([10, 19]))
+
     def test_boundary_event_selection_prefers_contour_events(self):
         events = EventBatch(
             ts=np.array([0, 1, 2, 3, 4], dtype=np.int64),
@@ -132,7 +148,7 @@ class TestDVSContourRefiner(unittest.TestCase):
         )
 
         self.assertIsNone(result.fallback_reason)
-        self.assertEqual(result.used_event_count, 4)
+        self.assertEqual(result.used_event_count, 3)
         self.assertEqual(len(result.as_xyxy()), 4)
         self.assertIsNotNone(result.mean_event_activity)
 

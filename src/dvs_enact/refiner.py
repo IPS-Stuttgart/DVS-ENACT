@@ -454,15 +454,22 @@ def clip_bbox(
 
 
 def crop_events_to_bbox(events: EventBatch, bbox: BBoxInput) -> EventBatch:
-    """Return events inside a bbox."""
+    """Return events inside a bbox.
+
+    ``bbox_to_dict`` represents boxes as continuous extents, i.e. ``xywh`` maps
+    to ``[x, x + width) x [y, y + height)``. For integer event coordinates this
+    is equivalent to the EventVOT evaluator's inclusive ``x + width - 1`` /
+    ``y + height - 1`` convention and avoids selecting one extra right/bottom
+    pixel column.
+    """
     normalized = bbox_to_dict(bbox)
     if events.count == 0:
         return empty_event_batch()
     mask = (
         (events.x >= normalized["x_min"])
-        & (events.x <= normalized["x_max"])
+        & (events.x < normalized["x_max"])
         & (events.y >= normalized["y_min"])
-        & (events.y <= normalized["y_max"])
+        & (events.y < normalized["y_max"])
     )
     return EventBatch(
         ts=events.ts[mask],
