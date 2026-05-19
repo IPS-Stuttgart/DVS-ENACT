@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,6 +38,30 @@ def test_center_only_projection_keeps_candidate_size(monkeypatch):
     )
 
     np.testing.assert_allclose(projected, np.array([30.0, 20.0, 30.0, 40.0]))
+
+
+def test_event_centroid_center_projection_uses_median_event_center(monkeypatch):
+    module = _load_module(monkeypatch)
+    candidate = np.array([10.0, 20.0, 30.0, 40.0])
+    events = SimpleNamespace(
+        count=3,
+        x=np.array([30.0, 40.0, 1000.0]),
+        y=np.array([50.0, 70.0, 1000.0]),
+    )
+
+    centroid_box = module.event_centroid_center_box(
+        candidate,
+        events,
+        {"x_min": 0.0, "x_max": 100.0, "y_min": 0.0, "y_max": 100.0},
+    )
+    projected = module.project_refinement_output(
+        candidate,
+        np.array([99.0, 99.0, 10.0, 10.0]),
+        refinement_mode="event-centroid-center",
+        event_centroid_xywh=centroid_box,
+    )
+
+    np.testing.assert_allclose(projected, np.array([20.0, 40.0, 30.0, 40.0]))
 
 
 def test_size_only_projection_keeps_candidate_center(monkeypatch):
@@ -286,6 +311,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
 
     assert "--refinement-mode" in help_text
     assert "center-only" in help_text
+    assert "event-centroid-center" in help_text
     assert "size-only" in help_text
     assert "width-only" in help_text
     assert "height-only" in help_text
