@@ -57,6 +57,8 @@ PROJECTION_GRID_KEYS = (
     "projection_no_clip",
     "projection_size_smoothing",
     "projection_size_deadband_ratio",
+    "projection_center_clamp_ratio",
+    "projection_center_deadband_ratio",
     "projection_confidence_field",
     "projection_confidence_floor",
     "projection_confidence_ceiling",
@@ -99,6 +101,8 @@ OPTIONAL_FLOAT_GRID_KEYS = {
     "projection_height_blend",
     "projection_size_smoothing",
     "projection_size_deadband_ratio",
+    "projection_center_clamp_ratio",
+    "projection_center_deadband_ratio",
     "projection_confidence_floor",
     "projection_confidence_ceiling",
     "projection_min_raw_width_ratio",
@@ -246,6 +250,24 @@ def add_projection_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         default=("none",),
         help=(
             "Optional per-axis size deadband values relative to base width/height. "
+            "Use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-clamp-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional center-shift clamp values relative to base-box diagonal. "
+            "Use 'none' to disable."
+        ),
+    )
+    parser.add_argument(
+        "--projection-center-deadband-ratio",
+        nargs="+",
+        default=("none",),
+        help=(
+            "Optional center-shift deadband values relative to base-box diagonal. "
             "Use 'none' to disable."
         ),
     )
@@ -524,6 +546,18 @@ def projection_value_lists_from_args(args: argparse.Namespace) -> dict[str, list
             args.projection_size_deadband_ratio,
             cast=float,
             argument_name="--projection-size-deadband-ratio",
+            allow_none=True,
+        ),
+        "projection_center_clamp_ratio": parse_sweep_values(
+            args.projection_center_clamp_ratio,
+            cast=float,
+            argument_name="--projection-center-clamp-ratio",
+            allow_none=True,
+        ),
+        "projection_center_deadband_ratio": parse_sweep_values(
+            args.projection_center_deadband_ratio,
+            cast=float,
+            argument_name="--projection-center-deadband-ratio",
             allow_none=True,
         ),
         "projection_confidence_field": parse_projection_confidence_field_values(
@@ -829,6 +863,8 @@ def make_refiner(
         config["refinement_mode"] == "box"
         and config["projection_size_smoothing"] is None
         and config["projection_size_deadband_ratio"] is None
+        and config["projection_center_clamp_ratio"] is None
+        and config["projection_center_deadband_ratio"] is None
         and config["projection_confidence_field"] is None
     ):
         return refiner
@@ -840,6 +876,8 @@ def make_refiner(
         projection_no_clip=bool(config["projection_no_clip"]),
         projection_size_smoothing=config["projection_size_smoothing"],
         projection_size_deadband_ratio=config["projection_size_deadband_ratio"],
+        projection_center_clamp_ratio=config["projection_center_clamp_ratio"],
+        projection_center_deadband_ratio=config["projection_center_deadband_ratio"],
         projection_confidence_field=config["projection_confidence_field"],
         projection_confidence_floor=config["projection_confidence_floor"],
         projection_confidence_ceiling=config["projection_confidence_ceiling"],
