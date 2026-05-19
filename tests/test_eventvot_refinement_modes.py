@@ -268,6 +268,33 @@ def test_box_size_deadband_preserves_projected_center(monkeypatch):
     np.testing.assert_allclose(projected, np.array([21.0, 30.5, 100.0, 50.0]))
 
 
+def test_center_smoothing_blends_toward_previous_projected_center(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.project_refinement_output(
+        np.array([0.0, 0.0, 10.0, 10.0]),
+        np.array([10.0, 0.0, 10.0, 10.0]),
+        refinement_mode="box",
+        previous_projected_center=np.array([5.0, 5.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([5.0, 0.0, 10.0, 10.0]))
+
+
+def test_center_smoothing_does_not_move_size_only_projection(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    projected = module.smooth_projected_center(
+        np.array([0.0, 10.0, 50.0, 60.0]),
+        refinement_mode="size-only",
+        previous_projected_center=np.array([100.0, 100.0]),
+        projection_center_smoothing=0.5,
+    )
+
+    np.testing.assert_allclose(projected, np.array([0.0, 10.0, 50.0, 60.0]))
+
+
 def test_center_clamp_caps_projected_center_shift(monkeypatch):
     module = _load_module(monkeypatch)
 
@@ -436,6 +463,7 @@ def test_help_exposes_refinement_mode(monkeypatch):
     assert "--projection-no-clip" in help_text
     assert "--projection-size-smoothing" in help_text
     assert "--projection-size-deadband-ratio" in help_text
+    assert "--projection-center-smoothing" in help_text
     assert "--projection-center-clamp-ratio" in help_text
     assert "--projection-center-deadband-ratio" in help_text
     assert "--projection-confidence-field" in help_text

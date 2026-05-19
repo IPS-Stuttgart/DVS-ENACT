@@ -418,6 +418,8 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
         "0.50",
         "--projection-size-deadband-ratio",
         "0.05",
+        "--projection-center-smoothing",
+        "0.30",
         "--projection-center-clamp-ratio",
         "0.04",
         "--projection-center-deadband-ratio",
@@ -438,6 +440,7 @@ def test_validation_sweep_make_refiner_wraps_projection_mode(tmp_path, monkeypat
     assert refiner.projection_height_blend == 0.10
     assert refiner.projection_size_smoothing == 0.50
     assert refiner.projection_size_deadband_ratio == 0.05
+    assert refiner.projection_center_smoothing == 0.30
     assert refiner.projection_center_clamp_ratio == 0.04
     assert refiner.projection_center_deadband_ratio == 0.02
     assert refiner.projection_confidence_field == "mean_event_activity"
